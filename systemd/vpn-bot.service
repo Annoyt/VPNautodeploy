@@ -1,0 +1,17 @@
+[Unit]
+Description=VPN Telegram Bot
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/vpn-bot
+Environment=PYTHONPATH=/opt/vpn-bot
+Environment=DB_PATH=/etc/cascade-vpn/bot.db
+Environment=XUI_DB_PATH=/opt/3x-ui/db/x-ui.db
+ExecStart=/opt/vpn-bot/venv/bin/python -m bot.main
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

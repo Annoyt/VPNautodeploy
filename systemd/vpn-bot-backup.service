@@ -1,0 +1,7 @@
+[Unit]
+Description=VPN Bot Daily Backup
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/opt/vpn-bot/scripts/backup.sh

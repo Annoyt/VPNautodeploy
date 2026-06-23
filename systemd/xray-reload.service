@@ -1,0 +1,18 @@
+[Unit]
+Description=Host-side sidecar for graceful 3x-ui / Xray reloads
+After=docker.service
+Wants=docker.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root
+EnvironmentFile=-/etc/xray-reload.env
+ExecStart=/usr/bin/python3 /usr/local/bin/xray_reload.py
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,50 @@
+wing: vpn_bot_refactor
+rooms:
+- name: documentation
+  description: Files from docs/
+  keywords:
+  - documentation
+  - docs
+- name: systemd
+  description: Files from systemd/
+  keywords:
+  - systemd
+  - systemd
+- name: agents
+  description: Files from agents/
+  keywords:
+  - agents
+  - agents
+- name: scratch
+  description: Files from scratch/
+  keywords:
+  - scratch
+  - scratch
+- name: bot
+  description: Files from bot/
+  keywords:
+  - bot
+  - bot
+- name: scripts
+  description: Files from scripts/
+  keywords:
+  - scripts
+  - scripts
+- name: testing
+  description: Files from tests/
+  keywords:
+  - testing
+  - tests
+- name: backend
+  description: Files from services/
+  keywords:
+  - backend
+  - services
+- name: configuration
+  description: Files from config/
+  keywords:
+  - configuration
+  - config
+- name: general
+  description: Files that don't fit other rooms
+  keywords: []
