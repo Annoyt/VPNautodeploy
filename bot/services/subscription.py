@@ -93,9 +93,13 @@ class SubscriptionService:
         ``enabled_protocols`` is the tier-filtered cascade order from
         ``MyKeyAnswerHandler.get_cascade_order(db, user)`` — same set
         the user gets via /mykey rotation, but all bundled at once.
+
+        For ``lang='en'`` users, adds a RU-exit outbound so they can
+        access RU-geo-blocked content (VK/Yandex/etc) from abroad.
         """
         outbounds: List[dict] = []
         proxy_tags: List[str] = []
+        lang = (getattr(user, 'lang', None) or 'ru') if user else 'ru'
 
         for proto in enabled_protocols:
             ob = self._build_outbound(proto, user)
@@ -140,6 +144,16 @@ class SubscriptionService:
         outbounds.append({'type': 'block', 'tag': 'block'})
         outbounds.append({'type': 'dns', 'tag': 'dns-out'})
 
+        # RU-exit outbound for lang='en' users — allows accessing RU-geo-blocked
+        # content (VK/Yandex/etc) from abroad. Uses the same Reality entry as
+        # the primary cascade, but as an exit instead of transit.
+        ru_exit_tag = None
+        if lang == 'en':
+            ru_exit = self._build_ru_exit(user)
+            if ru_exit:
+                outbounds.append(ru_exit)
+                ru_exit_tag = ru_exit['tag']
+
         return {
             'log': {'level': 'warn'},
             'dns': {
@@ -168,7 +182,7 @@ class SubscriptionService:
             'outbounds': outbounds,
             'route': {
                 'rule_set': self._build_rule_sets(),
-                'rules': self._build_route_rules(),
+                'rules': self._build_route_rules(lang, ru_exit_tag),
                 'final': 'proxy',
                 'auto_detect_interface': True,
             },
@@ -238,34 +252,53 @@ class SubscriptionService:
             })
         return rs
 
-    def _build_route_rules(self) -> list:
+    def _build_route_rules(self, lang: str = 'ru', ru_exit_tag: str = None) -> list:
         """Route table evaluated top-to-bottom; first match wins.
 
         Order rationale:
         1. DNS protocol packets → dedicated dns outbound (sing-box requirement).
         2. clash_mode user overrides — explicit Direct/Global from the
            Hiddify mode switch wins over the auto rules below.
-        3. Always-proxy allow-list (YT/Meta/X/GitHub/etc.) — these have
+        3. For lang='en': RU-geo content (VK/Yandex/etc) → ru-exit so foreign
+           users can access RU-geo-blocked services from abroad.
+        4. Always-proxy allow-list (YT/Meta/X/GitHub/etc.) — these have
            to tunnel even when their CDN serves from a Russian PoP.
-        4. RU geoip + geosite bypass — VK/Yandex/banks/госуслуги direct.
-        5. Final ``proxy`` — anything not matched defaults to tunneling,
-           matching the user's intent of installing a VPN.
+        5. RU geoip + geosite bypass — VK/Yandex/banks/госуслуги direct (for RU users).
+        6. Final ``proxy`` — anything not matched defaults to tunneling.
+
+        Args:
+            lang: User's language ('en' or 'ru'). EN users get RU-exit routing.
+            ru_exit_tag: Tag of the RU-exit outbound (if lang='en' and it exists).
         """
-        return [
+        rules = [
             {'protocol': 'dns', 'outbound': 'dns-out'},
             {'clash_mode': 'Direct', 'outbound': 'direct'},
             {'clash_mode': 'Global', 'outbound': 'proxy'},
             # max.ru — direct (no VPN, no blocking).
             {'domain_suffix': ['max.ru'], 'outbound': 'direct'},
-            {
-                'rule_set': list(self._PROXY_RULE_SET_TAGS),
-                'outbound': 'proxy',
-            },
-            {
+        ]
+
+        # For EN users: RU-geo content → RU-exit (so they can access VK/Yandex from abroad)
+        if lang == 'en' and ru_exit_tag:
+            rules.append({
+                'rule_set': ['geosite-category-ru', 'geoip-ru'],
+                'outbound': ru_exit_tag,
+            })
+
+        # Always-proxy allow-list (YT/Meta/etc)
+        rules.append({
+            'rule_set': list(self._PROXY_RULE_SET_TAGS),
+            'outbound': 'proxy',
+        })
+
+        # For RU users: domestic traffic direct (skip if EN user already has RU-exit rule)
+        if lang != 'en' or not ru_exit_tag:
+            rules.append({
                 'rule_set': list(self._DIRECT_RULE_SET_TAGS),
                 'outbound': 'direct',
-            },
-        ]
+            })
+
+        return rules
 
     # ---------- Per-protocol outbound builders ----------
 
@@ -452,3 +485,41 @@ class SubscriptionService:
                 },
             },
         ]
+
+    def _build_ru_exit(self, user) -> Optional[dict]:
+        """RU-exit Reality outbound for EN users accessing RU-geo content.
+
+        Uses the same entry as the primary cascade (ENTRY_NODE_IP) but
+        as an exit — traffic from foreign users exits to RU sites with
+        a Russian IP, bypassing geo-blocks on VK/Yandex/etc.
+        """
+        cfg = self.config
+        host = cfg.ENTRY_NODE_IP or ''
+        pbk = cfg.REALITY_PUBLIC_KEY or ''
+        sni = cfg.SNI_VALUE or 'www.microsoft.com'
+        sid = getattr(cfg, 'SID_VALUE', None)
+        port = int(getattr(cfg, 'ENTRY_NODE_PORT', 443) or 443)
+        if not (host and pbk and sni):
+            return None
+        uuid = getattr(user, 'uuid', None)
+        if not uuid:
+            return None
+        reality_cfg = {'enabled': True, 'public_key': pbk}
+        if sid is not None:
+            reality_cfg['short_id'] = sid
+        return {
+            'type': 'vless',
+            'tag': 'ru-exit',
+            'server': host,
+            'server_port': port,
+            'uuid': uuid,
+            'flow': 'xtls-rprx-vision',
+            'packet_encoding': 'xudp',
+            'tls': {
+                'enabled': True,
+                'server_name': sni,
+                'utls': {'enabled': True, 'fingerprint': 'chrome'},
+                'reality': reality_cfg,
+                **self._TLS_FRAGMENT,
+            },
+        }
