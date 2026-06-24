@@ -177,7 +177,9 @@ class SubscriptionService:
                     # so user's ISP DNS treats them as native traffic.
                     {'rule_set': self._DIRECT_RULE_SET_TAGS, 'server': 'local'},
                 ],
-                'final': 'remote',
+                # Default to local DNS to avoid foreign-DNS detection
+                # by services like Yandex that treat non-RU DNS as VPN.
+                'final': 'local',
             },
             'outbounds': outbounds,
             'route': {
