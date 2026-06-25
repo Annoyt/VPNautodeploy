@@ -165,8 +165,7 @@ class AdminOpsMixin(AdminHandlerBase):
             xui = self.bot.services.get('xui') if hasattr(self.bot, 'services') else None
             panel_emails: set = set()
             if xui and hasattr(xui, 'api') and xui.api:
-                import asyncio
-                panel_emails = set(asyncio.run(xui.api.get_online_clients()))
+                panel_emails = set(xui.api.get_online_clients_sync())
         except Exception as e:
             panel_emails = set()
             logger.warning(f"/onlines: xui api failed: {e}")

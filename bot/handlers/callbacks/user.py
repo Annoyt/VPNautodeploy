@@ -1009,6 +1009,40 @@ class SupportRequestHandler(BaseCallbackHandler):
         logger.info(f"User {chat_id} opened support ticket")
 
 
+class EmailPromptHandler(BaseCallbackHandler):
+    """Handle email prompt callback - user clicked 'Add email' button."""
+
+    CALLBACK_DATA = 'add_email_prompt'
+
+    def can_handle(self, callback_data: str) -> bool:
+        return callback_data == self.CALLBACK_DATA
+
+    def handle(self, update: dict, chat_id: str, user_id: str, **kwargs) -> None:
+        """Prompt user to enter their email."""
+        user = self.db.get_user(chat_id)
+        lang = user.lang if user else 'ru'
+
+        if lang == 'en':
+            text = (
+                "📧 <b>Add your email</b>\n\n"
+                "We'll use it to send you a backup key if your VPN gets blocked.\n\n"
+                "Use the command below:\n"
+                "<code>/setemail your@email.com</code>\n\n"
+                "Example: /setemail john@gmail.com"
+            )
+        else:
+            text = (
+                "📧 <b>Укажи свой email</b>\n\n"
+                "Используем его для отправки резервного ключа если VPN заблокируют.\n\n"
+                "Используй команду ниже:\n"
+                "<code>/setemail твой@email.com</code>\n\n"
+                "Пример: /setemail ivan@gmail.com"
+            )
+
+        self.bot.send_message(chat_id=chat_id, text=text, parse_mode='HTML')
+        logger.info(f"User {chat_id} requested email prompt")
+
+
 class StatsRequestHandler(BaseCallbackHandler):
     """Handle stats request callback."""
     

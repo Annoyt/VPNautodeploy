@@ -25,10 +25,19 @@ class AdminHandler(AdminUsersMixin, AdminBroadcastMixin, AdminStatsMixin, AdminO
       set_limit / grant_100gb / approve_payment
     - AdminBroadcastMixin: /broadcast preview/confirm/cancel
     - AdminStatsMixin: /stats, /users, /users_all, /pending, /backup
-    - AdminOpsMixin: /status, /whoami, /find, /recent, /repair_stuck,
+    - AdminOpsMixin: /status, /whoami, /onlines, /find, /recent, /repair_stuck,
       /topics, /quota, /expire
     """
-    pass
+
+    # Admin command routing table (inherited from AdminHandlerBase via mixins)
+    ADMIN_COMMANDS = AdminHandlerBase.ADMIN_COMMANDS
+
+    # Instance-level storage for pending broadcasts (admin_id -> message_text)
+    _pending_broadcasts: dict = {}
+
+    def __init__(self, bot, db, config):
+        super().__init__(bot, db, config)
+        self._pending_broadcasts = {}
 
 
 __all__ = [

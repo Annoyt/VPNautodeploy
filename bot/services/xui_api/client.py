@@ -154,7 +154,50 @@ class XUIAPIClient:
         except Exception as e:
             logger.warning(f"get_online_clients error: {e}")
             return []
-    
+
+    def get_online_clients_sync(self) -> list:
+        """Sync wrapper for get_online_clients.
+
+        Safely handles both sync context (no running loop) and async context
+        (inside aiohttp/web server). Uses a separate thread with a new loop
+        when called from an async context to avoid "Event loop is closed" errors.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+            # We're inside an async context - run in a separate thread with new loop
+            import concurrent.futures
+            import threading
+
+            result_container = []
+            exception_container = []
+
+            def run_in_new_loop():
+                try:
+                    new_loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(new_loop)
+                    try:
+                        result = new_loop.run_until_complete(self.get_online_clients())
+                        result_container.append(result)
+                    finally:
+                        new_loop.close()
+                except Exception as e:
+                    exception_container.append(e)
+
+            thread = threading.Thread(target=run_in_new_loop, daemon=True)
+            thread.start()
+            thread.join(timeout=5.0)  # 5 second timeout
+
+            if exception_container:
+                raise exception_container[0]
+            if not result_container:
+                logger.warning("get_online_clients_sync: timeout or no result")
+                return []
+            return result_container[0]
+
+        except RuntimeError:
+            # No running loop - safe to use asyncio.run()
+            return asyncio.run(self.get_online_clients())
+
     async def _authenticated_request(self, method: str, url: str, **kwargs) -> aiohttp.ClientResponse:
         """Make authenticated request with auto-login on 401 (H-03 fix).
         

@@ -17,6 +17,7 @@ from bot.handlers.callbacks.user import (
     MyKeyAnswerHandler,
     TryAltProtocolHandler,
     SupportRequestHandler,
+    EmailPromptHandler,
     StatsRequestHandler,
     FullVersionHandler,
     LanguageSetHandler,
@@ -76,6 +77,7 @@ class CallbackDispatcher:
         self.handlers.append(MyKeyAnswerHandler(self.bot, self.db, self.config))
         self.handlers.append(TryAltProtocolHandler(self.bot, self.db, self.config))
         self.handlers.append(SupportRequestHandler(self.bot, self.db, self.config))
+        self.handlers.append(EmailPromptHandler(self.bot, self.db, self.config))
         self.handlers.append(StatsRequestHandler(self.bot, self.db, self.config))
         self.handlers.append(FullVersionHandler(self.bot, self.db, self.config))
         self.handlers.append(LanguageSetHandler(self.bot, self.db, self.config))
