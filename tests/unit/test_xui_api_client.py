@@ -3,6 +3,7 @@
 Tests for H-03 fix: Auto-login retry on 401.
 """
 
+import asyncio
 import pytest
 from unittest.mock import AsyncMock, Mock, patch, MagicMock
 import aiohttp
@@ -280,3 +281,234 @@ class TestXUIAPIClientReAuth:
                 mock_login.assert_called_once()
                 # Response should still be 401
                 assert response.status == 401
+
+
+class TestXUIClientConfig:
+    """Tests for XUIClientConfig dataclass."""
+
+    def test_config_repr_hides_password(self):
+        """repr() should not expose password."""
+        config = XUIClientConfig(password="supersecret")
+        repr_str = repr(config)
+        assert "supersecret" not in repr_str
+        assert "***" in repr_str
+
+    def test_config_defaults(self):
+        """Default configuration values."""
+        config = XUIClientConfig()
+        assert config.base_url == "http://127.0.0.1:2026"
+        assert config.username == "admin"
+        assert config.password == "admin"
+
+
+class TestGetOnlineClients:
+    """Tests for get_online_clients method."""
+
+    @pytest.fixture
+    def client(self):
+        config = XUIClientConfig(base_url="http://test:2026")
+        return XUIAPIClient(config)
+
+    def _create_async_context_mock(self, response):
+        """Helper to create an async context manager mock."""
+        cm = MagicMock()
+        cm.__aenter__ = AsyncMock(return_value=response)
+        cm.__aexit__ = AsyncMock(return_value=False)
+        return cm
+
+    @pytest.mark.asyncio
+    async def test_get_online_clients_success(self, client):
+        """Successful fetch of online clients."""
+        client._csrf_token = "token123"
+        mock_response = MagicMock()
+        mock_response.status = 200
+        mock_response.json = AsyncMock(return_value={
+            "success": True,
+            "obj": ["user1@example.com", "user2@example.com"]
+        })
+
+        mock_session = MagicMock()
+        mock_session.post = MagicMock(return_value=self._create_async_context_mock(mock_response))
+
+        with patch.object(client, '_get_session', return_value=mock_session):
+            result = await client.get_online_clients()
+            assert result == ["user1@example.com", "user2@example.com"]
+
+    @pytest.mark.asyncio
+    async def test_get_online_clients_no_csrf_triggers_login(self, client):
+        """No CSRF token triggers lazy login."""
+        client._csrf_token = None
+        with patch.object(client, 'login', return_value=False):
+            result = await client.get_online_clients()
+            assert result == []
+
+    @pytest.mark.asyncio
+    async def test_get_online_clients_filters_non_strings(self, client):
+        """Filters out non-string items from obj array."""
+        client._csrf_token = "token"
+        mock_response = MagicMock()
+        mock_response.status = 200
+        mock_response.json = AsyncMock(return_value={
+            "success": True,
+            "obj": ["valid@example.com", 123, None, b"bytes@example.com"]
+        })
+
+        mock_session = MagicMock()
+        mock_session.post = MagicMock(return_value=self._create_async_context_mock(mock_response))
+
+        with patch.object(client, '_get_session', return_value=mock_session):
+            result = await client.get_online_clients()
+            # Should filter to strings only
+            assert "valid@example.com" in result
+            assert 123 not in result
+            # bytes are converted to str(b'...') format
+            assert "bytes@example.com" in result or "b'bytes@example.com'" in result
+
+
+class TestGetOnlineClientsSync:
+    """Tests for get_online_clients_sync wrapper."""
+
+    @pytest.fixture
+    def client(self):
+        config = XUIClientConfig(base_url="http://test:2026")
+        return XUIAPIClient(config)
+
+    def test_sync_no_running_loop(self, client):
+        """Called from sync context (no running loop)."""
+        with patch('asyncio.run') as mock_run:
+            mock_run.return_value = ["user@example.com"]
+            result = client.get_online_clients_sync()
+            assert result == ["user@example.com"]
+            mock_run.assert_called_once()
+
+    def test_sync_thread_timeout(self, client):
+        """Thread execution times out."""
+        with patch('asyncio.get_running_loop') as mock_get_loop:
+            mock_get_loop.return_value = MagicMock()
+            with patch('threading.Thread') as mock_thread_cls:
+                mock_thread = MagicMock()
+                mock_thread.start = Mock()
+                mock_thread.join = Mock()  # Doesn't return (timeout)
+                mock_thread_cls.return_value = mock_thread
+
+                result = client.get_online_clients_sync()
+                # Should return empty on timeout
+                assert result == []
+
+
+class TestAddClient:
+    """Tests for add_client operation."""
+
+    @pytest.fixture
+    def client(self):
+        config = XUIClientConfig(base_url="http://test:2026")
+        return XUIAPIClient(config)
+
+    def _create_async_context_mock(self, response):
+        """Helper to create an async context manager mock."""
+        cm = MagicMock()
+        cm.__aenter__ = AsyncMock(return_value=response)
+        cm.__aexit__ = AsyncMock(return_value=False)
+        return cm
+
+    @pytest.mark.asyncio
+    async def test_add_client_success(self, client):
+        """Successfully add a client."""
+        mock_response = MagicMock()
+        mock_response.status = 200
+        mock_response.json = AsyncMock(return_value={"success": True})
+
+        mock_session = MagicMock()
+        mock_session.post = MagicMock(return_value=self._create_async_context_mock(mock_response))
+
+        with patch.object(client, '_get_session', return_value=mock_session):
+            result = await client.add_client(
+                inbound_id=1,
+                client_config={"email": "test@example.com", "id": "abc-123"}
+            )
+            assert result is True
+
+    @pytest.mark.asyncio
+    async def test_add_client_duplicate_email(self, client):
+        """Add client fails with duplicate email."""
+        mock_response = MagicMock()
+        mock_response.status = 200
+        mock_response.json = AsyncMock(return_value={"success": False, "msg": "Duplicate email"})
+
+        mock_session = MagicMock()
+        mock_session.post = MagicMock(return_value=self._create_async_context_mock(mock_response))
+
+        with patch.object(client, '_get_session', return_value=mock_session):
+            result = await client.add_client(
+                inbound_id=1,
+                client_config={"email": "test@example.com", "id": "abc-123"}
+            )
+            assert result is False
+
+    @pytest.mark.asyncio
+    async def test_add_client_http_error(self, client):
+        """Add client fails with HTTP error."""
+        mock_response = MagicMock()
+        mock_response.status = 500
+
+        mock_session = MagicMock()
+        mock_session.post = MagicMock(return_value=self._create_async_context_mock(mock_response))
+
+        with patch.object(client, '_get_session', return_value=mock_session):
+            result = await client.add_client(
+                inbound_id=1,
+                client_config={"email": "test@example.com", "id": "abc-123"}
+            )
+            assert result is False
+
+
+class TestSessionManagement:
+    """Tests for session lifecycle."""
+
+    @pytest.fixture
+    def client(self):
+        config = XUIClientConfig(base_url="http://test:2026")
+        return XUIAPIClient(config)
+
+    @pytest.mark.asyncio
+    async def test_get_session_creates_new_session(self, client):
+        """Creates new session if none exists."""
+        with patch('aiohttp.ClientSession') as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session.closed = False
+            mock_session_cls.return_value = mock_session
+
+            session = await client._get_session()
+            assert session is not None
+            mock_session_cls.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_get_session_reuses_existing(self, client):
+        """Reuses existing session if not closed."""
+        client.session = MagicMock()
+        client.session.closed = False
+
+        session = await client._get_session()
+        assert session == client.session
+
+    @pytest.mark.asyncio
+    async def test_get_session_recreates_if_closed(self, client):
+        """Creates new session if previous one was closed."""
+        client.session = MagicMock()
+        client.session.closed = True
+        old_session = client.session
+
+        with patch('aiohttp.ClientSession') as mock_session_cls:
+            # Each call returns a NEW mock session
+            mock_session_cls.side_effect = [
+                MagicMock(closed=True),   # First call (old_session reference)
+                MagicMock(closed=False),  # Second call (new session)
+            ]
+
+            session = await client._get_session()
+            # Should have called ClientSession to create new one
+            assert mock_session_cls.call_count >= 1
+            # New session should be different from old one
+            # (or at least the old closed session should not be used)
+            if session is old_session:
+                raise AssertionError("Should not reuse closed session")

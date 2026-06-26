@@ -1,5 +1,6 @@
 """Async HTTP API client for 3X-UI panel."""
 
+import asyncio
 import json
 import logging
 from typing import Optional, List, Dict, Any

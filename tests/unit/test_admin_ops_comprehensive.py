@@ -53,12 +53,33 @@ def admin_handler(mock_bot, mock_db, mock_config):
     return handler
 
 
+def _mock_db_connection(execute_result=None):
+    """Helper to create a proper mock DB connection with context manager.
+
+    Returns a mock connection that can be used like:
+    - conn.execute().fetchall() returns execute_result
+    - Access cursor via conn.cursor or conn.__enter__
+    """
+    mock_cursor = MagicMock()
+    mock_cursor.execute.return_value.fetchall.return_value = execute_result or []
+    mock_cursor.execute.return_value.fetchone.return_value = None
+
+    mock_conn = MagicMock()
+    mock_conn.__enter__ = Mock(return_value=mock_cursor)
+    mock_conn.__exit__ = Mock(return_value=False)
+    mock_conn.cursor.return_value = mock_cursor
+    # For direct execute access
+    mock_conn.execute = mock_cursor.execute
+
+    return mock_conn
+
+
 class TestShowStatus:
     """Tests for /status command."""
 
     def test_status_basic(self, admin_handler):
         """Basic status output with mocked stats."""
-        with patch('bot.handlers.admin.ops.SystemStatsService') as mock_stats_cls:
+        with patch('bot.services.system_stats.SystemStatsService') as mock_stats_cls:
             mock_stats_cls.get_stats.return_value = {
                 'cpu': {'percent': 45},
                 'ram': {'percent': 60, 'used': 4.0, 'total': 16.0},
@@ -83,7 +104,7 @@ class TestShowStatus:
 
     def test_status_stats_error(self, admin_handler):
         """Status when get_stats raises exception."""
-        with patch('bot.handlers.admin.ops.SystemStatsService') as mock_stats_cls:
+        with patch('bot.services.system_stats.SystemStatsService') as mock_stats_cls:
             mock_stats_cls.get_stats.side_effect = Exception("DB error")
 
             admin_handler.show_status('123', [])
@@ -98,8 +119,8 @@ class TestShowOnlines:
 
     def test_onlines_empty(self, admin_handler):
         """No users online."""
-        with patch('bot.handlers.admin.ops.summarize_activity', return_value={}):
-            with patch('bot.handlers.admin.ops.get_tcp_stats', return_value={}):
+        with patch('bot.services.xray_log.summarize_activity', return_value={}):
+            with patch('bot.services.xui_reload.get_tcp_stats', return_value={}):
                 admin_handler.bot.services.get('xui').api.get_online_clients_sync = Mock(return_value=[])
 
                 admin_handler.show_onlines('123', [])
@@ -109,7 +130,7 @@ class TestShowOnlines:
 
     def test_onlines_single_user(self, admin_handler):
         """One user online."""
-        with patch('bot.handlers.admin.ops.summarize_activity', return_value={
+        with patch('bot.services.xray_log.summarize_activity', return_value={
             'user@example.com': {
                 'ips': ['1.2.3.4'],
                 'distinct_ips': 1,
@@ -117,7 +138,7 @@ class TestShowOnlines:
                 'distinct_destinations': 1,
             }
         }):
-            with patch('bot.handlers.admin.ops.get_tcp_stats', return_value={'1.2.3.4': 45.5}):
+            with patch('bot.services.xui_reload.get_tcp_stats', return_value={'1.2.3.4': 45.5}):
                 admin_handler.db.get_all_users = Mock(return_value=[
                     User(chat_id='123', username='testuser', email='user@example.com', quota_gb=100)
                 ])
@@ -132,11 +153,11 @@ class TestShowOnlines:
 
     def test_onlines_geoip_failure(self, admin_handler):
         """GeoIP lookup fails - should still work."""
-        with patch('bot.handlers.admin.ops.summarize_activity', return_value={
+        with patch('bot.services.xray_log.summarize_activity', return_value={
             'user@example.com': {'ips': ['1.2.3.4'], 'distinct_ips': 1, 'active_connections': 1, 'distinct_destinations': 1}
         }):
-            with patch('bot.handlers.admin.ops.get_tcp_stats', return_value={}):
-                with patch('bot.handlers.admin.ops.geo_lookup', None):  # GeoIP not available
+            with patch('bot.services.xui_reload.get_tcp_stats', return_value={}):
+                with patch('bot.services.geoip.lookup', return_value=None):  # GeoIP not available
                     admin_handler.db.get_all_users = Mock(return_value=[
                         User(chat_id='123', email='user@example.com')
                     ])
@@ -149,8 +170,8 @@ class TestShowOnlines:
 
     def test_onlines_sharing_alert(self, admin_handler):
         """Detect shared key (multiple countries)."""
-        with patch('bot.handlers.admin.ops.geo_lookup', return_value=('RU', '🇷🇺')):
-            with patch('bot.handlers.admin.ops.summarize_activity', return_value={
+        with patch('bot.services.geoip.lookup', return_value=('RU', '🇷🇺')):
+            with patch('bot.services.xray_log.summarize_activity', return_value={
                 'user@example.com': {
                     'ips': ['1.2.3.4', '5.6.7.8'],  # Would need different countries in real scenario
                     'distinct_ips': 2,
@@ -158,7 +179,7 @@ class TestShowOnlines:
                     'distinct_destinations': 1,
                 }
             }):
-                with patch('bot.handlers.admin.ops.get_tcp_stats', return_value={}):
+                with patch('bot.services.xui_reload.get_tcp_stats', return_value={}):
                     admin_handler.db.get_all_users = Mock(return_value=[
                         User(chat_id='123', email='user@example.com', limit_ip=1)
                     ])
@@ -190,7 +211,7 @@ class TestFindUser:
 
     def test_find_no_results(self, admin_handler):
         """Find returns no matches."""
-        admin_handler.db._connect.return_value.__enter__.return_value.execute.return_value.fetchall.return_value = []
+        admin_handler.db._connect.return_value = _mock_db_connection([])
 
         admin_handler.find_user('123', ['nonexistent'])
 
@@ -199,9 +220,9 @@ class TestFindUser:
 
     def test_find_by_username(self, admin_handler):
         """Find by username."""
-        admin_handler.db._connect.return_value.__enter__.return_value.execute.return_value.fetchall.return_value = [
+        admin_handler.db._connect.return_value = _mock_db_connection([
             ('123', 'john', 'demo', 'john@example.com', 'abc-123', 50)
-        ]
+        ])
 
         admin_handler.find_user('123', ['john'])
 
@@ -214,35 +235,51 @@ class TestShowRecentActions:
 
     def test_recent_default_count(self, admin_handler):
         """Default shows 15 actions."""
-        admin_handler.db._connect.return_value.__enter__.return_value.execute.return_value.fetchall.return_value = []
+        mock_conn = _mock_db_connection([])
+        admin_handler.db._connect.return_value = mock_conn
 
         admin_handler.show_recent_actions('123', [])
 
         # Should limit to 15 by default
-        sql = admin_handler.db._connect.return_value.__enter__.return_value.execute.call_args[0][0]
-        assert 'LIMIT 15' in sql
+        sql = mock_conn.execute.call_args[0][0]
+        assert 'LIMIT ?' in sql
+        # call_args[0][1] is a tuple, extract first element
+        limit_val = mock_conn.execute.call_args[0][1]
+        if isinstance(limit_val, tuple):
+            limit_val = limit_val[0]
+        assert limit_val == 15
 
     def test_recent_custom_count(self, admin_handler):
         """Custom count."""
-        admin_handler.db._connect.return_value.__enter__.return_value.execute.return_value.fetchall.return_value = []
+        mock_conn = _mock_db_connection([])
+        admin_handler.db._connect.return_value = mock_conn
 
         admin_handler.show_recent_actions('123', ['25'])
 
-        sql = admin_handler.db._connect.return_value.__enter__.return_value.execute.call_args[0][0]
+        sql = mock_conn.execute.call_args[0][0]
         assert 'LIMIT ?' in sql
+        limit_val = mock_conn.execute.call_args[0][1]
+        if isinstance(limit_val, tuple):
+            limit_val = limit_val[0]
+        assert limit_val == 25
 
     def test_recent_max_cap(self, admin_handler):
         """Count capped at 50."""
-        admin_handler.db._connect.return_value.__enter__.return_value.execute.return_value.fetchall.return_value = []
+        mock_conn = _mock_db_connection([])
+        admin_handler.db._connect.return_value = mock_conn
 
         admin_handler.show_recent_actions('123', ['100'])
 
-        sql = admin_handler.db._connect.return_value.__enter__.return_value.execute.call_args[0][0]
-        assert str(admin_handler.db._connect.return_value.__enter__.return_value.execute.call_args[0][1]) == '50'
+        sql = mock_conn.execute.call_args[0][0]
+        assert 'LIMIT ?' in sql
+        limit_val = mock_conn.execute.call_args[0][1]
+        if isinstance(limit_val, tuple):
+            limit_val = limit_val[0]
+        assert limit_val == 50
 
     def test_recent_empty(self, admin_handler):
         """Empty audit log."""
-        admin_handler.db._connect.return_value.__enter__.return_value.execute.return_value.fetchall.return_value = []
+        admin_handler.db._connect.return_value = _mock_db_connection([])
 
         admin_handler.show_recent_actions('123', ['10'])
 
@@ -342,8 +379,9 @@ class TestRepairStuckSupport:
 
     def test_repair_success(self, admin_handler):
         """Successful repair."""
-        admin_handler.db._connect = Mock()
-        admin_handler.db._connect.return_value.__enter__.return_value.execute.return_value.fetchone.return_value = [5]
+        mock_conn = _mock_db_connection()
+        mock_conn.execute.return_value.fetchone.return_value = [5]
+        admin_handler.db._connect.return_value = mock_conn
         admin_handler.bot.services['notifications']._repair_stuck_support_users_sync.return_value = None
 
         admin_handler.repair_stuck_support('123', [])
