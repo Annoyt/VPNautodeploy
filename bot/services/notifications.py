@@ -1710,6 +1710,8 @@ class NotificationService:
                 getattr(self.config, 'KIMI_BRIDGE_TOKEN', ''),
                 getattr(self.config, 'DB_PATH', '') or '/var/lib/vpn-bot/bot.db',
                 default_timeout=240,
+                node_type=getattr(self.config, 'KIMI_NODE_TYPE', 'entry'),
+                sshfs_mount=getattr(self.config, 'ENTRY_NODE_SSHFS_MOUNT', '/mnt/entry_node'),
             )
             # Pack the rollups into compact JSON so Kimi has structured
             # data to read without needing to query the DB itself.

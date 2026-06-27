@@ -97,6 +97,8 @@ class AdminOpsMixin(AdminHandlerBase):
                     kbu,
                     getattr(self.config, 'KIMI_BRIDGE_TOKEN', ''),
                     self.config.DB_PATH,
+                    node_type=getattr(self.config, 'KIMI_NODE_TYPE', 'entry'),
+                    sshfs_mount=getattr(self.config, 'ENTRY_NODE_SSHFS_MOUNT', '/mnt/entry_node'),
                 )
                 try:
                     h = client.ping()

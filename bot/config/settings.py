@@ -164,6 +164,15 @@ class Settings:
         # "fast" = default (no --plan flag), "plan" = deep think (--plan).
         # Use /ai_plan command explicitly when you want plan mode.
         self.KIMI_DEFAULT_MODE: str = os.getenv('KIMI_DEFAULT_MODE', 'fast').lower()
+        # Node type where Kimi is installed: "entry" or "exit"
+        # - entry: Kimi runs on entry node (has direct access to Xray logs)
+        # - exit: Kimi runs on exit node (accesses files via SSHFS)
+        self.KIMI_NODE_TYPE: str = os.getenv('KIMI_NODE_TYPE', 'entry').lower()
+        # SSHFS configuration for KIMI_NODE_TYPE=exit
+        # When Kimi is on exit node, it mounts entry node's filesystem via SSHFS
+        self.ENTRY_NODE_SSH_HOST: str = os.getenv('ENTRY_NODE_SSH_HOST', '')  # e.g., "root@entry.local"
+        self.ENTRY_NODE_SSH_KEY: str = os.getenv('ENTRY_NODE_SSH_KEY', '')  # Path to SSH private key on exit node
+        self.ENTRY_NODE_SSHFS_MOUNT: str = os.getenv('ENTRY_NODE_SSHFS_MOUNT', '/mnt/entry_node')  # Mount point on exit node
         # If set, ANY message the super-admin posts inside this forum topic
         # is treated as a Kimi prompt (no /ai prefix needed).
         try:

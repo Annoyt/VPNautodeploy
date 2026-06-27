@@ -107,6 +107,8 @@ class AIHandler(BaseHandler):
                 base_url=config.KIMI_BRIDGE_URL,
                 token=getattr(config, "KIMI_BRIDGE_TOKEN", ""),
                 db_path=config.DB_PATH,
+                node_type=getattr(config, "KIMI_NODE_TYPE", "entry"),
+                sshfs_mount=getattr(config, "ENTRY_NODE_SSHFS_MOUNT", "/mnt/entry_node"),
             )
 
     # ----- Routing -----

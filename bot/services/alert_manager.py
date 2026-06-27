@@ -261,6 +261,8 @@ class AlertManager:
                 getattr(self.config, 'KIMI_BRIDGE_TOKEN', ''),
                 getattr(self.config, 'DB_PATH', '') or '/var/lib/vpn-bot/bot.db',
                 default_timeout=600,
+                node_type=getattr(self.config, 'KIMI_NODE_TYPE', 'entry'),
+                sshfs_mount=getattr(self.config, 'ENTRY_NODE_SSHFS_MOUNT', '/mnt/entry_node'),
             )
             prompt = (
                 f"DPI ALERT fired: {alert.title}\n\n"
@@ -407,6 +409,8 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
                 url,
                 getattr(config, 'KIMI_BRIDGE_TOKEN', ''),
                 config.DB_PATH,
+                node_type=getattr(config, 'KIMI_NODE_TYPE', 'entry'),
+                sshfs_mount=getattr(config, 'ENTRY_NODE_SSHFS_MOUNT', '/mnt/entry_node'),
             )
             health = client.ping()
             if health.get('status') == 'ok':

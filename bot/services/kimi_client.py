@@ -251,11 +251,15 @@ class KimiClient:
         token: str,
         db_path: str,
         default_timeout: int = 300,
+        node_type: str = "entry",
+        sshfs_mount: str = "/mnt/entry_node",
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.token = token
         self.db_path = db_path
         self.default_timeout = default_timeout
+        self.node_type = node_type  # "entry" or "exit"
+        self.sshfs_mount = sshfs_mount  # Mount point for entry node (when node_type="exit")
         self._ensure_table()
 
     # ----- persistent session memory -----
