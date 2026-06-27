@@ -38,6 +38,7 @@ import logging
 import os
 from datetime import datetime, timedelta
 
+from bot.config.constants import BYTES_PER_GB
 from bot.handlers.base import BaseHandler
 
 logger = logging.getLogger(__name__)
@@ -311,6 +312,43 @@ class PaymentHandler(BaseHandler):
                 )
         except Exception as e:
             logger.warning(f"successful_payment: subscriptions update failed: {e}")
+
+        # Propagate the new expiry (and current quota) to X-UI so the
+        # client isn't auto-removed by 3x-ui's expiration cleanup while
+        # the subscription is still active. Re-adds the client if it was
+        # previously removed (e.g. due to an expired prior period).
+        try:
+            if user.uuid and user.email:
+                xui = self.bot.services.get('xui')
+                if xui and xui.db:
+                    expiry_ts = 0
+                    if user.subscription_expiry:
+                        try:
+                            expiry_ts = int(
+                                datetime.fromisoformat(user.subscription_expiry).timestamp() * 1000
+                            )
+                        except ValueError:
+                            pass
+                    client_config = {
+                        "id": user.uuid,
+                        "flow": "xtls-rprx-vision",
+                        "email": user.email,
+                        "limitIp": getattr(user, 'limit_ip', 1),
+                        "totalGB": int((getattr(user, 'quota_gb', 5.0) or 5.0) * BYTES_PER_GB),
+                        "expiryTime": expiry_ts,
+                        "enable": True,
+                    }
+                    if xui.add_client_sync(client_config, 1):
+                        logger.info(
+                            f"successful_payment: synced {user.email} to X-UI "
+                            f"until {user.subscription_expiry}"
+                        )
+                    else:
+                        logger.warning(
+                            f"successful_payment: X-UI sync returned False for {user.email}"
+                        )
+        except Exception as e:
+            logger.warning(f"successful_payment: X-UI sync failed: {e}")
 
         # Audit
         try:

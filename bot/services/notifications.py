@@ -1343,7 +1343,6 @@ class NotificationService:
                     ts, email,
                     int(t.get('upload', 0)),
                     int(t.get('download', 0)),
-                    int(t.get('upload', 0)) + int(t.get('download', 0)),
                 )
                 for email, t in traffic.items()
             ]
