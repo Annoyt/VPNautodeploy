@@ -143,6 +143,12 @@ class XUIAPIClient:
                             return []
                         body = await r2.json(content_type=None)
                 else:
+                    if r.status == 404:
+                        # This 3x-ui version does not expose an onlines
+                        # endpoint; downstream sources (xray access.log,
+                        # tcp-stats) will provide the data instead.
+                        logger.debug("get_online_clients: 404 (endpoint not available)")
+                        return []
                     if r.status != 200:
                         logger.warning(f"get_online_clients: HTTP {r.status}")
                         return []

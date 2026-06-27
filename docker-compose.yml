@@ -7,6 +7,9 @@ services:
     restart: unless-stopped
     environment:
       XRAY_VMESS_AEAD_FORCED: "false"
+      # Force x-ui/xray logs (including access.log) onto the shared
+      # /etc/x-ui volume so the bot can read them from the same mount.
+      XUI_LOG_FOLDER: "/etc/x-ui"
     volumes:
       - 3xui-data:/etc/x-ui
       - ./3x-ui/cert:/root/cert
@@ -88,7 +91,7 @@ services:
       - DB_PATH=/var/lib/vpn-bot/bot.db
       # XUI_DB_PATH must point to the actual Docker volume used by 3x-ui container
       - XUI_DB_PATH=/var/lib/docker/volumes/vpn-bot_3xui-data/_data/x-ui.db
-      - XUI_USERNAME=${XUI_USERNAME:-not_me}
+      - XUI_USERNAME=${XUI_USERNAME:-admin}
       - XUI_PASSWORD=${XUI_PASSWORD:-admin}
       # Hysteria2 sidecar — empty HY2_HOST disables Hy2 link emission.
       - HY2_HOST=${HY2_HOST:-}
