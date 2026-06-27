@@ -1697,6 +1697,8 @@ class NotificationService:
                 logger.warning(f"dpi_daily_summary: send summary failed: {e}")
 
         # Hand off to Kimi for deeper analysis if configured.
+        # Daily analysis is stored ONLY in the database (dashboard-viewable).
+        # No chat spam — incident alerts already fire real-time via AlertManager.
         url = getattr(self.config, 'KIMI_BRIDGE_URL', '')
         if not url:
             return
@@ -1738,6 +1740,8 @@ class NotificationService:
             reply, _ms = client.ask(session_key, prompt, timeout=240)
             if reply:
                 # Attach to the dpi_reports row we just inserted.
+                # Dashboard is the ONLY place for daily analysis — Telegram
+                # is reserved for incident alerts.
                 if report_db_id is not None:
                     try:
                         with self.db._connect() as conn:
@@ -1748,12 +1752,9 @@ class NotificationService:
                             conn.commit()
                     except Exception as e:
                         logger.warning(f"dpi_daily_summary: kimi DB attach failed: {e}")
-                if topic and group:
-                    self.bot.send_message(
-                        chat_id=group,
-                        text=f"🤖 <b>Kimi daily DPI report</b>\n\n{reply[:3500]}",
-                        parse_mode='HTML', message_thread_id=topic,
-                    )
+                # NOTE: No Telegram post for daily analysis — admin can view
+                # it in the dashboard's "DPI Reports" tab. Real-time incident
+                # alerts fire via AlertManager (see _kick_dpi_kimi).
         except Exception as e:
             logger.warning(f"dpi_daily_summary: kimi call failed: {e}")
 
