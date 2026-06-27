@@ -49,13 +49,27 @@ class AdminOpsMixin(AdminHandlerBase):
     # ----- /status -----
 
     def show_status(self, chat_id: str, args: list) -> None:
-        """Compact health card: services, host metrics, user counts."""
+        """Compact health card: services, host metrics, user counts.
+
+        Per-source indicators:
+        ✓ = source available
+        ✗ = source failed (error shown inline)
+        """
         from bot.services.system_stats import SystemStatsService
 
+        # Track data source status for display
+        source_status = {}
+
+        # System stats
+        sys_stats = {}
+        sys_error = None
         try:
             sys_stats = SystemStatsService.get_stats() or {}
+            source_status['sys'] = '✓'
         except Exception as e:
-            sys_stats = {'error': str(e)}
+            sys_error = str(e)
+            source_status['sys'] = f'✗ ({type(e).__name__})'
+            logger.warning(f"/status: system_stats failed: {e}")
 
         cpu = (sys_stats.get('cpu') or {}).get('percent', '—')
         ram = sys_stats.get('ram') or {}
@@ -71,8 +85,10 @@ class AdminOpsMixin(AdminHandlerBase):
         # Service checks — anything that has a sync ping endpoint
         xui = self.bot.services.get('xui') if hasattr(self.bot, 'services') else None
         xui_ok = bool(xui and getattr(xui, 'db', None))
+        source_status['xui_db'] = '✓' if xui_ok else '✗'
 
         kimi_status = '—'
+        kimi_error = None
         try:
             from bot.services.kimi_client import KimiClient, KimiBridgeUnavailable
             kbu = getattr(self.config, 'KIMI_BRIDGE_URL', '')
@@ -85,39 +101,70 @@ class AdminOpsMixin(AdminHandlerBase):
                 try:
                     h = client.ping()
                     kimi_status = h.get('status', '?')
+                    source_status['kimi'] = '✓'
                 except KimiBridgeUnavailable as e:
-                    kimi_status = f'down ({e})'[:40]
+                    kimi_status = f'down'
+                    kimi_error = str(e)
+                    source_status['kimi'] = f'✗'
+            else:
+                source_status['kimi'] = '—'
         except Exception as e:
-            kimi_status = f'err: {e}'[:40]
+            kimi_status = f'err'
+            kimi_error = str(e)
+            source_status['kimi'] = f'✗'
+            logger.warning(f"/status: kimi check failed: {e}")
 
-        # User counts
+        # User counts from bot DB
         try:
             counts = {}
             for row in self.db.get_stats().get('by_status', {}).items():
                 counts[row[0]] = row[1]
-        except Exception:
+            source_status['bot_db'] = '✓'
+        except Exception as e:
             counts = {}
+            source_status['bot_db'] = f'✗ ({type(e).__name__})'
+            logger.warning(f"/status: bot db stats failed: {e}")
 
         active = counts.get('demo', 0) + counts.get('paid', 0) + counts.get('support_topic', 0)
         pending = counts.get('pending_demo', 0) + counts.get('platform_select', 0)
         total = sum(counts.values()) if counts else 0
 
+        # Build lines with source indicators
         lines = [
             "🩺 <b>Status</b>",
-            f"• Bot: <b>up</b> · Uptime <code>{uptime}</code>",
-            f"• X-UI DB: {'<b>ok</b>' if xui_ok else '<b>missing</b>'}",
-            f"• Kimi bridge: <b>{kimi_status}</b>",
-            "",
-            f"💻 CPU <b>{cpu}%</b> · RAM <b>{ram_pct}%</b> "
-            f"({ram_used:.1f}/{ram_total:.1f} GB) · "
-            f"Disk <b>{disk_pct}%</b> ({disk_used:.0f}/{disk_total:.0f} GB)",
-            "",
-            f"👥 Users: <b>{total}</b> total · <b>{active}</b> active "
-            f"(demo {counts.get('demo', 0)} / paid {counts.get('paid', 0)} / "
-            f"support {counts.get('support_topic', 0)}) · "
-            f"<b>{pending}</b> pending · <b>{counts.get('rejected', 0)}</b> rejected · "
-            f"<b>{counts.get('banned', 0)}</b> banned",
+            f"• Bot: <b>up</b> · Uptime <code>{uptime}</code> {source_status.get('sys', '?')}",
+            f"• X-UI DB: {'<b>ok</b>' if xui_ok else '<b>missing</b>'} {source_status.get('xui_db', '?')}",
+            f"• Kimi bridge: <b>{kimi_status}</b> {source_status.get('kimi', '?')}",
         ]
+
+        # Add Kimi error details if available
+        if kimi_error:
+            lines.append(f"  <i>Kimi error: {kimi_error[:60]}</i>")
+
+        # System metrics — hide if completely unavailable
+        if sys_error and not sys_stats:
+            lines.append(f"💻 System metrics: <i>{sys_error[:60]}</i>")
+        else:
+            lines.append(
+                f"💻 CPU <b>{cpu}%</b> · RAM <b>{ram_pct}%</b> "
+                f"({ram_used:.1f}/{ram_total:.1f} GB) · "
+                f"Disk <b>{disk_pct}%</b> ({disk_used:.0f}/{disk_total:.0f} GB)"
+            )
+
+        lines.append("")  # blank line
+
+        # User counts — show error summary if unavailable
+        if '✗' in source_status.get('bot_db', ''):
+            lines.append(f"👥 Users: <i>{source_status['bot_db']}</i>")
+        else:
+            lines.append(
+                f"👥 Users: <b>{total}</b> total · <b>{active}</b> active "
+                f"(demo {counts.get('demo', 0)} / paid {counts.get('paid', 0)} / "
+                f"support {counts.get('support_topic', 0)}) · "
+                f"<b>{pending}</b> pending · <b>{counts.get('rejected', 0)}</b> rejected · "
+                f"<b>{counts.get('banned', 0)}</b> banned {source_status.get('bot_db', '')}"
+            )
+
         self.bot.send_message(
             chat_id=chat_id, text="\n".join(lines), parse_mode='HTML',
             message_thread_id=self._get_thread_id(chat_id),
@@ -153,39 +200,125 @@ class AdminOpsMixin(AdminHandlerBase):
         dashboard shows so the admin doesn't have to leave the chat to
         check who's live.
         """
+        # Track data source status for diagnostics
+        source_status = {
+            'xray_log': '✗',
+            'xui_api': '✗',
+            'tcp_stats': '✗',
+            'geoip': '✗',
+        }
+        source_errors = {}
+
+        # Try xray_log (access.log parsing)
         try:
             from bot.services.xray_log import summarize_activity
             from bot.services.xui_reload import get_tcp_stats
             activity = summarize_activity()
+            if activity is not None:
+                source_status['xray_log'] = '✓'
+            else:
+                activity = {}
+        except PermissionError as e:
+            activity = {}
+            source_status['xray_log'] = '✗ (perm denied)'
+            source_errors['xray_log'] = f"Permission denied: {e}"
+            logger.warning(f"/onlines: log permission denied: {e}")
+        except FileNotFoundError as e:
+            activity = {}
+            source_status['xray_log'] = '✗ (not found)'
+            source_errors['xray_log'] = f"File not found: {e}"
+            logger.warning(f"/onlines: log file not found: {e}")
         except Exception as e:
             activity = {}
+            source_status['xray_log'] = f'✗ ({type(e).__name__})'
+            source_errors['xray_log'] = str(e)[:100]
             logger.warning(f"/onlines: log parse failed: {e}")
 
+        # Try X-UI API
         try:
             xui = self.bot.services.get('xui') if hasattr(self.bot, 'services') else None
             panel_emails: set = set()
             if xui and hasattr(xui, 'api') and xui.api:
-                panel_emails = set(xui.api.get_online_clients_sync())
+                panel_result = xui.api.get_online_clients_sync()
+                panel_emails = set(panel_result)
+                if panel_result is not None:
+                    source_status['xui_api'] = '✓'
+            else:
+                source_status['xui_api'] = '— (not configured)'
+        except ConnectionRefusedError as e:
+            panel_emails = set()
+            source_status['xui_api'] = '✗ (conn refused)'
+            source_errors['xui_api'] = f"Connection refused: {e}"
+            logger.warning(f"/onlines: xui api connection refused: {e}")
         except Exception as e:
             panel_emails = set()
+            source_status['xui_api'] = f'✗ ({type(e).__name__})'
+            source_errors['xui_api'] = str(e)[:100]
             logger.warning(f"/onlines: xui api failed: {e}")
 
+        # Try TCP stats
         try:
             rtt_by_ip = get_tcp_stats()
-        except Exception:
+            if rtt_by_ip:
+                source_status['tcp_stats'] = '✓'
+            else:
+                rtt_by_ip = {}
+                source_status['tcp_stats'] = '— (no data)'
+        except ConnectionRefusedError as e:
             rtt_by_ip = {}
+            source_status['tcp_stats'] = '✗ (conn refused)'
+            source_errors['tcp_stats'] = "Connection refused to xray-reload sidecar"
+            logger.warning(f"/onlines: tcp stats connection refused: {e}")
+        except Exception as e:
+            rtt_by_ip = {}
+            source_status['tcp_stats'] = f'✗ ({type(e).__name__})'
+            source_errors['tcp_stats'] = str(e)[:100]
 
         # GeoIP (soft import — works even if maxminddb is missing)
         try:
             from bot.services.geoip import lookup as geo_lookup
+            if geo_lookup:
+                source_status['geoip'] = '✓'
         except Exception:
             geo_lookup = None
 
         emails = sorted(set(activity.keys()) | panel_emails)
+
+        # Check if all primary sources failed
+        all_sources_failed = (
+            source_status['xray_log'].startswith('✗') and
+            source_status['xui_api'].startswith('✗')
+        )
+
         if not emails:
+            # No online users - show diagnostic info
+            diag_lines = [
+                "⚪ <b>Сейчас никто не подключён.</b>\n",
+                "📊 <b>Статус источников данных:</b>\n",
+                f"• access.log (xray_log): {source_status['xray_log']}",
+                f"• X-UI API: {source_status['xui_api']}",
+                f"• TCP stats: {source_status['tcp_stats']}",
+                f"• GeoIP: {source_status['geoip']}",
+            ]
+
+            # Add error details if available
+            if source_errors:
+                diag_lines.append("\n<b>Ошибки:</b>")
+                for src, err in source_errors.items():
+                    diag_lines.append(f"• {src}: <code>{err[:80]}</code>")
+
+            # Add fix hints when all sources failed
+            if all_sources_failed:
+                diag_lines.append("\n💡 <b>Возможные решения:</b>")
+                if source_status['xray_log'].startswith('✗'):
+                    diag_lines.append("• <b>access.log:</b> sudo chmod +r /var/lib/docker/volumes/vpn-bot_3xui-data/_data/access.log")
+                if source_status['xui_api'].startswith('✗'):
+                    diag_lines.append("• <b>X-UI:</b> curl http://127.0.0.1:2026/this_is_fine/")
+
             self.bot.send_message(
                 chat_id=chat_id,
-                text="⚪ Сейчас никто не подключён.",
+                text="\n".join(diag_lines),
+                parse_mode='HTML',
                 message_thread_id=self._get_thread_id(chat_id),
             )
             return
@@ -212,7 +345,15 @@ class AdminOpsMixin(AdminHandlerBase):
         except Exception as e:
             logger.warning(f"/onlines: traffic fetch failed: {e}")
 
-        lines = [f"🟢 <b>Сейчас онлайн: {len(emails)}</b>\n"]
+        lines = [f"🟢 <b>Сейчас онлайн: {len(emails)}</b>"]
+
+        # Add source status indicators when data is degraded
+        degraded_sources = [k for k, v in source_status.items() if v.startswith('✗')]
+        if degraded_sources:
+            src_summary = ", ".join([f"{k}: {source_status[k]}" for k in degraded_sources])
+            lines.append(f"<i>⚠️ Данные неполные: {src_summary}</i>\n")
+        else:
+            lines.append("")
         for email in emails:
             user = users_by_email.get(email)
             uname = (f"@{user.username}" if user and user.username
