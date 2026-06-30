@@ -5,6 +5,9 @@ services:
     image: ghcr.io/mhsanaei/3x-ui:latest
     container_name: 3x-ui
     restart: unless-stopped
+    # Cap 3x-ui memory: without a limit its Go runtime balloons on this
+    # 929 MB VPS and pushes the host into heavy swap, causing VPN stalls.
+    mem_limit: 600m
     environment:
       XRAY_VMESS_AEAD_FORCED: "false"
       # Force x-ui/xray logs (including access.log) onto the shared
