@@ -785,6 +785,138 @@ class NotificationService:
         except Exception as e:
             logger.exception(f"support-state repair failed: {e}")
 
+    def _reset_demo_quota_sync(self):
+        """Monthly: reset traffic counters for demo users and extend expiry.
+
+        Demo users get 5 GB every calendar month. This job zeroes both
+        bot.db and x-ui.db traffic counters, ensures the client is enabled
+        in x-ui, and pushes the expiry 30 days forward so 3x-ui does not
+        purge them as "expired". After the DB update xray is reloaded.
+        """
+        import sqlite3
+        from datetime import datetime, timedelta
+
+        bot_db_path = getattr(self.config, 'DB_PATH', None)
+        xui_db_path = getattr(self.config, 'XUI_DB_PATH', None)
+        if not bot_db_path or not xui_db_path:
+            logger.warning("demo quota reset: DB_PATH or XUI_DB_PATH not configured")
+            return
+
+        new_expiry_ms = int((datetime.utcnow() + timedelta(days=30)).timestamp() * 1000)
+
+        try:
+            conn = sqlite3.connect(bot_db_path)
+            conn.row_factory = sqlite3.Row
+            demo_users = conn.execute(
+                "SELECT chat_id, email, traffic_up, traffic_down FROM users WHERE status = 'demo' AND email IS NOT NULL"
+            ).fetchall()
+            conn.close()
+        except Exception as e:
+            logger.exception(f"demo quota reset: failed to read demo users: {e}")
+            return
+
+        if not demo_users:
+            logger.info("demo quota reset: no demo users found")
+            return
+
+        reset_emails = []
+        for u in demo_users:
+            email = u['email']
+            if not email:
+                continue
+            reset_emails.append(email)
+            try:
+                # Notify user quietly; failures are non-fatal.
+                self.bot.send_message(
+                    chat_id=u['chat_id'],
+                    text="🔄 Ваш тестовый трафик 5 ГБ обновлён на новый месяц.\n"
+                         "Your 5 GB demo traffic has been refreshed for the new month.",
+                    parse_mode='HTML',
+                )
+            except Exception as e:
+                logger.warning(f"demo quota reset: notify {email} failed: {e}")
+
+        try:
+            xui_conn = sqlite3.connect(xui_db_path)
+            xui_conn.row_factory = sqlite3.Row
+            c = xui_conn.cursor()
+
+            # 1. Reset x-ui traffic counters and extend expiry for matching emails.
+            placeholders = ','.join('?' * len(reset_emails))
+            c.execute(
+                f"UPDATE client_traffics SET up = 0, down = 0, all_time = 0, "
+                f"expiry_time = ?, enable = 1 WHERE email IN ({placeholders})",
+                (new_expiry_ms, *reset_emails),
+            )
+            traffic_updated = c.rowcount
+
+            # 2. Ensure the clients table has enable=1 (this is what xray config gen uses).
+            c.execute(
+                f"UPDATE clients SET enable = 1, expiry_time = ? "
+                f"WHERE email IN ({placeholders})",
+                (new_expiry_ms, *reset_emails),
+            )
+            clients_updated = c.rowcount
+
+            # 3. Update inbounds.settings JSON to enable + future expiry.
+            updated_inbounds = 0
+            for row in c.execute("SELECT id, settings FROM inbounds").fetchall():
+                try:
+                    settings = json.loads(row['settings'] or '{}')
+                except Exception:
+                    continue
+                clients = settings.get('clients', [])
+                changed = False
+                for client in clients:
+                    if client.get('email') in reset_emails:
+                        client['enable'] = True
+                        client['expiryTime'] = new_expiry_ms
+                        changed = True
+                if changed:
+                    c.execute(
+                        "UPDATE inbounds SET settings = ? WHERE id = ?",
+                        (json.dumps(settings), row['id']),
+                    )
+                    updated_inbounds += 1
+
+            xui_conn.commit()
+            xui_conn.close()
+
+            logger.info(
+                f"demo quota reset: {len(reset_emails)} users, "
+                f"client_traffics={traffic_updated}, clients={clients_updated}, "
+                f"inbounds={updated_inbounds}"
+            )
+        except Exception as e:
+            logger.exception(f"demo quota reset: failed to update x-ui db: {e}")
+            return
+
+        # 4. Zero bot.db counters so dashboard reads fresh numbers.
+        try:
+            conn = sqlite3.connect(bot_db_path)
+            conn.row_factory = sqlite3.Row
+            placeholders = ','.join('?' * len(reset_emails))
+            conn.execute(
+                f"UPDATE users SET traffic_up = 0, traffic_down = 0, "
+                f"last_traffic_update = ? WHERE email IN ({placeholders})",
+                (datetime.utcnow().isoformat(), *reset_emails),
+            )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.exception(f"demo quota reset: failed to update bot db: {e}")
+
+        # 5. Reload xray so the enabled/expiry changes take effect.
+        try:
+            from bot.services.xui_service import XUIService
+            xui = XUIService(self.config)
+            if xui.reload_xray_sync():
+                logger.info("demo quota reset: xray reloaded")
+            else:
+                logger.warning("demo quota reset: xray reload returned False")
+        except Exception as e:
+            logger.exception(f"demo quota reset: xray reload failed: {e}")
+
     def _keep_xray_log_readable_sync(self):
         """Hourly: chmod 644 on Xray access.log AND error.log so the
         bot (uid 1000) can read them. Xray creates the files with mode
@@ -1205,6 +1337,14 @@ class NotificationService:
             self._keep_xray_log_readable_sync,
             IntervalTrigger(hours=1),
             id='xray_log_perms',
+            replace_existing=True,
+        )
+        # Monthly on the 1st at 00:00 UTC: reset demo traffic counters
+        # and extend expiry so demo users keep their 5 GB allowance.
+        self.scheduler.add_job(
+            self._reset_demo_quota_sync,
+            CronTrigger(day=1, hour=0, minute=0),
+            id='demo_quota_reset',
             replace_existing=True,
         )
         # Every 60s: health checks → Telegram alerts. AlertManager

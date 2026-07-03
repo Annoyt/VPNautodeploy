@@ -214,6 +214,10 @@ class SubscriptionService:
         'geosite-category-ru',
     )
 
+    # Self-hosted rule sets are served from the dashboard domain so
+    # clients inside Russia (where raw.githubusercontent.com is often
+    # blocked by РКН) can still download them. Falls back to SagerNet
+    # GitHub mirrors if no dashboard URL is configured.
     _GEOSITE_URL = (
         'https://raw.githubusercontent.com/SagerNet/sing-geosite/'
         'rule-set/{tag}.srs'
@@ -222,6 +226,16 @@ class SubscriptionService:
         'https://raw.githubusercontent.com/SagerNet/sing-geoip/'
         'rule-set/{tag}.srs'
     )
+
+    def _rule_set_url(self, tag: str) -> str:
+        """Return rule-set URL, preferring self-hosted mirror."""
+        base = getattr(self.config, 'WEBAPP_URL', '') or ''
+        if base:
+            base = base.rstrip('/')
+            return f"{base}/rule-sets/{tag}.srs"
+        if tag.startswith('geoip-'):
+            return self._GEOIP_URL.format(tag=tag)
+        return self._GEOSITE_URL.format(tag=tag)
 
     # Anti-DPI: TLS handshake fragmentation.
     # Breaks ClientHello into small chunks so ТСПУ cannot reassemble
@@ -242,13 +256,11 @@ class SubscriptionService:
         """
         rs = []
         for tag in self._PROXY_RULE_SET_TAGS + self._DIRECT_RULE_SET_TAGS:
-            url = (self._GEOIP_URL if tag.startswith('geoip-')
-                   else self._GEOSITE_URL).format(tag=tag)
             rs.append({
                 'type': 'remote',
                 'tag': tag,
                 'format': 'binary',
-                'url': url,
+                'url': self._rule_set_url(tag),
                 'download_detour': 'direct',
                 'update_interval': '1d',
             })

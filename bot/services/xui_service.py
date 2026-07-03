@@ -117,24 +117,26 @@ class XUIService:
         try:
             import sqlite3
             conn = sqlite3.connect(db_path)
-            c = conn.cursor()
-            # Check for inbounds table and at least one VLESS inbound
-            c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='inbounds'")
-            if not c.fetchone():
-                logger.error(
-                    f"CRITICAL: {db_path} does not contain an 'inbounds' table. "
-                    "This is likely NOT the X-UI database the container uses. "
-                    "Check XUI_DB_PATH env variable."
-                )
-                return
-            c.execute("SELECT 1 FROM inbounds WHERE protocol = 'vless' LIMIT 1")
-            if not c.fetchone():
-                logger.error(
-                    f"CRITICAL: {db_path} has no VLESS inbound. "
-                    "X-UI may be using a different database file."
-                )
-                return
-            conn.close()
+            try:
+                c = conn.cursor()
+                # Check for inbounds table and at least one VLESS inbound
+                c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='inbounds'")
+                if not c.fetchone():
+                    logger.error(
+                        f"CRITICAL: {db_path} does not contain an 'inbounds' table. "
+                        "This is likely NOT the X-UI database the container uses. "
+                        "Check XUI_DB_PATH env variable."
+                    )
+                    return
+                c.execute("SELECT 1 FROM inbounds WHERE protocol = 'vless' LIMIT 1")
+                if not c.fetchone():
+                    logger.error(
+                        f"CRITICAL: {db_path} has no VLESS inbound. "
+                        "X-UI may be using a different database file."
+                    )
+                    return
+            finally:
+                conn.close()
         except Exception as e:
             logger.error(f"Failed to validate X-UI DB path {db_path}: {e}")
             return

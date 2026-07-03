@@ -3,6 +3,7 @@
 import json
 import logging
 import sqlite3
+from contextlib import contextmanager
 from typing import Optional
 
 from bot.utils.log_redaction import redact_email
@@ -16,16 +17,22 @@ class XUIDatabase:
     def __init__(self, db_path: str):
         self.db_path = db_path
     
+    @contextmanager
     def _connect(self):
         """Create connection with WAL mode enabled.
         
         WAL mode is required because 3X-UI panel writes to the same database
         concurrently. Without WAL, we get 'database is locked' errors.
+        The context manager guarantees the connection is closed afterwards,
+        preventing leaked file descriptors from keeping the database locked.
         """
         conn = sqlite3.connect(self.db_path)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.row_factory = sqlite3.Row
-        return conn
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.row_factory = sqlite3.Row
+            yield conn
+        finally:
+            conn.close()
     
     def get_vless_inbound_id(self) -> Optional[int]:
         """Find first VLESS inbound ID (usually port 443)."""
