@@ -156,25 +156,35 @@ class Settings:
         # missing, handle_admin says so out loud.
         self.WEBAPP_URL: str = os.getenv('WEBAPP_URL', '')
 
-        # Kimi-code AI bridge — host-side HTTP wrapper around the kimi CLI.
-        # Optional: if KIMI_BRIDGE_URL is empty, the /ai command politely
-        # tells the admin AI is not configured.
-        self.KIMI_BRIDGE_URL: str = os.getenv('KIMI_BRIDGE_URL', '')
-        self.KIMI_BRIDGE_TOKEN: str = os.getenv('KIMI_BRIDGE_TOKEN', '')
-        # "fast" = default (no --plan flag), "plan" = deep think (--plan).
-        # Use /ai_plan command explicitly when you want plan mode.
-        self.KIMI_DEFAULT_MODE: str = os.getenv('KIMI_DEFAULT_MODE', 'fast').lower()
-        # Node type where Kimi is installed: "entry" or "exit"
-        # - entry: Kimi runs on entry node (has direct access to Xray logs)
-        # - exit: Kimi runs on exit node (accesses files via SSHFS)
-        self.KIMI_NODE_TYPE: str = os.getenv('KIMI_NODE_TYPE', 'entry').lower()
-        # SSHFS configuration for KIMI_NODE_TYPE=exit
-        # When Kimi is on exit node, it mounts entry node's filesystem via SSHFS
+        # OpenCode AI agent — the bot talks to a local `opencode serve`
+        # HTTP server (headless). Optional: if OPENCODE_URL is empty, the
+        # /ai command politely tells the admin AI is not configured.
+        self.OPENCODE_URL: str = os.getenv('OPENCODE_URL', '')
+        # HTTP basic auth for the OpenCode server. Username defaults to
+        # "opencode" (OpenCode's own default); password from env.
+        self.OPENCODE_USERNAME: str = os.getenv('OPENCODE_USERNAME', 'opencode')
+        self.OPENCODE_SERVER_PASSWORD: str = os.getenv('OPENCODE_SERVER_PASSWORD', '')
+        # Default provider/model in OpenCode "provider/model" form (e.g.
+        # "moonshotai/kimi-k2" or "anthropic/claude-..."). Empty → let the
+        # server / selected agent pick its configured default.
+        self.OPENCODE_DEFAULT_MODEL: str = os.getenv('OPENCODE_DEFAULT_MODEL', '')
+        # Optional named OpenCode agents (defined in opencode.json) mapped
+        # to our /ai switches. Empty → server default agent.
+        self.OPENCODE_AGENT_DEFAULT: str = os.getenv('OPENCODE_AGENT_DEFAULT', '')
+        self.OPENCODE_AGENT_PLAN: str = os.getenv('OPENCODE_AGENT_PLAN', '')
+        self.OPENCODE_AGENT_YOLO: str = os.getenv('OPENCODE_AGENT_YOLO', '')
+        # "fast" = default agent, "plan" = deep-think agent. /ai_plan forces plan.
+        self.AI_DEFAULT_MODE: str = os.getenv('AI_DEFAULT_MODE', 'fast').lower()
+        # Which role runs `opencode serve`: "control" (default — has DB/repo
+        # access) or "entry" (direct access to Xray logs from inside RU).
+        self.AGENT_NODE_TYPE: str = os.getenv('AGENT_NODE_TYPE', 'control').lower()
+        # SSHFS config for when the agent and the data it needs live on
+        # different nodes (e.g. agent on control, Xray logs on entry).
         self.ENTRY_NODE_SSH_HOST: str = os.getenv('ENTRY_NODE_SSH_HOST', '')  # e.g., "root@entry.local"
-        self.ENTRY_NODE_SSH_KEY: str = os.getenv('ENTRY_NODE_SSH_KEY', '')  # Path to SSH private key on exit node
-        self.ENTRY_NODE_SSHFS_MOUNT: str = os.getenv('ENTRY_NODE_SSHFS_MOUNT', '/mnt/entry_node')  # Mount point on exit node
+        self.ENTRY_NODE_SSH_KEY: str = os.getenv('ENTRY_NODE_SSH_KEY', '')  # Path to SSH private key
+        self.ENTRY_NODE_SSHFS_MOUNT: str = os.getenv('ENTRY_NODE_SSHFS_MOUNT', '/mnt/entry_node')  # Mount point
         # If set, ANY message the super-admin posts inside this forum topic
-        # is treated as a Kimi prompt (no /ai prefix needed).
+        # is treated as an AI prompt (no /ai prefix needed).
         try:
             self.TOPIC_AI: int = int(os.getenv('TOPIC_AI', '0') or '0')
         except ValueError:

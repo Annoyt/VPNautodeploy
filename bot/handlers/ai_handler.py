@@ -24,17 +24,22 @@ from typing import List, Optional
 
 
 # Shared scratch dir between this container and the host (mounted via
-# docker-compose). Photos pulled from Telegram land here so Kimi on
+# docker-compose). Photos pulled from Telegram land here so the agent on
 # the host can read them off the same path. Cleaned hourly by the
 # NotificationService scheduler; per-request cleanup happens in
 # handle().
 TG_MEDIA_DIR = "/tmp/tg_media"
 
+# Shared out dir: OpenCode (on the host) writes files it wants to send
+# back to the admin here; the bot reads them from the same bind-mount and
+# ships them as Telegram documents. See _send_file / SYSTEM_PREAMBLE.
+AGENT_OUT_DIR = "/tmp/agent_out"
+
 from bot.handlers.base import BaseHandler
-from bot.services.kimi_client import (
-    KimiBridgeError,
-    KimiBridgeUnavailable,
-    KimiClient,
+from bot.services.agent_client import (
+    AgentError,
+    AgentUnavailable,
+    AgentClient,
 )
 
 logger = logging.getLogger(__name__)
@@ -101,13 +106,18 @@ class AIHandler(BaseHandler):
 
     def __init__(self, bot, db, config) -> None:
         super().__init__(bot, db, config)
-        self._client: Optional[KimiClient] = None
-        if getattr(config, "KIMI_BRIDGE_URL", ""):
-            self._client = KimiClient(
-                base_url=config.KIMI_BRIDGE_URL,
-                token=getattr(config, "KIMI_BRIDGE_TOKEN", ""),
+        self._client: Optional[AgentClient] = None
+        if getattr(config, "OPENCODE_URL", ""):
+            self._client = AgentClient(
+                base_url=config.OPENCODE_URL,
+                password=getattr(config, "OPENCODE_SERVER_PASSWORD", ""),
                 db_path=config.DB_PATH,
-                node_type=getattr(config, "KIMI_NODE_TYPE", "entry"),
+                username=getattr(config, "OPENCODE_USERNAME", "opencode"),
+                default_model=getattr(config, "OPENCODE_DEFAULT_MODEL", "") or None,
+                agent_default=getattr(config, "OPENCODE_AGENT_DEFAULT", "") or None,
+                agent_plan=getattr(config, "OPENCODE_AGENT_PLAN", "") or None,
+                agent_yolo=getattr(config, "OPENCODE_AGENT_YOLO", "") or None,
+                node_type=getattr(config, "AGENT_NODE_TYPE", "control"),
                 sshfs_mount=getattr(config, "ENTRY_NODE_SSHFS_MOUNT", "/mnt/entry_node"),
             )
 
@@ -188,7 +198,7 @@ class AIHandler(BaseHandler):
             return
 
         # Mode resolution: /ai_plan forces deep thinking, /ai_fast skips it,
-        # /ai uses KIMI_DEFAULT_MODE from config. Free-text in TOPIC_AI also
+        # /ai uses AI_DEFAULT_MODE from config. Free-text in TOPIC_AI also
         # follows the default.
         mode: Optional[str] = None
         if first == "/ai_fast":
@@ -291,13 +301,13 @@ class AIHandler(BaseHandler):
 
     def _handle_status(self, chat_id: str, thread_id) -> None:
         if not self._client:
-            self._reply(chat_id, thread_id, "⚠️ AI не сконфигурирован — задайте KIMI_BRIDGE_URL.")
+            self._reply(chat_id, thread_id, "⚠️ AI не сконфигурирован — задайте OPENCODE_URL.")
             return
 
         try:
             health_info = self._client.ping()
             status_text = "OK" if health_info.get("status") == "ok" else "Degraded"
-            version_text = health_info.get("kimi_version", "unknown")
+            version_text = health_info.get("version", "unknown")
         except Exception as e:
             status_text = f"Unavailable ({e})"
             version_text = "unknown"
@@ -317,8 +327,8 @@ class AIHandler(BaseHandler):
 
         msg_text = (
             "🤖 <b>AI Status:</b>\n"
-            f"• <b>Bridge Status:</b> {status_text}\n"
-            f"• <b>Kimi Version:</b> <code>{version_text}</code>\n"
+            f"• <b>Server Status:</b> {status_text}\n"
+            f"• <b>OpenCode Version:</b> <code>{version_text}</code>\n"
             f"• <b>Total Active Sessions:</b> {total_sessions}\n"
             f"• <b>Current Chat Session:</b> <code>{current_session or 'None'}</code>"
         )
@@ -380,27 +390,27 @@ class AIHandler(BaseHandler):
         yolo: bool = False,
     ) -> None:
         if not self._client:
-            self._reply(chat_id, thread_id, "⚠️ AI не сконфигурирован — задайте KIMI_BRIDGE_URL.")
+            self._reply(chat_id, thread_id, "⚠️ AI не сконфигурирован — задайте OPENCODE_URL.")
             return
 
         # mode resolution: explicit /ai_plan or /ai_fast wins; otherwise the
-        # configured default ("fast" by default, see settings.KIMI_DEFAULT_MODE).
+        # configured default ("fast" by default, see settings.AI_DEFAULT_MODE).
         if mode is None:
-            mode = getattr(self.config, "KIMI_DEFAULT_MODE", "fast") or "fast"
+            mode = getattr(self.config, "AI_DEFAULT_MODE", "fast") or "fast"
 
         # Keep "typing…" alive for the whole turn — Telegram cancels the
-        # indicator after ~5 s and Kimi in --plan mode can think 20–60 s.
+        # indicator after ~5 s and the agent in plan mode can think 20–60 s.
         typing_stop = _start_typing_keepalive(self.bot, chat_id, thread_id)
 
         key = self._session_key(chat_id, thread_id)
         try:
             reply, duration_ms = self._client.ask(key, prompt, mode=mode, yolo=yolo)
-        except KimiBridgeUnavailable as e:
-            logger.warning(f"kimi bridge unavailable: {e}")
-            self._reply(chat_id, thread_id, f"⚠️ Bridge не отвечает: {e}")
+        except AgentUnavailable as e:
+            logger.warning(f"opencode server unavailable: {e}")
+            self._reply(chat_id, thread_id, f"⚠️ AI-сервер не отвечает: {e}")
             return
-        except KimiBridgeError as e:
-            logger.warning(f"kimi bridge error: {e}")
+        except AgentError as e:
+            logger.warning(f"opencode agent error: {e}")
             # Pretty-print the most common upstream conditions instead
             # of dumping the full provider message with stray HTML.
             err_text = str(e)
@@ -408,19 +418,18 @@ class AIHandler(BaseHandler):
             if 'rate_limit' in low or '429' in err_text:
                 self._reply(
                     chat_id, thread_id,
-                    "⏳ Kimi: дневная квота API исчерпана.\n\n"
-                    "Лимит обнулится в следующем биллинговом периоде. "
-                    "Если нужно прямо сейчас — апгрейд плана у Kimi: "
-                    "https://www.kimi.com/code/console"
+                    "⏳ Квота API провайдера исчерпана.\n\n"
+                    "Лимит обнулится в следующем биллинговом периоде, "
+                    "либо переключи модель/провайдера в opencode.json."
                 )
             elif '504' in err_text or 'timed out' in low:
                 self._reply(
                     chat_id, thread_id,
-                    "⏱ Kimi думал слишком долго и не успел ответить. "
+                    "⏱ Агент думал слишком долго и не успел ответить. "
                     "Попробуйте ещё раз с более коротким запросом."
                 )
             else:
-                self._reply(chat_id, thread_id, f"⚠️ Kimi-ошибка: {err_text[:300]}")
+                self._reply(chat_id, thread_id, f"⚠️ Ошибка агента: {err_text[:300]}")
             return
         except Exception:
             logger.exception("unexpected kimi failure")
@@ -430,13 +439,13 @@ class AIHandler(BaseHandler):
             typing_stop.set()
 
         if not reply:
-            reply = "(пустой ответ от Kimi)"
+            reply = "(пустой ответ от агента)"
 
-        # Pull out any [[SEND_FILE: ...]] markers Kimi emitted so we can ship
-        # those as Telegram documents after the text reply.
+        # Pull out any [[SEND_FILE: ...]] markers the agent emitted so we can
+        # ship those as Telegram documents after the text reply.
         clean_reply, files = _extract_files(reply)
         if not clean_reply:
-            clean_reply = "(нет текстового ответа)" if files else "(пустой ответ от Kimi)"
+            clean_reply = "(нет текстового ответа)" if files else "(пустой ответ от агента)"
 
         footer_bits = [f"⏱ {duration_ms/1000:.1f}s"]
         if mode == "plan":
@@ -459,23 +468,27 @@ class AIHandler(BaseHandler):
             self._send_file(chat_id, thread_id, path, caption)
 
     def _send_file(self, chat_id: str, thread_id, host_path: str, caption: Optional[str]) -> None:
-        """Send a file Kimi referenced via [[SEND_FILE: ...]] as a Telegram document.
+        """Send a file the agent referenced via [[SEND_FILE: ...]] as a Telegram document.
 
-        Kimi runs on the host (where /tmp/foo.png lives); the bot runs in a
-        container. We pull the bytes through kimi-bridge /file, write them
-        to a local tempfile, hand that to send_document, then clean up.
+        OpenCode runs on the host and writes files it wants to hand back
+        into the shared out dir (AGENT_OUT_DIR), which is bind-mounted into
+        this container at the same path. So we read the file directly — no
+        HTTP round-trip. Only paths under the shared dir are accepted, so a
+        stray marker can't exfiltrate arbitrary host files through the bot.
         """
-        if not self._client:
-            return
-
-        local_path: Optional[str] = None
-        try:
-            local_path = self._client.download_file(host_path)
-        except Exception as e:
-            logger.warning(f"AI download_file failed for {host_path}: {e}")
+        norm = os.path.normpath(host_path)
+        if not (norm == AGENT_OUT_DIR or norm.startswith(AGENT_OUT_DIR + os.sep)):
             self._reply(
                 chat_id, thread_id,
-                f"⚠️ Не удалось скачать с хоста <code>{host_path}</code>: {e}",
+                f"⚠️ Файл вне разрешённого каталога <code>{AGENT_OUT_DIR}</code>: "
+                f"<code>{host_path}</code>",
+                parse_mode="HTML",
+            )
+            return
+        if not os.path.isfile(norm):
+            self._reply(
+                chat_id, thread_id,
+                f"⚠️ Файл не найден: <code>{host_path}</code>",
                 parse_mode="HTML",
             )
             return
@@ -488,7 +501,7 @@ class AIHandler(BaseHandler):
         try:
             result = self.bot.client.send_document(
                 chat_id=chat_id,
-                document=local_path,
+                document=norm,
                 caption=caption,
                 **extra_kwargs,
             )
@@ -506,11 +519,12 @@ class AIHandler(BaseHandler):
                 parse_mode="HTML",
             )
         finally:
-            if local_path:
-                try:
-                    os.unlink(local_path)
-                except OSError:
-                    pass
+            # Clean up the agent's output file after sending so /tmp/agent_out
+            # doesn't accumulate. Best-effort.
+            try:
+                os.unlink(norm)
+            except OSError:
+                pass
 
     # ----- Telegram glue -----
 

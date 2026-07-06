@@ -54,8 +54,8 @@ def mock_config():
     config.SUPER_ADMIN_ID = '1652899'
     config.FORUM_ENABLED = False
     config.FORUM_GROUP_ID = None
-    config.KIMI_BRIDGE_URL = ''
-    config.KIMI_BRIDGE_TOKEN = ''
+    config.OPENCODE_URL = ''
+    config.OPENCODE_SERVER_PASSWORD = ''
     config.DB_PATH = '/tmp/test.db'
     return config
 
@@ -143,10 +143,10 @@ class TestShowStatus:
         })
 
         with patch('bot.services.system_stats.SystemStatsService.get_stats', return_value=mock_stats):
-            with patch('bot.services.kimi_client.KimiClient') as mock_kimi_class:
-                mock_kimi = Mock()
-                mock_kimi.ping.return_value = {'status': 'ok'}
-                mock_kimi_class.return_value = mock_kimi
+            with patch('bot.services.agent_client.AgentClient') as mock_agent_class:
+                mock_agent = Mock()
+                mock_agent.ping.return_value = {'status': 'ok'}
+                mock_agent_class.return_value = mock_agent
 
                 handler.show_status('test_chat', [])
 
@@ -179,22 +179,22 @@ class TestShowStatus:
         text = handler.bot.send_message.call_args[1]['text']
         assert '<b>missing</b>' in text
 
-    def test_show_status_kimi_down(self, handler):
-        """Test status display when Kimi bridge is down."""
+    def test_show_status_opencode_down(self, handler):
+        """Test status display when the OpenCode server is down."""
         handler.bot.services = {}
 
         with patch('bot.services.system_stats.SystemStatsService.get_stats', return_value={'uptime': 0}):
-            with patch('bot.services.kimi_client.KimiBridgeUnavailable', Exception):
-                with patch('bot.services.kimi_client.KimiClient') as mock_kimi_class:
-                    mock_kimi = Mock()
-                    mock_kimi.ping.side_effect = Exception("Connection refused")
-                    mock_kimi_class.return_value = mock_kimi
+            with patch('bot.services.agent_client.AgentUnavailable', Exception):
+                with patch('bot.services.agent_client.AgentClient') as mock_agent_class:
+                    mock_agent = Mock()
+                    mock_agent.ping.side_effect = Exception("Connection refused")
+                    mock_agent_class.return_value = mock_agent
 
                     handler.show_status('test_chat', [])
 
         text = handler.bot.send_message.call_args[1]['text']
-        # Should show some error indicator for kimi
-        assert 'Kimi bridge' in text
+        # Should show some indicator for the OpenCode agent
+        assert 'OpenCode' in text
 
     def test_show_status_db_stats_error(self, handler):
         """Test status display when database stats query fails."""

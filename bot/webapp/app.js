@@ -2342,7 +2342,7 @@
             </div>
             ${secretRow('BOT_TOKEN', sec.BOT_TOKEN, false)}
             ${secretRow('REALITY_PUBLIC_KEY', sec.REALITY_PUBLIC_KEY, false)}
-            ${secretRow('KIMI_BRIDGE_TOKEN', sec.KIMI_BRIDGE_TOKEN, false)}
+            ${secretRow('OPENCODE_SERVER_PASSWORD', sec.OPENCODE_SERVER_PASSWORD, false)}
             ${secretRow('XUI_PASSWORD', !sec.XUI_PASSWORD_default_admin, sec.XUI_PASSWORD_default_admin)}
             <div class="sysinfo-divider"></div>
             ${keysRender}

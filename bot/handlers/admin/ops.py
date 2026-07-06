@@ -87,34 +87,35 @@ class AdminOpsMixin(AdminHandlerBase):
         xui_ok = bool(xui and getattr(xui, 'db', None))
         source_status['xui_db'] = '✓' if xui_ok else '✗'
 
-        kimi_status = '—'
-        kimi_error = None
+        ai_status = '—'
+        ai_error = None
         try:
-            from bot.services.kimi_client import KimiClient, KimiBridgeUnavailable
-            kbu = getattr(self.config, 'KIMI_BRIDGE_URL', '')
-            if kbu:
-                client = KimiClient(
-                    kbu,
-                    getattr(self.config, 'KIMI_BRIDGE_TOKEN', ''),
+            from bot.services.agent_client import AgentClient, AgentUnavailable
+            ocu = getattr(self.config, 'OPENCODE_URL', '')
+            if ocu:
+                client = AgentClient(
+                    ocu,
+                    getattr(self.config, 'OPENCODE_SERVER_PASSWORD', ''),
                     self.config.DB_PATH,
-                    node_type=getattr(self.config, 'KIMI_NODE_TYPE', 'entry'),
+                    username=getattr(self.config, 'OPENCODE_USERNAME', 'opencode'),
+                    node_type=getattr(self.config, 'AGENT_NODE_TYPE', 'control'),
                     sshfs_mount=getattr(self.config, 'ENTRY_NODE_SSHFS_MOUNT', '/mnt/entry_node'),
                 )
                 try:
                     h = client.ping()
-                    kimi_status = h.get('status', '?')
-                    source_status['kimi'] = '✓'
-                except KimiBridgeUnavailable as e:
-                    kimi_status = f'down'
-                    kimi_error = str(e)
-                    source_status['kimi'] = f'✗'
+                    ai_status = h.get('status', '?')
+                    source_status['ai'] = '✓'
+                except AgentUnavailable as e:
+                    ai_status = f'down'
+                    ai_error = str(e)
+                    source_status['ai'] = f'✗'
             else:
-                source_status['kimi'] = '—'
+                source_status['ai'] = '—'
         except Exception as e:
-            kimi_status = f'err'
-            kimi_error = str(e)
-            source_status['kimi'] = f'✗'
-            logger.warning(f"/status: kimi check failed: {e}")
+            ai_status = f'err'
+            ai_error = str(e)
+            source_status['ai'] = f'✗'
+            logger.warning(f"/status: opencode check failed: {e}")
 
         # User counts from bot DB
         try:
@@ -136,12 +137,12 @@ class AdminOpsMixin(AdminHandlerBase):
             "🩺 <b>Status</b>",
             f"• Bot: <b>up</b> · Uptime <code>{uptime}</code> {source_status.get('sys', '?')}",
             f"• X-UI DB: {'<b>ok</b>' if xui_ok else '<b>missing</b>'} {source_status.get('xui_db', '?')}",
-            f"• Kimi bridge: <b>{kimi_status}</b> {source_status.get('kimi', '?')}",
+            f"• OpenCode: <b>{ai_status}</b> {source_status.get('ai', '?')}",
         ]
 
-        # Add Kimi error details if available
-        if kimi_error:
-            lines.append(f"  <i>Kimi error: {kimi_error[:60]}</i>")
+        # Add agent error details if available
+        if ai_error:
+            lines.append(f"  <i>OpenCode error: {ai_error[:60]}</i>")
 
         # System metrics — hide if completely unavailable
         if sys_error and not sys_stats:

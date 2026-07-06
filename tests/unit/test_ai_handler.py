@@ -20,10 +20,10 @@ from bot.handlers.ai_handler import (
     _start_typing_keepalive,
     TELEGRAM_TEXT_LIMIT,
 )
-from bot.services.kimi_client import (
-    KimiBridgeUnavailable,
-    KimiBridgeError,
-    KimiClient,
+from bot.services.agent_client import (
+    AgentUnavailable,
+    AgentError,
+    AgentClient,
 )
 
 
@@ -32,9 +32,16 @@ def mock_config():
     """Create mock config with AI settings."""
     config = Mock()
     config.SUPER_ADMIN_ID = '1652899'
-    config.KIMI_BRIDGE_URL = 'http://localhost:7077'
-    config.KIMI_BRIDGE_TOKEN = 'test_token'
-    config.KIMI_DEFAULT_MODE = 'fast'
+    config.OPENCODE_URL = 'http://localhost:4096'
+    config.OPENCODE_USERNAME = 'opencode'
+    config.OPENCODE_SERVER_PASSWORD = 'test_pw'
+    config.OPENCODE_DEFAULT_MODEL = ''
+    config.OPENCODE_AGENT_DEFAULT = ''
+    config.OPENCODE_AGENT_PLAN = ''
+    config.OPENCODE_AGENT_YOLO = ''
+    config.AI_DEFAULT_MODE = 'fast'
+    config.AGENT_NODE_TYPE = 'control'
+    config.ENTRY_NODE_SSHFS_MOUNT = '/mnt/entry_node'
     config.TOPIC_AI = 42
     config.DB_PATH = '/tmp/test.db'
 
@@ -73,22 +80,25 @@ def mock_db():
 
 
 @pytest.fixture
-def mock_kimi_client():
-    """Create mock KimiClient."""
-    client = Mock(spec=KimiClient)
+def mock_agent_client():
+    """Create mock AgentClient."""
+    client = Mock(spec=AgentClient)
     client.ask = Mock(return_value=("Test response", 1500))
-    client.ping = Mock(return_value={'status': 'ok', 'kimi_version': '1.0.0'})
+    client.ping = Mock(return_value={'status': 'ok', 'version': '1.0.0'})
     client.forget_session = Mock(return_value=True)
-    client.get_session = Mock(return_value='session_abc123')
-    client.download_file = Mock(return_value='/tmp/local_file.png')
+    client.get_session = Mock(return_value='ses_abc123')
     return client
 
 
 @pytest.fixture
-def ai_handler(mock_bot, mock_db, mock_config):
+def ai_handler(mock_bot, mock_db, mock_config, mock_agent_client):
     """Create AIHandler with mocks."""
     handler = AIHandler(mock_bot, mock_db, mock_config)
-    handler._client = mock_kimi_client()
+    handler._client = mock_agent_client
+    # Spy on _reply while still delegating to the real impl (which calls
+    # bot.send_message), so tests can assert on either _reply.call_args or
+    # bot.send_message.call_args.
+    handler._reply = Mock(wraps=handler._reply)
     return handler
 
 
@@ -170,8 +180,8 @@ class TestStartTypingKeepalive:
         stop = _start_typing_keepalive(mock_bot, 'chat_123', 42)
 
         mock_thread.assert_called_once()
-        mock_thread_instance.assert_called_once()
-        assert mock_thread_instance.call_args[1]['daemon'] is True
+        mock_thread_instance.start.assert_called_once()
+        assert mock_thread.call_args[1]['daemon'] is True
         assert stop == mock_stop
 
     @patch('threading.Thread')
@@ -518,9 +528,9 @@ class TestAIHandlerHandle:
         }
         ai_handler._handle_prompt = Mock()
         ai_handler.handle(update)
-        call_kwargs = ai_handler._handle_prompt.call_args[1]
-        assert call_kwargs['prompt'] == 'help me debug'
-        assert call_kwargs['mode'] is None
+        call_args = ai_handler._handle_prompt.call_args
+        assert call_args[0][2] == 'help me debug'  # prompt is positional
+        assert call_args[1]['mode'] is None
 
     def test_handle_non_admin_rejected(self, ai_handler):
         """Test non-admin user is rejected."""
@@ -653,24 +663,24 @@ class TestHandlePrompt:
 
     def test_handle_prompt_bridge_unavailable(self, ai_handler):
         """Test handling when bridge is unavailable."""
-        ai_handler._client.ask = Mock(side_effect=KimiBridgeUnavailable("Connection failed"))
+        ai_handler._client.ask = Mock(side_effect=AgentUnavailable("Connection failed"))
         ai_handler._handle_prompt('123', None, 'test')
 
         reply_text = ai_handler._reply.call_args[0][2]
-        assert 'Bridge не отвечает' in reply_text
+        assert 'AI-сервер не отвечает' in reply_text
 
     def test_handle_prompt_rate_limit_error(self, ai_handler):
         """Test pretty error for rate limit (429)."""
-        error = KimiBridgeError("HTTP 429: rate_limit_exceeded")
+        error = AgentError("HTTP 429: rate_limit_exceeded")
         ai_handler._client.ask = Mock(side_effect=error)
         ai_handler._handle_prompt('123', None, 'test')
 
         reply_text = ai_handler._reply.call_args[0][2]
-        assert 'дневная квота API исчерпана' in reply_text
+        assert 'Квота API провайдера исчерпана' in reply_text
 
     def test_handle_prompt_timeout_error(self, ai_handler):
         """Test pretty error for timeout (504)."""
-        error = KimiBridgeError("HTTP 504: gateway timeout")
+        error = AgentError("HTTP 504: gateway timeout")
         ai_handler._client.ask = Mock(side_effect=error)
         ai_handler._handle_prompt('123', None, 'test')
 
@@ -679,12 +689,12 @@ class TestHandlePrompt:
 
     def test_handle_prompt_generic_error(self, ai_handler):
         """Test generic error message."""
-        error = KimiBridgeError("HTTP 500: internal error")
+        error = AgentError("HTTP 500: internal error")
         ai_handler._client.ask = Mock(side_effect=error)
         ai_handler._handle_prompt('123', None, 'test')
 
         reply_text = ai_handler._reply.call_args[0][2]
-        assert 'Kimi-ошибка:' in reply_text
+        assert 'Ошибка агента:' in reply_text
 
     def test_handle_prompt_unexpected_exception(self, ai_handler):
         """Test handling of unexpected exceptions."""
@@ -695,12 +705,12 @@ class TestHandlePrompt:
         assert 'Неожиданная ошибка' in reply_text
 
     def test_handle_prompt_empty_response(self, ai_handler):
-        """Test empty response from Kimi."""
+        """Test empty response from the agent."""
         ai_handler._client.ask = Mock(return_value=("", 1000))
         ai_handler._handle_prompt('123', None, 'test')
 
         reply_text = ai_handler.bot.send_message.call_args[1]['text']
-        assert '(пустой ответ от Kimi)' in reply_text
+        assert '(пустой ответ от агента)' in reply_text
 
     def test_handle_prompt_with_file_marker(self, ai_handler):
         """Test file marker is extracted and file is sent."""
@@ -808,8 +818,8 @@ class TestHandleStatus:
 
         reply_text = ai_handler.bot.send_message.call_args[1]['text']
         assert '🤖 <b>AI Status:</b>' in reply_text
-        assert 'Bridge Status:' in reply_text
-        assert 'Kimi Version:' in reply_text
+        assert 'Server Status:' in reply_text
+        assert 'OpenCode Version:' in reply_text
 
     def test_handle_status_no_client(self, ai_handler):
         """Test status when client is not configured."""
@@ -898,9 +908,9 @@ class TestHandleYolo:
         ai_handler._handle_prompt = Mock()
         ai_handler._handle_yolo('123', None, '/ai_yolo risky command')
 
-        call_kwargs = ai_handler._handle_prompt.call_args[1]
-        assert call_kwargs['yolo'] is True
-        prompt = call_kwargs['prompt']
+        call_args = ai_handler._handle_prompt.call_args
+        assert call_args[1]['yolo'] is True
+        prompt = call_args[0][2]  # prompt is positional
         assert 'risky command' in prompt
 
     def test_handle_yolo_no_client(self, ai_handler):
@@ -982,64 +992,78 @@ class TestDownloadPhoto:
 
 
 class TestSendFile:
-    """Test _send_file() - sending files to Telegram."""
+    """Test _send_file() - sending files from the shared out dir.
 
-    def test_send_file_success(self, ai_handler):
-        """Test successful file sending."""
-        ai_handler._send_file('123', None, '/tmp/test.png', 'Caption')
+    OpenCode writes into AGENT_OUT_DIR (a bind-mount shared with the host);
+    the bot reads the file directly — no HTTP download. Only paths under
+    AGENT_OUT_DIR are accepted.
+    """
 
-        ai_handler._client.download_file.assert_called_once_with('/tmp/test.png')
+    @staticmethod
+    def _make_file(tmp_path, name="result.png"):
+        p = tmp_path / name
+        p.write_bytes(b"data")
+        return str(p)
+
+    def test_send_file_success(self, ai_handler, tmp_path):
+        """Valid file under the out dir is sent as a document."""
+        path = self._make_file(tmp_path)
+        with patch('bot.handlers.ai_handler.AGENT_OUT_DIR', str(tmp_path)), \
+                patch('os.unlink'):
+            ai_handler._send_file('123', None, path, 'Caption')
         ai_handler.bot.client.send_document.assert_called_once()
+        assert ai_handler.bot.client.send_document.call_args[1]['document'] == path
 
-    def test_send_file_no_client(self, ai_handler):
-        """Test when client is not configured."""
-        ai_handler._client = None
-        ai_handler._send_file('123', None, '/tmp/test.png', 'Caption')
-
+    def test_send_file_outside_dir_rejected(self, ai_handler, tmp_path):
+        """A path outside the shared out dir is refused (anti-exfiltration)."""
+        with patch('bot.handlers.ai_handler.AGENT_OUT_DIR', str(tmp_path)):
+            ai_handler._send_file('123', None, '/etc/passwd', 'x')
         ai_handler.bot.client.send_document.assert_not_called()
-
-    def test_send_file_download_fails(self, ai_handler):
-        """Test when file download fails."""
-        ai_handler._client.download_file = Mock(side_effect=Exception("Download failed"))
-        ai_handler._send_file('123', None, '/tmp/test.png', 'Caption')
-
         reply_text = ai_handler._reply.call_args[0][2]
-        assert 'Не удалось скачать с хоста' in reply_text
+        assert 'вне разрешённого каталога' in reply_text
 
-    def test_send_file_telegram_rejects(self, ai_handler):
+    def test_send_file_missing(self, ai_handler, tmp_path):
+        """A missing file under the out dir reports not-found."""
+        with patch('bot.handlers.ai_handler.AGENT_OUT_DIR', str(tmp_path)):
+            ai_handler._send_file('123', None, str(tmp_path / 'nope.png'), None)
+        ai_handler.bot.client.send_document.assert_not_called()
+        reply_text = ai_handler._reply.call_args[0][2]
+        assert 'не найден' in reply_text
+
+    def test_send_file_telegram_rejects(self, ai_handler, tmp_path):
         """Test when Telegram rejects the file."""
-        ai_handler._client.download_file = Mock(return_value='/tmp/local.png')
+        path = self._make_file(tmp_path)
         ai_handler.bot.client.send_document = Mock(return_value=None)
-        ai_handler._send_file('123', None, '/tmp/test.png', 'Caption')
-
+        with patch('bot.handlers.ai_handler.AGENT_OUT_DIR', str(tmp_path)), \
+                patch('os.unlink'):
+            ai_handler._send_file('123', None, path, 'Caption')
         reply_text = ai_handler._reply.call_args[0][2]
         assert 'Telegram отверг файл' in reply_text
 
-    def test_send_file_with_thread_id(self, ai_handler):
+    def test_send_file_with_thread_id(self, ai_handler, tmp_path):
         """Test file sending with thread_id."""
-        ai_handler._client.download_file = Mock(return_value='/tmp/local.png')
-        ai_handler._send_file('123', 42, '/tmp/test.png', 'Caption')
-
+        path = self._make_file(tmp_path)
+        with patch('bot.handlers.ai_handler.AGENT_OUT_DIR', str(tmp_path)), \
+                patch('os.unlink'):
+            ai_handler._send_file('123', 42, path, 'Caption')
         call_kwargs = ai_handler.bot.client.send_document.call_args[1]
         assert call_kwargs['message_thread_id'] == 42
 
-    def test_send_file_cleanup(self, ai_handler):
-        """Test temp file is cleaned up."""
-        local_path = '/tmp/local_test_file.png'
-        ai_handler._client.download_file = Mock(return_value=local_path)
+    def test_send_file_cleanup(self, ai_handler, tmp_path):
+        """Test the out file is cleaned up after sending."""
+        path = self._make_file(tmp_path)
+        with patch('bot.handlers.ai_handler.AGENT_OUT_DIR', str(tmp_path)), \
+                patch('os.unlink') as mock_unlink:
+            ai_handler._send_file('123', None, path, 'Caption')
+            mock_unlink.assert_called_once()
 
-        with patch('os.unlink') as mock_unlink:
-            ai_handler._send_file('123', None, '/tmp/test.png', 'Caption')
-            mock_unlink.assert_called_once_with(local_path)
-
-    def test_send_file_cleanup_error_logged(self, ai_handler):
+    def test_send_file_cleanup_error_logged(self, ai_handler, tmp_path):
         """Test cleanup errors are caught."""
-        ai_handler._client.download_file = Mock(return_value='/tmp/local.png')
-
-        with patch('os.unlink', side_effect=OSError("Permission denied")):
-            ai_handler._send_file('123', None, '/tmp/test.png', 'Caption')
-
-        # Should not raise, file cleanup failure is logged only
+        path = self._make_file(tmp_path)
+        with patch('bot.handlers.ai_handler.AGENT_OUT_DIR', str(tmp_path)), \
+                patch('os.unlink', side_effect=OSError("Permission denied")):
+            ai_handler._send_file('123', None, path, 'Caption')
+        # Should not raise, file cleanup failure is swallowed.
         assert True
 
 
@@ -1066,15 +1090,15 @@ class TestSessionKey:
 class TestAIHandlerInit:
     """Test AIHandler initialization."""
 
-    def test_init_with_bridge_url(self, mock_bot, mock_db, mock_config):
-        """Test initialization creates KimiClient when URL is set."""
-        mock_config.KIMI_BRIDGE_URL = 'http://localhost:7077'
+    def test_init_with_opencode_url(self, mock_bot, mock_db, mock_config):
+        """Test initialization creates AgentClient when URL is set."""
+        mock_config.OPENCODE_URL = 'http://localhost:4096'
         handler = AIHandler(mock_bot, mock_db, mock_config)
         assert handler._client is not None
 
-    def test_init_without_bridge_url(self, mock_bot, mock_db, mock_config):
+    def test_init_without_opencode_url(self, mock_bot, mock_db, mock_config):
         """Test initialization skips client when URL is not set."""
-        mock_config.KIMI_BRIDGE_URL = ''
+        mock_config.OPENCODE_URL = ''
         handler = AIHandler(mock_bot, mock_db, mock_config)
         assert handler._client is None
 

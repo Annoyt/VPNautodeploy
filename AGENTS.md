@@ -334,3 +334,15 @@ Closed three remaining gaps in the support/AI flow.
 **Skills + triggers.** Five skills live now (`vpn-ops`, `server-admin`, `code-review`, `incident-response`, `billing-ops`). Trigger detection (`_detect_skill_domains`) routes by per-domain marker tuples; `incident-response` short-circuits everything else when it fires so the reminder during an outage doesn't drown in four skill paths.
 
 **Branch cleanup.** `feature/xray-bot-integration` was the default branch on GitHub but `0` commits ahead of `main` (everything was already merged a few sessions ago). Switched the GitHub default to `main` and deleted the feature branch. Single canonical line of history.
+
+### 22. AI agent: kimi-code → OpenCode (2026-07-04)
+
+The `/ai` backend was fully switched from kimi-code to **OpenCode**. Kimi is gone — no fallback. If you're looking for `kimi_client.py`, `kimi_bridge.py`, or `kimi-bridge.service`, they were **deleted**.
+
+- **No custom bridge anymore.** OpenCode ships its own headless HTTP server (`opencode serve`, :4096). The bot talks to it directly at `http://host.docker.internal:4096` with HTTP **basic auth** (`OPENCODE_SERVER_PASSWORD`, username `opencode`). The old FastAPI shim is obsolete.
+- **Client:** `bot/services/agent_client.py::AgentClient` — thin `requests` client. Endpoints live in `_create_session` / `_send_message` (`POST /session`, `POST /session/{id}/message` with `{parts:[{type:text,text}], model?, agent?}`). Response parsing is deliberately tolerant (accepts `parts`/`info.parts`, `text`/`content`) because OpenCode's API shape drifts between versions — **verify against the pinned server's `/doc`** if prompts start failing.
+- **Config:** `OPENCODE_URL`, `OPENCODE_USERNAME`, `OPENCODE_SERVER_PASSWORD`, `OPENCODE_DEFAULT_MODEL` (provider/model form), `OPENCODE_AGENT_PLAN/YOLO/DEFAULT`, `AI_DEFAULT_MODE`, `AGENT_NODE_TYPE` (`control`|`entry`). `KIMI_*` vars are removed.
+- **Permissions:** `scripts/opencode.json` sets per-tool `allow`/`deny` (bash deny-list for catastrophic commands) — this is the structural fix for the old "root, no isolation" gap (§16). Tune the deny-list per deployment; note "ask" doesn't work headless, so use allow/deny only.
+- **`[[SEND_FILE]]`:** the agent now writes files into the shared `/tmp/agent_out` bind-mount and the bot reads them directly (`AGENT_OUT_DIR`). The old bridge `/file` endpoint is gone. `/tmp/tg_media` (photo ingestion) is unchanged.
+- **Ops:** `scripts/opencode.service` (systemd) + `scripts/setup_opencode.sh` replace the kimi units; `install.sh` flag is now `--no-agent`. Session memory still lives in the `ai_sessions` table (column `kimi_session` kept as opaque storage — no migration).
+- **Skill routing** (`_detect_skill_domains` marker layer) was preserved as prompt injection. Not yet migrated: `skills/*/SKILL.md` still reference `/root/.kimi-code/` paths, and host-side SSH keys are still named `*_kimi` — cosmetic follow-ups, not blockers.

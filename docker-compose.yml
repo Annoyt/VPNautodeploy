@@ -80,9 +80,18 @@ services:
       # Admin dashboard URL (Caddy + Let's Encrypt on the host serves
       # https://<domain>:9443 → http://localhost:8080)
       - WEBAPP_URL=${WEBAPP_URL}
-      # Kimi-code AI bridge — host service that wraps the kimi CLI
-      - KIMI_BRIDGE_URL=${KIMI_BRIDGE_URL:-}
-      - KIMI_BRIDGE_TOKEN=${KIMI_BRIDGE_TOKEN:-}
+      # OpenCode AI agent — host-side `opencode serve` (headless HTTP).
+      # Empty OPENCODE_URL disables the /ai command. Basic-auth password
+      # must match OPENCODE_SERVER_PASSWORD set on the opencode.service unit.
+      - OPENCODE_URL=${OPENCODE_URL:-http://host.docker.internal:4096}
+      - OPENCODE_USERNAME=${OPENCODE_USERNAME:-opencode}
+      - OPENCODE_SERVER_PASSWORD=${OPENCODE_SERVER_PASSWORD:-}
+      - OPENCODE_DEFAULT_MODEL=${OPENCODE_DEFAULT_MODEL:-}
+      - OPENCODE_AGENT_DEFAULT=${OPENCODE_AGENT_DEFAULT:-}
+      - OPENCODE_AGENT_PLAN=${OPENCODE_AGENT_PLAN:-}
+      - OPENCODE_AGENT_YOLO=${OPENCODE_AGENT_YOLO:-}
+      - AI_DEFAULT_MODE=${AI_DEFAULT_MODE:-fast}
+      - AGENT_NODE_TYPE=${AGENT_NODE_TYPE:-control}
       - TOPIC_AI=${TOPIC_AI:-}
       # Host-side Xray reload sidecar — see scripts/xray_reload.py.
       # Empty URL → reload becomes a no-op (debug/dev mode).
@@ -136,11 +145,15 @@ services:
       # Direct X-UI DB access (required for add_client_sync / remove_client_sync).
       # Must be writable: startup sync and remove_client both write to x-ui.db.
       - 3xui-data:/var/lib/docker/volumes/vpn-bot_3xui-data/_data
-      # Shared scratch dir for Telegram → Kimi photo ingestion. AIHandler
-      # writes screenshots here from inside the container; the kimi
-      # binary on the host reads them off the same path. Cleaned by the
-      # hourly scheduler in NotificationService.
+      # Shared scratch dir for Telegram → agent photo ingestion. AIHandler
+      # writes screenshots here from inside the container; OpenCode on the
+      # host reads them off the same path. Cleaned by the hourly scheduler
+      # in NotificationService.
       - /tmp/tg_media:/tmp/tg_media
+      # Shared out dir: OpenCode (host) writes files it wants to send back
+      # to the admin here; the bot reads them and ships as Telegram docs
+      # (replaces the old kimi-bridge /file endpoint). See AGENT_OUT_DIR.
+      - /tmp/agent_out:/tmp/agent_out
     depends_on:
       3x-ui:
         condition: service_healthy

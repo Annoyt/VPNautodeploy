@@ -1416,8 +1416,8 @@ class NotificationService:
             replace_existing=True,
         )
         # Daily DPI summary at 09:00 server time (UTC). Posts a numeric
-        # summary in TOPIC_AI and, if KIMI_BRIDGE_URL is set, hands off
-        # to Kimi for the dpi-analysis follow-up.
+        # summary in TOPIC_AI and, if OPENCODE_URL is set, hands off
+        # to the OpenCode agent for the dpi-analysis follow-up.
         self.scheduler.add_job(
             self._dpi_daily_summary_sync,
             CronTrigger(hour=9, minute=0),
@@ -1835,24 +1835,26 @@ class NotificationService:
             except Exception as e:
                 logger.warning(f"dpi_daily_summary: send summary failed: {e}")
 
-        # Hand off to Kimi for deeper analysis if configured.
+        # Hand off to the OpenCode agent for deeper analysis if configured.
         # Daily analysis is stored ONLY in the database (dashboard-viewable).
         # No chat spam — incident alerts already fire real-time via AlertManager.
-        url = getattr(self.config, 'KIMI_BRIDGE_URL', '')
+        url = getattr(self.config, 'OPENCODE_URL', '')
         if not url:
             return
         try:
             import json, time as _time
-            from bot.services.kimi_client import KimiClient
-            client = KimiClient(
+            from bot.services.agent_client import AgentClient
+            client = AgentClient(
                 url,
-                getattr(self.config, 'KIMI_BRIDGE_TOKEN', ''),
+                getattr(self.config, 'OPENCODE_SERVER_PASSWORD', ''),
                 getattr(self.config, 'DB_PATH', '') or '/var/lib/vpn-bot/bot.db',
                 default_timeout=240,
-                node_type=getattr(self.config, 'KIMI_NODE_TYPE', 'entry'),
+                username=getattr(self.config, 'OPENCODE_USERNAME', 'opencode'),
+                default_model=getattr(self.config, 'OPENCODE_DEFAULT_MODEL', '') or None,
+                node_type=getattr(self.config, 'AGENT_NODE_TYPE', 'control'),
                 sshfs_mount=getattr(self.config, 'ENTRY_NODE_SSHFS_MOUNT', '/mnt/entry_node'),
             )
-            # Pack the rollups into compact JSON so Kimi has structured
+            # Pack the rollups into compact JSON so the agent has structured
             # data to read without needing to query the DB itself.
             payload_today = [
                 {
@@ -1892,12 +1894,12 @@ class NotificationService:
                             )
                             conn.commit()
                     except Exception as e:
-                        logger.warning(f"dpi_daily_summary: kimi DB attach failed: {e}")
+                        logger.warning(f"dpi_daily_summary: agent DB attach failed: {e}")
                 # NOTE: No Telegram post for daily analysis — admin can view
                 # it in the dashboard's "DPI Reports" tab. Real-time incident
-                # alerts fire via AlertManager (see _kick_dpi_kimi).
+                # alerts fire via AlertManager (see _kick_dpi_agent).
         except Exception as e:
-            logger.warning(f"dpi_daily_summary: kimi call failed: {e}")
+            logger.warning(f"dpi_daily_summary: agent call failed: {e}")
 
     ALERT_HISTORY_RETENTION_DAYS = 30
     DPI_REPORTS_RETENTION_DAYS = 365

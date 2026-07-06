@@ -221,7 +221,7 @@ class AlertManager:
         # DPI alerts get a Kimi follow-up — the analysis is stored
         # against the alert row, not posted to chat.
         if alert.key.startswith(('dpi_short:', 'dpi_hsfail:', 'dpi_rst:')):
-            self._kick_dpi_kimi(alert, alert_db_id)
+            self._kick_dpi_agent(alert, alert_db_id)
 
     def _persist_alert(self, alert: Alert) -> Optional[int]:
         """Append an alert row to alert_history. Returns the row id or None."""
@@ -240,28 +240,27 @@ class AlertManager:
             logger.warning(f"persist_alert failed for {alert.key}: {e}")
             return None
 
-    def _kick_dpi_kimi(self, alert: Alert, alert_db_id: Optional[int]) -> None:
-        """Ask kimi-bridge for a DPI-analysis follow-up and attach the
-        result to the alert row in alert_history. Result is visible in
+    def _kick_dpi_agent(self, alert: Alert, alert_db_id: Optional[int]) -> None:
+        """Ask the OpenCode agent for a DPI-analysis follow-up and attach
+        the result to the alert row in alert_history. Result is visible in
         the dashboard's Alerts tab — no chat noise.
         """
-        url = getattr(self.config, 'KIMI_BRIDGE_URL', '')
+        url = getattr(self.config, 'OPENCODE_URL', '')
         if not url:
             return
         try:
-            from bot.services.kimi_client import KimiClient
-            # 600s (10 min) gives Kimi room to actually finish the
-            # multi-step skill: read dpi_metrics rows + grep error.log
-            # for the same hour, compare to 7d baseline, render HTML
-            # output. Was 180s — Kimi was getting cut off mid-thought
-            # so every alert came back as "HTTP 504: kimi timed out"
-            # and the dashboard never got the analysis.
-            client = KimiClient(
+            from bot.services.agent_client import AgentClient
+            # 600s (10 min) gives the agent room to finish the multi-step
+            # skill: read dpi_metrics rows + grep error.log for the same
+            # hour, compare to 7d baseline, render HTML output.
+            client = AgentClient(
                 url,
-                getattr(self.config, 'KIMI_BRIDGE_TOKEN', ''),
+                getattr(self.config, 'OPENCODE_SERVER_PASSWORD', ''),
                 getattr(self.config, 'DB_PATH', '') or '/var/lib/vpn-bot/bot.db',
                 default_timeout=600,
-                node_type=getattr(self.config, 'KIMI_NODE_TYPE', 'entry'),
+                username=getattr(self.config, 'OPENCODE_USERNAME', 'opencode'),
+                default_model=getattr(self.config, 'OPENCODE_DEFAULT_MODEL', '') or None,
+                node_type=getattr(self.config, 'AGENT_NODE_TYPE', 'control'),
                 sshfs_mount=getattr(self.config, 'ENTRY_NODE_SSHFS_MOUNT', '/mnt/entry_node'),
             )
             prompt = (
@@ -297,7 +296,7 @@ class AlertManager:
                         conn.commit()
                 except Exception as e:
                     logger.warning(f"dpi-kimi: DB attach failed: {e}")
-            logger.info(f"dpi-kimi: analysis stored for {alert.key} ({len(reply)} chars)")
+            logger.info(f"dpi-agent: analysis stored for {alert.key} ({len(reply)} chars)")
         except Exception as e:
             # Quota / rate-limit / time-out are all transient operator
             # conditions, not bugs in our code. Log them at INFO so the
@@ -305,16 +304,16 @@ class AlertManager:
             msg = str(e).lower()
             if 'rate_limit' in msg or '429' in str(e):
                 logger.info(
-                    f"dpi-kimi: skipping {alert.key} — Kimi quota exhausted "
+                    f"dpi-agent: skipping {alert.key} — provider quota exhausted "
                     f"(will retry on next alert tick after refresh)"
                 )
             elif '504' in str(e) or 'timed out' in msg:
                 logger.info(
-                    f"dpi-kimi: skipping {alert.key} — bridge timed out "
-                    f"(consider larger KIMI_BRIDGE_TIMEOUT)"
+                    f"dpi-agent: skipping {alert.key} — agent timed out "
+                    f"(consider a larger default_timeout)"
                 )
             else:
-                logger.warning(f"dpi-kimi: bridge call failed for {alert.key}: {e}")
+                logger.warning(f"dpi-agent: agent call failed for {alert.key}: {e}")
 
 
 # ====== Concrete checks ======
@@ -398,18 +397,18 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
             )
         return None
 
-    def check_kimi_bridge() -> Optional[Alert]:
+    def check_opencode() -> Optional[Alert]:
         try:
-            from bot.services.xui_reload import reload_xray_health
-            from bot.services.kimi_client import KimiClient
-            url = getattr(config, 'KIMI_BRIDGE_URL', '')
+            from bot.services.agent_client import AgentClient
+            url = getattr(config, 'OPENCODE_URL', '')
             if not url:
                 return None
-            client = KimiClient(
+            client = AgentClient(
                 url,
-                getattr(config, 'KIMI_BRIDGE_TOKEN', ''),
+                getattr(config, 'OPENCODE_SERVER_PASSWORD', ''),
                 config.DB_PATH,
-                node_type=getattr(config, 'KIMI_NODE_TYPE', 'entry'),
+                username=getattr(config, 'OPENCODE_USERNAME', 'opencode'),
+                node_type=getattr(config, 'AGENT_NODE_TYPE', 'control'),
                 sshfs_mount=getattr(config, 'ENTRY_NODE_SSHFS_MOUNT', '/mnt/entry_node'),
             )
             health = client.ping()
@@ -417,9 +416,9 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
                 return None
         except Exception as e:
             return Alert(
-                key='kimi-bridge',
+                key='opencode',
                 severity='warn',
-                title='kimi-bridge не отвечает',
+                title='opencode-сервер не отвечает',
                 detail=str(e)[:200],
                 min_cycles=2,
             )
@@ -586,7 +585,7 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
 
     checks.extend([
         check_cpu, check_ram, check_disk,
-        check_kimi_bridge, check_xray_reload_sidecar,
+        check_opencode, check_xray_reload_sidecar,
         check_dpi_short_sessions, check_dpi_handshake_spike, check_dpi_rst_spike,
     ])
     return checks

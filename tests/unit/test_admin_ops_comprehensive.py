@@ -43,7 +43,7 @@ def mock_config():
     config.SUPER_ADMIN_ID = "123"
     config.FORUM_ENABLED = False
     config.FORUM_GROUP_ID = "456"
-    config.KIMI_BRIDGE_URL = ""
+    config.OPENCODE_URL = ""
     return config
 
 

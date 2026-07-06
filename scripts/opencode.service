@@ -1,0 +1,27 @@
+[Unit]
+Description=OpenCode headless server for vpn-bot (/ai agent backend)
+After=network.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+# WorkingDirectory holds opencode.json + AGENTS.md + skills/, so the
+# server picks up project config and instructions automatically.
+WorkingDirectory=/opt/vpn-bot
+# Secrets live here (chmod 600): OPENCODE_SERVER_PASSWORD plus any
+# provider API keys (e.g. MOONSHOT_API_KEY / ANTHROPIC_API_KEY) the
+# selected model needs. NEVER hardcode keys in this unit or in git.
+EnvironmentFile=/etc/opencode.env
+# Bind 0.0.0.0 so the vpn-bot container can reach us via
+# host.docker.internal:4096 (docker host-gateway). The basic-auth
+# password (OPENCODE_SERVER_PASSWORD) is what actually protects it —
+# also restrict :4096 at the host firewall to the docker bridge subnet.
+ExecStart=/usr/local/bin/opencode serve --hostname 0.0.0.0 --port 4096
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -8,14 +8,14 @@
 # Usage:
 #   sudo ./scripts/install.sh                          # interactive, all features
 #   sudo ./scripts/install.sh --yes                    # non-interactive defaults
-#   sudo ./scripts/install.sh --no-kimi --no-caddy     # skip those parts
+#   sudo ./scripts/install.sh --no-agent --no-caddy    # skip those parts
 #
 # Flags:
 #   --yes              don't prompt, assume "yes" everywhere
 #   --no-docker        skip docker engine install (already installed)
 #   --no-deploy        skip the actual `docker compose up`
 #   --no-caddy         skip Caddy + Let's Encrypt
-#   --no-kimi          skip kimi-code + kimi-bridge
+#   --no-agent         skip the OpenCode agent server
 #   --no-backup        skip the daily backup timer
 
 set -euo pipefail
@@ -28,7 +28,7 @@ ASSUME_YES="${ASSUME_YES:-0}"
 DO_DOCKER=1
 DO_DEPLOY=1
 DO_CADDY=1
-DO_KIMI=1
+DO_AGENT=1
 DO_BACKUP=1
 
 for arg in "$@"; do
@@ -37,7 +37,7 @@ for arg in "$@"; do
     --no-docker) DO_DOCKER=0 ;;
     --no-deploy) DO_DEPLOY=0 ;;
     --no-caddy)  DO_CADDY=0 ;;
-    --no-kimi)   DO_KIMI=0 ;;
+    --no-agent)  DO_AGENT=0 ;;
     --no-backup) DO_BACKUP=0 ;;
     -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
     *) echo "Unknown flag: $arg" >&2; exit 2 ;;
@@ -159,70 +159,65 @@ CADDY
   fi
 fi
 
-# ---------- 5. kimi-code + bridge ----------
+# ---------- 5. OpenCode agent server ----------
 
-if [[ "$DO_KIMI" -eq 1 ]] && ask_yn "Install kimi-code CLI + bridge (admin AI agent in Telegram)?"; then
-  if [[ -x /root/.kimi-code/bin/kimi ]]; then
-    log "kimi-code already installed: $(/root/.kimi-code/bin/kimi --version)"
+if [[ "$DO_AGENT" -eq 1 ]] && ask_yn "Install OpenCode server (admin AI agent in Telegram)?"; then
+  if command -v opencode >/dev/null 2>&1; then
+    log "opencode already installed: $(command -v opencode)"
   else
-    log "Downloading kimi-code installer..."
-    curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash
+    log "Downloading opencode installer..."
+    curl -fsSL https://opencode.ai/install | bash
   fi
 
-  log "Installing kimi-bridge systemd service..."
-  if [[ ! -f "$REPO_DIR/scripts/kimi_bridge.py" ]]; then
-    warn "scripts/kimi_bridge.py not in repo — drop it next to install.sh."
-  else
-    install -m 0755 "$REPO_DIR/scripts/kimi_bridge.py" /usr/local/bin/kimi_bridge.py
-    install -m 0644 "$REPO_DIR/scripts/kimi-bridge.service" /etc/systemd/system/kimi-bridge.service
+  log "Installing opencode.json + systemd unit..."
+  install -m 0644 "$REPO_DIR/scripts/opencode.json" "$APP_DIR/opencode.json"
+  install -m 0644 "$REPO_DIR/scripts/opencode.service" /etc/systemd/system/opencode.service
+  mkdir -p /tmp/agent_out
 
-    if [[ ! -f /etc/kimi-bridge.env ]]; then
-      TOKEN=$(openssl rand -hex 24)
-      cat > /etc/kimi-bridge.env <<ENV
-KIMI_BIN=/root/.kimi-code/bin/kimi
-KIMI_BRIDGE_TOKEN=${TOKEN}
-KIMI_BRIDGE_PORT=7077
-KIMI_BRIDGE_WORKDIR=/root
-KIMI_BRIDGE_TIMEOUT=180
+  if [[ ! -f /etc/opencode.env ]]; then
+    PW=$(openssl rand -hex 24)
+    cat > /etc/opencode.env <<ENV
+OPENCODE_SERVER_PASSWORD=${PW}
+# Add the provider key matching opencode.json "model", e.g.:
+# MOONSHOT_API_KEY=...
+# ANTHROPIC_API_KEY=...
 ENV
-      chmod 600 /etc/kimi-bridge.env
-      log "Generated /etc/kimi-bridge.env with a fresh shared token."
-    fi
+    chmod 600 /etc/opencode.env
+    log "Generated /etc/opencode.env with a fresh basic-auth password."
+    warn "Add a provider API key to /etc/opencode.env (see opencode.json 'model')."
+  fi
 
-    pip3 install --break-system-packages -q fastapi uvicorn pydantic >/dev/null 2>&1 || \
-      apt-get -qq install -y python3-fastapi python3-uvicorn python3-pydantic >/dev/null
+  systemctl daemon-reload
+  systemctl enable --now opencode.service
 
-    systemctl daemon-reload
-    systemctl enable --now kimi-bridge.service
+  PW=$(grep '^OPENCODE_SERVER_PASSWORD=' /etc/opencode.env | cut -d= -f2-)
+  sleep 3
+  if curl -fsS --max-time 5 -u "opencode:${PW}" http://127.0.0.1:4096/global/health >/dev/null; then
+    log "opencode server healthy on :4096."
+  else
+    warn "opencode not responding on :4096 — check 'journalctl -u opencode'."
+  fi
 
-    sleep 3
-    if curl -fsS --max-time 5 http://127.0.0.1:7077/health >/dev/null; then
-      log "kimi-bridge healthy on :7077."
+  # Wire it into the bot's .env
+  for var in "OPENCODE_URL=http://host.docker.internal:4096" \
+             "OPENCODE_USERNAME=opencode" \
+             "OPENCODE_SERVER_PASSWORD=${PW}"; do
+    key="${var%%=*}"
+    if grep -q "^${key}=" "$APP_DIR/.env"; then
+      sed -i "s#^${key}=.*#${var}#" "$APP_DIR/.env"
     else
-      warn "kimi-bridge not responding on :7077 — check 'journalctl -u kimi-bridge'."
+      echo "$var" >> "$APP_DIR/.env"
     fi
+  done
 
-    # Wire it into the bot's .env
-    TOKEN=$(grep '^KIMI_BRIDGE_TOKEN=' /etc/kimi-bridge.env | cut -d= -f2-)
-    for var in "KIMI_BRIDGE_URL=http://host.docker.internal:7077" "KIMI_BRIDGE_TOKEN=${TOKEN}"; do
-      key="${var%%=*}"
-      if grep -q "^${key}=" "$APP_DIR/.env"; then
-        sed -i "s#^${key}=.*#${var}#" "$APP_DIR/.env"
-      else
-        echo "$var" >> "$APP_DIR/.env"
-      fi
-    done
+  cat <<MSG
 
-    cat <<MSG
-
-  ⚠ One manual step before /ai works:
-    kimi-code uses an interactive OAuth flow. Run on this host:
-        tmux new -A -s kimi-setup '/root/.kimi-code/bin/kimi'
-    Inside the TUI: /login → copy the URL into your browser → authorise.
-    Then Ctrl+B D to detach; tokens save to /root/.kimi-code/credentials.
+  ⚠ Before /ai works: pick the provider/model in $APP_DIR/opencode.json and
+    put the matching API key in /etc/opencode.env, then:
+        systemctl restart opencode
+    (Some providers need 'opencode auth login' instead of an env key.)
 
 MSG
-  fi
 fi
 
 # ---------- 6. backup timer ----------

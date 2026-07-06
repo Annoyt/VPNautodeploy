@@ -1030,10 +1030,10 @@ class WebAppServer:
             'TOPIC_REJECTED', 'TOPIC_STATS', 'TOPIC_PAYMENTS',
             'TOPIC_SUPPORT', 'TOPIC_SOLVED', 'TOPIC_AI',
             'WEBAPP_URL', 'XUI_API_URL', 'XUI_CONTAINER_NAME',
-            'KIMI_BRIDGE_URL', 'KIMI_DEFAULT_MODE',
+            'OPENCODE_URL', 'AI_DEFAULT_MODE', 'OPENCODE_DEFAULT_MODEL',
         ]
         # SECURITY: never widen this list to BOT_TOKEN, XUI_PASSWORD,
-        # REALITY_PUBLIC_KEY, or KIMI_BRIDGE_TOKEN. The dashboard is
+        # REALITY_PUBLIC_KEY, or OPENCODE_SERVER_PASSWORD. The dashboard is
         # admin-only, but Mini Apps cache HTML in clients we don't control.
         settings_dict = {k: getattr(cfg, k, None) for k in public_keys}
 
@@ -1042,7 +1042,7 @@ class WebAppServer:
             'BOT_TOKEN': bool(getattr(cfg, 'BOT_TOKEN', '')),
             'XUI_PASSWORD_default_admin': getattr(cfg, 'XUI_PASSWORD', '') == 'admin',
             'REALITY_PUBLIC_KEY': bool(getattr(cfg, 'REALITY_PUBLIC_KEY', '')),
-            'KIMI_BRIDGE_TOKEN': bool(getattr(cfg, 'KIMI_BRIDGE_TOKEN', '')),
+            'OPENCODE_SERVER_PASSWORD': bool(getattr(cfg, 'OPENCODE_SERVER_PASSWORD', '')),
         }
 
         return web.json_response({
