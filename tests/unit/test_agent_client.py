@@ -142,6 +142,20 @@ class TestAsk:
         # First POST creates the session, second sends the message.
         assert p.call_count == 2
 
+    def test_ask_sends_model_as_object(self, temp_db):
+        """model must be posted as {providerID, modelID}, not a string
+        (OpenCode's /message endpoint rejects a bare string with HTTP 400)."""
+        client = AgentClient(
+            "http://localhost:4096", "pw", temp_db,
+            default_model="opencode-go/minimax-m3",
+        )
+        create = _resp(json_data={"id": "ses_1"})
+        message = _resp(json_data={"parts": [{"type": "text", "text": "ok"}]})
+        with patch("bot.services.agent_client.requests.post", side_effect=[create, message]) as p:
+            client.ask("pm:1", "hi")
+        body = p.call_args_list[1].kwargs["json"]
+        assert body["model"] == {"providerID": "opencode-go", "modelID": "minimax-m3"}
+
     def test_ask_http_error_raises(self, client):
         create = _resp(json_data={"id": "ses_1"})
         err = _resp(status=500)

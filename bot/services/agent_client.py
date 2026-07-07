@@ -360,7 +360,14 @@ class AgentClient:
         version renames the route or fields (verify against /doc)."""
         body: dict = {"parts": [{"type": "text", "text": text}]}
         if model:
-            body["model"] = model
+            # OpenCode's message endpoint expects model as an object
+            # {providerID, modelID}, not a "provider/model" string — a
+            # bare string gets rejected with HTTP 400 "Expected object".
+            if "/" in model:
+                prov, mod = model.split("/", 1)
+                body["model"] = {"providerID": prov, "modelID": mod}
+            else:
+                body["model"] = {"modelID": model}
         if agent:
             body["agent"] = agent
         return requests.post(
