@@ -7,6 +7,7 @@ using HTTP API as primary method with direct DB access as fallback.
 import logging
 import asyncio
 import concurrent.futures
+import json
 from typing import Optional, Dict, Any
 
 from bot.config import Settings
@@ -441,19 +442,21 @@ class XUIService:
         Returns:
             True if successful
         """
+        # Remote/API-only deployment (e.g. bot on the entry node, no shared
+        # x-ui.db volume): route the write through 3x-ui's own HTTP API,
+        # which applies it to the live xray itself (no local reload needed).
         if not self.db:
-            logger.error("No X-UI database configured")
-            return False
-        
+            return self._api_add_client_sync(client, inbound_id)
+
         try:
             settings = self.db.get_inbound_settings(inbound_id)
             if settings is None:
                 logger.error(f"Inbound {inbound_id} not found")
                 return False
-            
+
             clients = settings.get('clients', [])
             email = client.get('email')
-            
+
             # Remove duplicate if exists
             clients = [c for c in clients if c.get('email') != email]
             clients.append(client)
@@ -545,16 +548,16 @@ class XUIService:
         Returns:
             True if successful
         """
+        # Remote/API-only deployment: delete via 3x-ui's HTTP API.
         if not self.db:
-            logger.error("No X-UI database configured")
-            return False
-        
+            return self._api_remove_client_sync(email, inbound_id)
+
         try:
             settings = self.db.get_inbound_settings(inbound_id)
             if settings is None:
                 logger.error(f"Inbound {inbound_id} not found")
                 return False
-            
+
             clients = settings.get('clients', [])
             original_count = len(clients)
             clients = [c for c in clients if c.get('email') != email]
@@ -585,7 +588,105 @@ class XUIService:
         except Exception as e:
             logger.error(f"Failed to remove client: {e}")
             return False
-    
+
+    # ===== API-only client management =====
+    # Used when the bot runs on a node without direct x-ui.db access
+    # (e.g. the entry node): 3x-ui's own HTTP API owns its DB and applies
+    # changes to the live xray, so no shared volume or local reload needed.
+
+    def _api_add_client_sync(self, client: dict, inbound_id: int = None) -> bool:
+        if not self.api:
+            logger.error("No X-UI DB and no X-UI API configured; cannot add client")
+            return False
+        try:
+            return bool(self._run_sync(self._api_add_client_async(client, inbound_id)))
+        except Exception as e:
+            logger.error(f"API add_client failed: {e}")
+            return False
+
+    def _api_remove_client_sync(self, email: str, inbound_id: int = None) -> bool:
+        if not self.api:
+            logger.error("No X-UI DB and no X-UI API configured; cannot remove client")
+            return False
+        try:
+            return bool(self._run_sync(self._api_remove_client_async(email, inbound_id)))
+        except Exception as e:
+            logger.error(f"API remove_client failed: {e}")
+            return False
+
+    async def _resolve_inbound_id_async(self, inbound_id: int = None) -> Optional[int]:
+        """Target inbound for API ops: explicit arg, else configured
+        INBOUND_ID, else the first VLESS inbound the panel reports."""
+        if inbound_id:
+            return inbound_id
+        cfg_id = int(getattr(self.config, 'INBOUND_ID', 0) or 0)
+        if cfg_id:
+            return cfg_id
+        try:
+            inbounds = await self.api.get_inbounds()
+        except Exception as e:
+            logger.error(f"API get_inbounds failed: {e}")
+            return None
+        for ib in inbounds or []:
+            if ib.get('protocol') == 'vless':
+                return ib.get('id')
+        return inbounds[0].get('id') if inbounds else None
+
+    @staticmethod
+    def _find_client_id_by_email(inbound: dict, email: str) -> Optional[str]:
+        """Extract a client's UUID from an inbound dict by matching email."""
+        if not inbound:
+            return None
+        raw = inbound.get('settings')
+        try:
+            settings = json.loads(raw) if isinstance(raw, str) else (raw or {})
+        except (ValueError, TypeError):
+            return None
+        for c in settings.get('clients', []):
+            if c.get('email') == email:
+                return c.get('id')
+        return None
+
+    async def _api_add_client_async(self, client: dict, inbound_id: int = None) -> bool:
+        iid = await self._resolve_inbound_id_async(inbound_id)
+        if iid is None:
+            logger.error("API add_client: could not resolve target inbound")
+            return False
+        if not await self.api.add_client(iid, client):
+            return False
+        ws = int(getattr(self.config, 'WS_INBOUND_ID', 0) or 0)
+        if ws and ws != iid:
+            try:
+                await self.api.add_client(ws, client)
+            except Exception as e:
+                logger.warning(f"API WS mirror add soft-failed: {e}")
+        logger.info(f"Added client {redact_email(client.get('email'))} via API to inbound {iid}")
+        return True
+
+    async def _api_remove_client_async(self, email: str, inbound_id: int = None) -> bool:
+        iid = await self._resolve_inbound_id_async(inbound_id)
+        if iid is None:
+            logger.error("API remove_client: could not resolve target inbound")
+            return False
+        inbound = await self.api.get_inbound(iid)
+        client_id = self._find_client_id_by_email(inbound, email)
+        if not client_id:
+            logger.warning(f"API remove_client: {redact_email(email)} not in inbound {iid}")
+            return False
+        ok = await self.api.del_client(iid, client_id)
+        ws = int(getattr(self.config, 'WS_INBOUND_ID', 0) or 0)
+        if ws and ws != iid:
+            try:
+                wib = await self.api.get_inbound(ws)
+                wid = self._find_client_id_by_email(wib, email)
+                if wid:
+                    await self.api.del_client(ws, wid)
+            except Exception as e:
+                logger.warning(f"API WS mirror remove soft-failed: {e}")
+        if ok:
+            logger.info(f"Removed client {redact_email(email)} via API from inbound {iid}")
+        return ok
+
     # Note: _run_async(), _get_executor(), shutdown_executor() removed (C-03 fix)
     # They were causing deadlock risks when called from async context.
     # Use asyncio.run() directly for sync wrappers or better - use async methods.

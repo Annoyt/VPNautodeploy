@@ -427,6 +427,36 @@ class XUIAPIClient:
             logger.error(f"Error adding client: {e}")
             return False
     
+    async def del_client(self, inbound_id: int, client_id: str) -> bool:
+        """Delete a client from an inbound via API.
+
+        3x-ui endpoint: ``POST {api_path}/{inbound_id}/delClient/{clientId}``
+        where ``clientId`` is the client's UUID (vless/vmess).
+
+        Args:
+            inbound_id: The inbound ID
+            client_id: The client's UUID
+
+        Returns:
+            True if 3x-ui reported success
+        """
+        try:
+            session = await self._get_session()
+            url = f"{self.config.base_url}{self.config.api_path}/{inbound_id}/delClient/{client_id}"
+            async with session.post(url) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    if data.get("success"):
+                        logger.info(f"Client {client_id} deleted from inbound {inbound_id}")
+                        return True
+                    logger.warning(f"delClient API error: {data.get('msg', 'unknown')}")
+                    return False
+                logger.warning(f"Failed to delete client: HTTP {response.status}")
+                return False
+        except Exception as e:
+            logger.error(f"Error deleting client: {e}")
+            return False
+
     async def close(self):
         """Close the HTTP session."""
         if self.session and not self.session.closed:
