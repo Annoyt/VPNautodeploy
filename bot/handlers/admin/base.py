@@ -47,7 +47,9 @@ ADMIN_HELP_TEXT = (
     "• <code>/grant_100gb @x</code> — +100 ГБ к текущей квоте (add)\n"
     "• <code>/set_limit @x N</code> — лимит IP-устройств\n"
     "• <code>/expire @x YYYY-MM-DD</code> — установить дату истечения\n"
-    "• <code>/approve_payment @x</code> — подтвердить оплату\n\n"
+    "• <code>/approve_payment @x</code> — подтвердить оплату\n"
+    "• <code>/addmail email [ГБ] [дней]</code> — создать юзера по email "
+    "и выслать ключ + инструкцию письмом (по умолч. 100 ГБ / 30 дней)\n\n"
 
     "💳 <b>Оплата (для юзеров — /buy в PM)</b>\n"
     "• юзер вводит <code>/buy</code> или жмёт «💳 Купить подписку» в меню\n"
@@ -116,6 +118,9 @@ class AdminHandlerBase(BaseHandler):
         '/topics': 'show_topics',
         '/quota': 'set_quota',
         '/expire': 'set_expire',
+        # Create an email-only user and mail them the key
+        '/addmail': 'add_mail_user',
+        '/mailkey': 'add_mail_user',
         # Help
         '/help': 'show_admin_help',
         '/admin_help': 'show_admin_help',

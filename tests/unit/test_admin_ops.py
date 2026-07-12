@@ -1114,3 +1114,71 @@ class TestRepairStuckSupport:
 
         text = handler.bot.send_message.call_args[1]['text']
         assert "Восстановлено: <b>0</b>" in text
+
+
+class TestAddMailUser:
+    """Tests for /addmail — create an email-only user and mail the key."""
+
+    @pytest.fixture
+    def handler(self, mock_bot, mock_db, mock_config):
+        h = AdminOpsMixin.__new__(AdminOpsMixin)
+        h.bot = mock_bot
+        h.db = mock_db
+        h.config = mock_config
+        h._get_thread_id = Mock(return_value=None)
+        return h
+
+    def _last_text(self, handler):
+        return handler.bot.send_message.call_args[1]['text']
+
+    def test_usage_without_args(self, handler):
+        handler.add_mail_user('admin', [])
+        assert '/addmail' in self._last_text(handler)
+
+    def test_rejects_bad_email(self, handler):
+        handler.add_mail_user('admin', ['not-an-email'])
+        assert 'email' in self._last_text(handler).lower()
+
+    def test_smtp_not_configured(self, handler):
+        mailer = Mock()
+        mailer.is_configured.return_value = False
+        handler.bot.services = {'email': mailer}
+        handler.add_mail_user('admin', ['user@example.com'])
+        assert 'SMTP' in self._last_text(handler)
+
+    def test_provisions_and_sends(self, handler):
+        mailer = Mock()
+        mailer.is_configured.return_value = True
+        mailer.send_key.return_value = True
+        handler.bot.services = {'email': mailer}
+        handler.db.log_admin_action = Mock()
+
+        with patch.object(AdminOpsMixin, '_provision_email_user',
+                          return_value='https://sub.url/tok') as prov:
+            handler.add_mail_user('admin', ['user@example.com', '50', '14'])
+            # gb/days parsed and forwarded
+            prov.assert_called_once_with('user@example.com', 50, 14)
+            # send happens on a worker thread — join it
+            import threading
+            for t in threading.enumerate():
+                if t.name.startswith('addmail-'):
+                    t.join(timeout=5)
+            mailer.send_key.assert_called_once_with(
+                'user@example.com', 'https://sub.url/tok', lang='ru')
+
+    def test_provision_failure_reported(self, handler):
+        mailer = Mock()
+        mailer.is_configured.return_value = True
+        handler.bot.services = {'email': mailer}
+        with patch.object(AdminOpsMixin, '_provision_email_user',
+                          side_effect=RuntimeError('X-UI sync failed')):
+            handler.add_mail_user('admin', ['user@example.com'])
+        assert '❌' in self._last_text(handler)
+        mailer.send_key.assert_not_called()
+
+    def test_bad_gb_arg(self, handler):
+        mailer = Mock()
+        mailer.is_configured.return_value = True
+        handler.bot.services = {'email': mailer}
+        handler.add_mail_user('admin', ['user@example.com', 'lots'])
+        assert 'ГБ' in self._last_text(handler)

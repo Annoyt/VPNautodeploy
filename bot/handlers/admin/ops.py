@@ -712,3 +712,153 @@ class AdminOpsMixin(AdminHandlerBase):
             parse_mode='HTML',
             message_thread_id=self._get_thread_id(chat_id),
         )
+
+    # ----- /addmail email@host [gb] [days] -----
+
+    # Default grant for a manually-added email-only user. Chosen over the
+    # 7-day demo because such a user can't easily re-request via Telegram —
+    # a demo that silently expires would strand them.
+    MAIL_DEFAULT_GB = 100
+    MAIL_DEFAULT_DAYS = 30
+
+    def add_mail_user(self, chat_id: str, args: list) -> None:
+        """Create an email-only user (no Telegram account), register the
+        key in X-UI, and email them the subscription link + setup guide.
+
+        Usage: /addmail user@example.com [gb] [days]
+        The address is both the delivery target and the user's stored
+        contact_email. Re-running for the same address reuses the same
+        user and UUID (installed keys keep working) and just re-sends.
+        """
+        thread_id = self._get_thread_id(chat_id)
+
+        def reply(text: str) -> None:
+            self.bot.send_message(chat_id=chat_id, text=text,
+                                  parse_mode='HTML', message_thread_id=thread_id)
+
+        if not args:
+            reply("❌ Формат: <code>/addmail user@example.com [ГБ] [дней]</code>\n"
+                  f"По умолчанию: {self.MAIL_DEFAULT_GB} ГБ, {self.MAIL_DEFAULT_DAYS} дней.")
+            return
+
+        from bot.utils.validators import validate_email
+        email = args[0].strip()
+        if not validate_email(email):
+            reply("❌ Неверный формат email.")
+            return
+
+        gb = self.MAIL_DEFAULT_GB
+        days = self.MAIL_DEFAULT_DAYS
+        if len(args) >= 2:
+            try:
+                gb = int(args[1])
+            except ValueError:
+                reply("❌ ГБ должно быть числом.")
+                return
+        if len(args) >= 3:
+            try:
+                days = int(args[2])
+            except ValueError:
+                reply("❌ Дней должно быть числом.")
+                return
+
+        mailer = self.bot.services.get('email') if hasattr(self.bot, 'services') else None
+        if mailer is None:
+            from bot.services.email_service import EmailService
+            mailer = EmailService(self.config)
+        if not mailer.is_configured():
+            reply("❌ Почта не настроена (SMTP_HOST). Заполни SMTP_* в .env и перезапусти бота.")
+            return
+
+        try:
+            sub_url = self._provision_email_user(email, gb, days)
+        except Exception as e:
+            logger.exception("add_mail_user provisioning failed")
+            reply(f"❌ Не удалось создать ключ: {str(e)[:200]}")
+            return
+        if not sub_url:
+            reply("❌ Ключ создан, но не удалось собрать ссылку (проверь WEBAPP_URL).")
+            return
+
+        # SMTP handshake is seconds — send off the polling thread.
+        import threading
+
+        def _worker() -> None:
+            ok = mailer.send_key(email, sub_url, lang='ru')
+            if ok:
+                reply(f"✉️ Готово. Пользователь <code>{email}</code> создан "
+                      f"({gb} ГБ, {days} дн.), ключ и инструкция отправлены на почту.")
+            else:
+                reply(f"⚠️ Пользователь <code>{email}</code> создан, но письмо "
+                      "не отправилось. Проверь SMTP и попробуй /addmail ещё раз.")
+
+        threading.Thread(target=_worker, daemon=True,
+                         name=f"addmail-{email}").start()
+
+        try:
+            self.db.log_admin_action(
+                str(self.config.SUPER_ADMIN_ID), 'cmd_addmail', email,
+                f"{gb}GB/{days}d")
+        except Exception:
+            pass
+
+    def _provision_email_user(self, email: str, gb: int, days: int) -> Optional[str]:
+        """Create-or-update the email-only user + X-UI key. Returns the
+        subscription URL. Raises on X-UI failure so the caller reports it.
+        """
+        import asyncio
+        import binascii
+        from datetime import datetime, timedelta
+
+        from bot.config.constants import UserState, Platform, BYTES_PER_GB
+        from bot.models.user import User
+        from bot.services.vpn import VPNService
+        from bot.services.subscription import SubscriptionService
+
+        # Stable synthetic id from the address: idempotent + can't collide
+        # with a real Telegram chat id.
+        existing = None
+        with self.db._connect() as c:
+            row = c.execute(
+                "SELECT chat_id FROM users WHERE contact_email = ? LIMIT 1",
+                (email,),
+            ).fetchone()
+            if row:
+                existing = row[0]
+        crc = binascii.crc32(email.encode()) & 0xFFFFFFFF
+        target_chat = existing or f"ext_{crc:08x}"
+
+        user = self.db.get_user(target_chat) or User(chat_id=target_chat, username=None)
+
+        vpn = VPNService(self.config)
+        expiry_ms = int((datetime.now() + timedelta(days=days)).timestamp() * 1000)
+        if not user.uuid:
+            client = vpn.create_client_config(
+                chat_id=target_chat, username=None,
+                traffic_gb=gb, expiry_days=days,
+            )
+            user.uuid = client['id']
+            user.email = client['email']
+        else:
+            # Re-issue: keep the UUID so an already-installed key still works.
+            client = {
+                "id": user.uuid, "flow": "xtls-rprx-vision", "email": user.email,
+                "limitIp": 1, "totalGB": gb * BYTES_PER_GB,
+                "expiryTime": expiry_ms, "enable": True,
+            }
+
+        xui = self.bot.services.get('xui') if hasattr(self.bot, 'services') else None
+        if xui is None:
+            from bot.services.xui_service import XUIService
+            xui = XUIService(self.config)
+        if not asyncio.run(xui.sync_user(target_chat, client)):
+            raise RuntimeError("X-UI sync failed")
+
+        user.status = UserState.PAID.value
+        user.platform = user.platform or Platform.ANDROID.value
+        user.quota_gb = float(gb)
+        user.subscription_expiry = (datetime.now() + timedelta(days=days)).isoformat()
+        user.contact_email = email
+        self.db.save_user(user)
+
+        return SubscriptionService(self.config).build_subscription_url(user)

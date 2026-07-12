@@ -162,6 +162,17 @@ def init_services(bot: Bot, config: Settings) -> dict:
         logger.error(f"Failed to init X-UI Service: {e}")
         services['xui'] = None
     
+    # Email relay (backup key delivery). Stateless — dormant when
+    # SMTP_HOST is empty; handlers check is_configured().
+    try:
+        from bot.services.email_service import EmailService
+        services['email'] = EmailService(config)
+        logger.info("Email service initialized (configured=%s)",
+                    services['email'].is_configured())
+    except Exception as e:
+        logger.error(f"Failed to init Email service: {e}")
+        services['email'] = None
+
     # Phase 4: Notification Service
     try:
         services['notifications'] = NotificationService(bot, bot.db, config)
