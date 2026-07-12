@@ -100,6 +100,32 @@ def test_add_client_no_delete_on_other_errors(svc):
     svc.api.del_client_by_email.assert_not_awaited()
 
 
+def test_sync_user_api_mode_skips_reload(svc, monkeypatch):
+    # API mode without a reload sidecar: the panel applies changes to
+    # xray itself, so the missing XRAY_RELOAD_URL must not fail the sync
+    # (it used to block every key issue on the entry node).
+    import asyncio
+    monkeypatch.delenv('XRAY_RELOAD_URL', raising=False)
+    svc.api.add_client = AsyncMock(return_value=True)
+    svc.reload_xray_sync = Mock(return_value=False)  # would fail if consulted
+
+    ok = asyncio.run(svc.sync_user('42', {"email": "u@x", "id": "uuid1"}))
+    assert ok is True
+    svc.reload_xray_sync.assert_not_called()
+
+
+def test_sync_user_honors_configured_sidecar(svc, monkeypatch):
+    # An explicitly configured sidecar is still authoritative in any mode.
+    import asyncio
+    monkeypatch.setenv('XRAY_RELOAD_URL', 'http://127.0.0.1:8081')
+    svc.api.add_client = AsyncMock(return_value=True)
+    svc.reload_xray_sync = Mock(return_value=False)
+
+    ok = asyncio.run(svc.sync_user('42', {"email": "u@x", "id": "uuid1"}))
+    assert ok is False
+    svc.reload_xray_sync.assert_called_once()
+
+
 def test_remove_client_deletes_by_email(svc):
     # v3.4.0 removes clients globally by email (no per-inbound uuid lookup).
     svc.api.del_client_by_email = AsyncMock(return_value=True)

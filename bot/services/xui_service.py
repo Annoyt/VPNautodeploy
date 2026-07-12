@@ -8,6 +8,7 @@ import logging
 import asyncio
 import concurrent.futures
 import json
+import os
 from typing import Optional, Dict, Any
 
 from bot.config import Settings
@@ -1004,14 +1005,28 @@ class XUIService:
         if not success:
             logger.error(f"Failed to add client {redact_email(email)}")
             return False
-        
-        reload_ok = await asyncio.to_thread(self.reload_xray_sync)
-        if not reload_ok:
-            logger.warning(f"Client {redact_email(email)} added but XRay reload failed")
-            return False
-        
+
+        if self._reload_required():
+            reload_ok = await asyncio.to_thread(self.reload_xray_sync)
+            if not reload_ok:
+                logger.warning(f"Client {redact_email(email)} added but XRay reload failed")
+                return False
+
         logger.info(f"Successfully synced user {chat_id} ({redact_email(email)})")
         return True
+
+    def _reload_required(self) -> bool:
+        """Whether a bot-driven xray reload must follow client changes.
+
+        The reload sidecar exists for direct x-ui.db writes: xray won't
+        see a new client until something reloads it. In API mode the
+        panel applies changes itself, so with no sidecar configured the
+        reload is a no-op — treating it as a failure blocked every key
+        issue on the entry node ("added but XRay reload failed").
+        """
+        if (os.environ.get('XRAY_RELOAD_URL') or '').strip():
+            return True  # explicitly configured — honor it in any mode
+        return self.db is not None  # DB mode can't work without it
     
     def remove_client(self, email: str, inbound_id: int = None) -> bool:
         """Remove client from X-UI (convenience method matching XUISyncService API).
@@ -1025,11 +1040,11 @@ class XUIService:
         """
         if not self.remove_client_sync(email, inbound_id):
             return False
-        
-        if not self.reload_xray_sync():
+
+        if self._reload_required() and not self.reload_xray_sync():
             logger.warning(f"Removed client {redact_email(email)} but XRay reload failed")
             return False
-        
+
         return True
     
     async def __aenter__(self):
