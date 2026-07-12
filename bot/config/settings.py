@@ -135,7 +135,20 @@ class Settings:
             self.SS_INBOUND_ID: int = int(os.getenv('SS_INBOUND_ID', '0') or '0')
         except ValueError:
             self.SS_INBOUND_ID = 0
-        
+        # Primary inbound the client's UUID lives on (VLESS-Reality). Used
+        # by the API-mode client add to know which inbound is canonical
+        # when a caller doesn't pass one.
+        try:
+            self.INBOUND_ID: int = int(os.getenv('INBOUND_ID', '1') or '1')
+        except ValueError:
+            self.INBOUND_ID = 1
+        # Second VMess transport inbound (xhttp / WS2). Attached alongside
+        # the primary in API mode so new clients get the xhttp fallback too.
+        try:
+            self.WS2_INBOUND_ID: int = int(os.getenv('WS2_INBOUND_ID', '0') or '0')
+        except ValueError:
+            self.WS2_INBOUND_ID = 0
+
         # Demo limits
         try:
             self.DEMO_TRAFFIC_GB: int = int(os.getenv('DEMO_TRAFFIC_GB', '5'))

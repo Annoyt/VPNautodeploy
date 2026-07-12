@@ -20,7 +20,10 @@ class _Cfg:
     XUI_API_PATH = "/this_is_fine/panel/api/inbounds"
     XUI_DB_PATH = "/nonexistent/x-ui.db"  # → self.db stays None
     WS_INBOUND_ID = 0
-    INBOUND_ID = 0
+    SS_INBOUND_ID = 0
+    WS2_INBOUND_ID = 0
+    INBOUND_ID = 3
+    SS_USER_SALT = ""
 
 
 @pytest.fixture
@@ -33,41 +36,56 @@ def svc():
 
 
 def test_add_client_routes_to_api(svc):
-    svc.api.get_inbounds = AsyncMock(return_value=[{"id": 3, "protocol": "vless"}])
+    # v3.4.0: attaches the client to the primary inbound (INBOUND_ID=3)
+    # in one relational call.
     svc.api.add_client = AsyncMock(return_value=True)
 
     assert svc.add_client_sync({"email": "u@x", "id": "uuid1"}) is True
     svc.api.add_client.assert_awaited()
-    # resolved the vless inbound (id=3) and passed the client through
-    assert svc.api.add_client.await_args[0][0] == 3
+    # first positional arg is the list of inbound ids to attach to
+    assert svc.api.add_client.await_args[0][0] == [3]
+
+
+def test_add_client_attaches_full_protocol_set(svc):
+    # With WS/SS/WS2 inbounds set, the client attaches to all of them in
+    # one call (primary + ws + ss + xhttp).
+    svc.config.WS_INBOUND_ID = 4
+    svc.config.SS_INBOUND_ID = 5
+    svc.config.WS2_INBOUND_ID = 6
+    svc.config.SS_USER_SALT = "salt"  # lets SS password derive so id 5 stays
+    svc.api.add_client = AsyncMock(return_value=True)
+
+    assert svc.add_client_sync({"email": "u@x", "id": "uuid1"}) is True
+    assert svc.api.add_client.await_args[0][0] == [3, 4, 5, 6]
+    # SS password was derived and injected for the SS inbound
+    assert svc.api.add_client.await_args[0][1].get("password")
+
+
+def test_add_client_drops_ss_without_salt(svc):
+    # SS inbound is dropped when we can't derive its per-user password.
+    svc.config.SS_INBOUND_ID = 5
+    svc.config.SS_USER_SALT = ""
+    svc.api.add_client = AsyncMock(return_value=True)
+
+    assert svc.add_client_sync({"email": "u@x", "id": "uuid1"}) is True
+    assert 5 not in svc.api.add_client.await_args[0][0]
 
 
 def test_add_client_api_failure_returns_false(svc):
-    svc.api.get_inbounds = AsyncMock(return_value=[{"id": 3, "protocol": "vless"}])
     svc.api.add_client = AsyncMock(return_value=False)
     assert svc.add_client_sync({"email": "u@x", "id": "uuid1"}) is False
 
 
-def test_remove_client_resolves_uuid_and_deletes(svc):
-    inbound = {
-        "id": 3, "protocol": "vless",
-        "settings": json.dumps({"clients": [{"email": "u@x", "id": "uuid1"}]}),
-    }
-    svc.api.get_inbounds = AsyncMock(return_value=[inbound])
-    svc.api.get_inbound = AsyncMock(return_value=inbound)
-    svc.api.del_client = AsyncMock(return_value=True)
-
+def test_remove_client_deletes_by_email(svc):
+    # v3.4.0 removes clients globally by email (no per-inbound uuid lookup).
+    svc.api.del_client_by_email = AsyncMock(return_value=True)
     assert svc.remove_client_sync("u@x") is True
-    assert tuple(svc.api.del_client.await_args[0]) == (3, "uuid1")
+    assert svc.api.del_client_by_email.await_args[0][0] == "u@x"
 
 
 def test_remove_client_not_found(svc):
-    inbound = {"id": 3, "protocol": "vless", "settings": json.dumps({"clients": []})}
-    svc.api.get_inbounds = AsyncMock(return_value=[inbound])
-    svc.api.get_inbound = AsyncMock(return_value=inbound)
-    svc.api.del_client = AsyncMock(return_value=True)
+    svc.api.del_client_by_email = AsyncMock(return_value=False)
     assert svc.remove_client_sync("missing@x") is False
-    svc.api.del_client.assert_not_awaited()
 
 
 def test_find_client_id_by_email():

@@ -46,10 +46,38 @@ class XUIAPIClient:
         self._csrf_token: Optional[str] = None
 
     async def _get_session(self) -> aiohttp.ClientSession:
-        """Get or create aiohttp session."""
-        if self.session is None or self.session.closed:
+        """Get or create the aiohttp session for the current event loop.
+
+        Two subtleties:
+
+        * The panel is addressed by IP (e.g. http://84.75.76.109:2026) and
+          aiohttp's default CookieJar refuses cookies from IP hosts
+          (RFC 6265); without the session cookie the login POST 403s. So
+          the jar is created with ``unsafe=True``.
+        * The bot's sync wrappers run each call in a fresh ``asyncio.run``
+          loop. An aiohttp session is bound to the loop it was created on,
+          so a session kept from a previous (now-closed) loop must be
+          discarded — reusing it raises "Event loop is closed". We detect a
+          loop change and rebuild, forcing a re-login (the old cookie jar
+          goes with the old session).
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        stale = (
+            self.session is None
+            or self.session.closed
+            or (loop is not None and getattr(self.session, "_loop", None) is not loop)
+        )
+        if stale:
+            self.session = None
+            self._csrf_token = None
             timeout = aiohttp.ClientTimeout(total=self.config.timeout)
-            self.session = aiohttp.ClientSession(timeout=timeout)
+            self.session = aiohttp.ClientSession(
+                timeout=timeout,
+                cookie_jar=aiohttp.CookieJar(unsafe=True),
+            )
         return self.session
 
     async def _fetch_csrf(self) -> Optional[str]:
@@ -205,33 +233,63 @@ class XUIAPIClient:
             # No running loop - safe to use asyncio.run()
             return asyncio.run(self.get_online_clients())
 
+    async def _ensure_auth(self) -> bool:
+        """Make sure we hold a session cookie + CSRF token.
+
+        The panel API endpoints are session-authenticated: an
+        unauthenticated call is *not* answered with 401 but with a 404
+        (the panel hides the API behind the login gate), so callers must
+        log in proactively rather than relying on a 401 retry.
+
+        Touch ``_get_session`` first: if the event loop changed since the
+        last call it rebuilds the session and clears ``_csrf_token``, so
+        the check below correctly forces a re-login instead of reusing a
+        token that belonged to a now-discarded cookie jar.
+        """
+        await self._get_session()
+        if self._csrf_token:
+            return True
+        return await self.login()
+
+    def _auth_headers(self, extra: Optional[dict] = None) -> dict:
+        """Headers every authenticated API call needs (CSRF token)."""
+        headers = {"X-CSRF-TOKEN": self._csrf_token or ""}
+        if extra:
+            headers.update(extra)
+        return headers
+
     async def _authenticated_request(self, method: str, url: str, **kwargs) -> aiohttp.ClientResponse:
-        """Make authenticated request with auto-login on 401 (H-03 fix).
-        
+        """Make authenticated request, logging in first when needed.
+
+        The panel returns 404 (not 401) for API calls made without a
+        session, so we log in *before* the first request and only fall
+        back to a re-login on 401/403 (expired session / stale CSRF).
+
         Args:
             method: HTTP method (get, post, etc.)
             url: Request URL
             **kwargs: Additional arguments for the request
-            
+
         Returns:
             ClientResponse object
         """
+        await self._ensure_auth()
         session = await self._get_session()
-        
-        # Make initial request
-        response = await session.request(method, url, **kwargs)
-        
-        # If 401 Unauthorized, try to login and retry
-        if response.status == 401:
-            logger.warning("XUI API returned 401, attempting re-login...")
-            login_success = await self.login()
-            
-            if login_success:
-                # Retry the request after successful login
-                response = await session.request(method, url, **kwargs)
+
+        headers = dict(kwargs.pop("headers", {}) or {})
+        headers.setdefault("X-CSRF-TOKEN", self._csrf_token or "")
+
+        response = await session.request(method, url, headers=headers, **kwargs)
+
+        # 401/403 → session expired or CSRF rotated. Re-login and retry once.
+        if response.status in (401, 403):
+            logger.warning(f"XUI API returned {response.status}, attempting re-login...")
+            if await self.login():
+                headers["X-CSRF-TOKEN"] = self._csrf_token or ""
+                response = await session.request(method, url, headers=headers, **kwargs)
             else:
                 logger.error("XUI API re-login failed")
-        
+
         return response
     
     async def get_inbounds(self) -> List[Dict[str, Any]]:
@@ -388,68 +446,114 @@ class XUIAPIClient:
             logger.error(f"Error updating inbound {inbound_id}: {e}")
             return False
     
-    async def add_client(self, inbound_id: int, client_config: dict) -> bool:
-        """Add client to existing inbound via API.
-        
-        Args:
-            inbound_id: The inbound ID
-            client_config: Client configuration dict
-            
-        Returns:
-            True if successful
+    def _clients_url(self, suffix: str) -> str:
+        """Build a URL under the v3.4.0 relational clients namespace
+        (``/panel/api/clients``), which is separate from the inbounds
+        API path used for listing."""
+        return f"{self.config.base_url}{self.config.base_path}/panel/api/clients{suffix}"
+
+    @staticmethod
+    def _to_v34_client(cfg: dict) -> dict:
+        """Map the bot's classic 3x-ui client dict to the v3.4.0 shape.
+
+        The bot builds clients in the old xray/settings style (``id`` =
+        UUID, camelCase ``limitIp``/``totalGB``/``expiryTime``). 3x-ui
+        v3.4.0's ``clients/add`` reads the UUID from the ``id`` field
+        (verified: sending ``uuid`` is ignored and a fresh UUID is
+        generated, sending ``id`` preserves it) and honours ``password``
+        (the SS-2022 per-user key). Preserving both keeps the bot's
+        already-generated subscription links valid.
         """
+        def _int(*keys):
+            for k in keys:
+                v = cfg.get(k)
+                if v is not None and v != "":
+                    try:
+                        return int(v)
+                    except (TypeError, ValueError):
+                        return 0
+            return 0
+        return {
+            "email": cfg.get("email", ""),
+            # v3.4.0 add binds the client UUID from "id", not "uuid".
+            "id": cfg.get("id") or cfg.get("uuid") or "",
+            "password": cfg.get("password", ""),
+            "flow": cfg.get("flow", ""),
+            "security": cfg.get("security", "auto"),
+            "limit_ip": _int("limitIp", "limit_ip"),
+            "total_gb": _int("totalGB", "total_gb"),
+            "expiry_time": _int("expiryTime", "expiry_time"),
+            "enable": bool(cfg.get("enable", True)),
+            "tg_id": _int("tgId", "tg_id"),
+            "sub_id": cfg.get("subId") or cfg.get("sub_id") or "",
+            "comment": cfg.get("comment", ""),
+            "reset": _int("reset"),
+        }
+
+    async def add_client(self, inbound_ids, client_config: dict) -> bool:
+        """Attach a client to one or more inbounds (3x-ui v3.4.0).
+
+        v3.4.0 manages clients relationally: a client is a first-class
+        record keyed by email and linked to inbounds. This POSTs to
+        ``/panel/api/clients/add`` with ``{client, inboundIds}``. Because
+        re-adding the same email fails ("email already in use"), all
+        target inbounds (primary + WS mirror, etc.) must be passed here
+        together rather than in separate calls.
+
+        Args:
+            inbound_ids: Inbound ID or list of IDs to attach the client to.
+            client_config: The bot's classic client dict (id/email/...).
+
+        Returns:
+            True if the panel reported success.
+        """
+        if isinstance(inbound_ids, int):
+            inbound_ids = [inbound_ids]
         try:
+            await self._ensure_auth()
             session = await self._get_session()
-            url = f"{self.config.base_url}{self.config.api_path}/addClient"
-            
-            # 3X-UI expects specific format
             payload = {
-                "id": inbound_id,
-                "settings": json.dumps({
-                    "clients": [client_config]
-                })
+                "client": self._to_v34_client(client_config),
+                "inboundIds": [int(i) for i in inbound_ids],
             }
-            
-            async with session.post(url, json=payload) as response:
+            async with session.post(self._clients_url("/add"), json=payload,
+                                    headers=self._auth_headers()) as response:
                 if response.status == 200:
-                    data = await response.json()
+                    data = await response.json(content_type=None)
                     if data.get("success"):
-                        logger.info(f"Client added to inbound {inbound_id}")
+                        logger.info(f"Client added to inbounds {payload['inboundIds']}")
                         return True
-                    else:
-                        logger.warning(f"API returned error: {data.get('msg', 'Unknown error')}")
-                        return False
-                else:
-                    logger.warning(f"Failed to add client: {response.status}")
+                    logger.warning(f"addClient error: {data.get('msg', 'unknown')}")
                     return False
-                    
+                logger.warning(f"Failed to add client: HTTP {response.status}")
+                return False
         except Exception as e:
             logger.error(f"Error adding client: {e}")
             return False
-    
-    async def del_client(self, inbound_id: int, client_id: str) -> bool:
-        """Delete a client from an inbound via API.
 
-        3x-ui endpoint: ``POST {api_path}/{inbound_id}/delClient/{clientId}``
-        where ``clientId`` is the client's UUID (vless/vmess).
+    async def del_client_by_email(self, email: str) -> bool:
+        """Delete a client everywhere by email (3x-ui v3.4.0).
 
-        Args:
-            inbound_id: The inbound ID
-            client_id: The client's UUID
+        v3.4.0 has no per-inbound ``delClient``; clients are first-class
+        and removed via ``POST /panel/api/clients/bulkDel`` with a list of
+        emails. Detaches from every inbound the client was attached to.
 
         Returns:
-            True if 3x-ui reported success
+            True if the panel deleted at least one client.
         """
         try:
+            await self._ensure_auth()
             session = await self._get_session()
-            url = f"{self.config.base_url}{self.config.api_path}/{inbound_id}/delClient/{client_id}"
-            async with session.post(url) as response:
+            async with session.post(self._clients_url("/bulkDel"),
+                                    json={"emails": [email]},
+                                    headers=self._auth_headers()) as response:
                 if response.status == 200:
-                    data = await response.json()
+                    data = await response.json(content_type=None)
                     if data.get("success"):
-                        logger.info(f"Client {client_id} deleted from inbound {inbound_id}")
-                        return True
-                    logger.warning(f"delClient API error: {data.get('msg', 'unknown')}")
+                        deleted = (data.get("obj") or {}).get("deleted", 0)
+                        logger.info(f"Deleted client {email}: {deleted}")
+                        return deleted > 0
+                    logger.warning(f"bulkDel error: {data.get('msg', 'unknown')}")
                     return False
                 logger.warning(f"Failed to delete client: HTTP {response.status}")
                 return False

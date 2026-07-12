@@ -615,22 +615,29 @@ class XUIService:
             return False
 
     async def _resolve_inbound_id_async(self, inbound_id: int = None) -> Optional[int]:
-        """Target inbound for API ops: explicit arg, else configured
-        INBOUND_ID, else the first VLESS inbound the panel reports."""
-        if inbound_id:
-            return inbound_id
-        cfg_id = int(getattr(self.config, 'INBOUND_ID', 0) or 0)
-        if cfg_id:
-            return cfg_id
-        try:
-            inbounds = await self.api.get_inbounds()
-        except Exception as e:
-            logger.error(f"API get_inbounds failed: {e}")
+        """Primary inbound (VLESS-Reality) the client's UUID lives on.
+
+        Honours the caller's explicit id, else ``INBOUND_ID`` (default 1).
+        We deliberately do NOT validate against ``inbounds/list``: the
+        v3.4.0 panel omits the primary Reality inbound (id 1) from that
+        listing even though clients attach to it fine, so validating would
+        wrongly fall back to the barely-used Alt inbound.
+        """
+        return inbound_id or int(getattr(self.config, 'INBOUND_ID', 0) or 0) or 1
+
+    def _derive_ss_password(self, client_uuid: str) -> Optional[str]:
+        """Per-user SS-2022 key = base64(HMAC-SHA256(salt, uuid)[:16]).
+
+        Same deterministic derivation the subscription builder uses, so
+        the client stored on the Shadowsocks inbound matches the password
+        embedded in the SS link. Returns None if SS isn't configured.
+        """
+        salt = getattr(self.config, 'SS_USER_SALT', '') or ''
+        if not (salt and client_uuid):
             return None
-        for ib in inbounds or []:
-            if ib.get('protocol') == 'vless':
-                return ib.get('id')
-        return inbounds[0].get('id') if inbounds else None
+        import base64, hmac, hashlib
+        digest = hmac.new(salt.encode(), client_uuid.encode(), hashlib.sha256).digest()[:16]
+        return base64.b64encode(digest).decode()
 
     @staticmethod
     def _find_client_id_by_email(inbound: dict, email: str) -> Optional[str]:
@@ -652,39 +659,49 @@ class XUIService:
         if iid is None:
             logger.error("API add_client: could not resolve target inbound")
             return False
-        if not await self.api.add_client(iid, client):
+        # 3x-ui v3.4.0 clients are relational: one record keyed by email,
+        # linked to N inbounds in a single add (re-adding the same email
+        # fails as a duplicate). Attach to the full protocol set so the
+        # new user gets every link in their subscription: primary Reality
+        # + VMess/WS + Shadowsocks + VMess/xhttp.
+        inbound_ids = [iid]
+        for extra in (
+            int(getattr(self.config, 'WS_INBOUND_ID', 0) or 0),
+            int(getattr(self.config, 'SS_INBOUND_ID', 0) or 0),
+            int(getattr(self.config, 'WS2_INBOUND_ID', 0) or 0),
+        ):
+            if extra and extra not in inbound_ids:
+                inbound_ids.append(extra)
+
+        # The Shadowsocks inbound authenticates by per-user password, not
+        # UUID. Derive and attach it so the SS link works; if we can't,
+        # drop the SS inbound rather than register a client with a random
+        # password the subscription won't match.
+        client = dict(client)
+        ss_id = int(getattr(self.config, 'SS_INBOUND_ID', 0) or 0)
+        if ss_id and ss_id in inbound_ids and not client.get('password'):
+            ss_pw = self._derive_ss_password(client.get('id') or client.get('uuid'))
+            if ss_pw:
+                client['password'] = ss_pw
+            else:
+                inbound_ids.remove(ss_id)
+
+        if not await self.api.add_client(inbound_ids, client):
             return False
-        ws = int(getattr(self.config, 'WS_INBOUND_ID', 0) or 0)
-        if ws and ws != iid:
-            try:
-                await self.api.add_client(ws, client)
-            except Exception as e:
-                logger.warning(f"API WS mirror add soft-failed: {e}")
-        logger.info(f"Added client {redact_email(client.get('email'))} via API to inbound {iid}")
+        logger.info(
+            f"Added client {redact_email(client.get('email'))} via API "
+            f"to inbounds {inbound_ids}"
+        )
         return True
 
     async def _api_remove_client_async(self, email: str, inbound_id: int = None) -> bool:
-        iid = await self._resolve_inbound_id_async(inbound_id)
-        if iid is None:
-            logger.error("API remove_client: could not resolve target inbound")
-            return False
-        inbound = await self.api.get_inbound(iid)
-        client_id = self._find_client_id_by_email(inbound, email)
-        if not client_id:
-            logger.warning(f"API remove_client: {redact_email(email)} not in inbound {iid}")
-            return False
-        ok = await self.api.del_client(iid, client_id)
-        ws = int(getattr(self.config, 'WS_INBOUND_ID', 0) or 0)
-        if ws and ws != iid:
-            try:
-                wib = await self.api.get_inbound(ws)
-                wid = self._find_client_id_by_email(wib, email)
-                if wid:
-                    await self.api.del_client(ws, wid)
-            except Exception as e:
-                logger.warning(f"API WS mirror remove soft-failed: {e}")
+        # v3.4.0 deletes clients globally by email (detaches from every
+        # inbound); no per-inbound uuid lookup needed.
+        ok = await self.api.del_client_by_email(email)
         if ok:
-            logger.info(f"Removed client {redact_email(email)} via API from inbound {iid}")
+            logger.info(f"Removed client {redact_email(email)} via API")
+        else:
+            logger.warning(f"API remove_client: {redact_email(email)} not deleted")
         return ok
 
     # Note: _run_async(), _get_executor(), shutdown_executor() removed (C-03 fix)

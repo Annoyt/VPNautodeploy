@@ -221,62 +221,67 @@ class TestXUIAPIClientReAuth:
     @pytest.mark.asyncio
     async def test_authenticated_request_retries_on_401(self, client):
         """Test that _authenticated_request retries on 401 (H-03 fix)."""
+        # Already authenticated (csrf held) so _ensure_auth doesn't log in;
+        # the 401 mid-flight is what triggers the re-login.
+        client._csrf_token = "tok"
         # First call returns 401, second call returns 200
         mock_response_401 = MagicMock()
         mock_response_401.status = 401
-        
+
         mock_response_200 = MagicMock()
         mock_response_200.status = 200
         mock_response_200.json = AsyncMock(return_value={"obj": []})
-        
+
         mock_session = MagicMock()
         mock_session.request = AsyncMock(side_effect=[mock_response_401, mock_response_200])
-        
+
         # Mock login to succeed
         with patch.object(client, 'login', return_value=True) as mock_login:
             with patch.object(client, '_get_session', return_value=mock_session):
                 response = await client._authenticated_request('GET', 'http://test/url')
-                
+
                 # Should have called login after 401
                 mock_login.assert_called_once()
                 # Should have made 2 requests
                 assert mock_session.request.call_count == 2
                 # Final response should be 200
                 assert response.status == 200
-    
+
     @pytest.mark.asyncio
     async def test_authenticated_request_no_retry_on_success(self, client):
         """Test that _authenticated_request doesn't retry on success."""
+        client._csrf_token = "tok"
         mock_response = MagicMock()
         mock_response.status = 200
-        
+
         mock_session = MagicMock()
         mock_session.request = AsyncMock(return_value=mock_response)
-        
+
         with patch.object(client, 'login') as mock_login:
             with patch.object(client, '_get_session', return_value=mock_session):
                 response = await client._authenticated_request('GET', 'http://test/url')
-                
+
                 # Should not have called login
                 mock_login.assert_not_called()
                 # Should have made only 1 request
                 assert mock_session.request.call_count == 1
                 assert response.status == 200
-    
+
     @pytest.mark.asyncio
     async def test_authenticated_request_fails_after_login_failure(self, client):
         """Test that request fails if re-login fails."""
+        client._csrf_token = "tok"
         mock_response_401 = MagicMock()
         mock_response_401.status = 401
-        
+
         mock_session = MagicMock()
         mock_session.request = AsyncMock(return_value=mock_response_401)
-        
+
         # Mock login to fail
         with patch.object(client, 'login', return_value=False) as mock_login:
             with patch.object(client, '_get_session', return_value=mock_session):
                 response = await client._authenticated_request('GET', 'http://test/url')
-                
+
                 # Should have tried login
                 mock_login.assert_called_once()
                 # Response should still be 401
@@ -397,12 +402,14 @@ class TestGetOnlineClientsSync:
 
 
 class TestAddClient:
-    """Tests for add_client operation."""
+    """Tests for add_client operation (v3.4.0 relational endpoint)."""
 
     @pytest.fixture
     def client(self):
         config = XUIClientConfig(base_url="http://test:2026")
-        return XUIAPIClient(config)
+        c = XUIAPIClient(config)
+        c._csrf_token = "tok"  # already authenticated
+        return c
 
     def _create_async_context_mock(self, response):
         """Helper to create an async context manager mock."""
@@ -413,7 +420,7 @@ class TestAddClient:
 
     @pytest.mark.asyncio
     async def test_add_client_success(self, client):
-        """Successfully add a client."""
+        """Successfully add a client (single inbound id is coerced to a list)."""
         mock_response = MagicMock()
         mock_response.status = 200
         mock_response.json = AsyncMock(return_value={"success": True})
@@ -423,10 +430,13 @@ class TestAddClient:
 
         with patch.object(client, '_get_session', return_value=mock_session):
             result = await client.add_client(
-                inbound_id=1,
-                client_config={"email": "test@example.com", "id": "abc-123"}
+                1, {"email": "test@example.com", "id": "abc-123"}
             )
             assert result is True
+            # v3.4.0 payload shape: {client: {...}, inboundIds: [...]}
+            payload = mock_session.post.call_args.kwargs["json"]
+            assert payload["inboundIds"] == [1]
+            assert payload["client"]["id"] == "abc-123"
 
     @pytest.mark.asyncio
     async def test_add_client_duplicate_email(self, client):
@@ -440,8 +450,7 @@ class TestAddClient:
 
         with patch.object(client, '_get_session', return_value=mock_session):
             result = await client.add_client(
-                inbound_id=1,
-                client_config={"email": "test@example.com", "id": "abc-123"}
+                [1], {"email": "test@example.com", "id": "abc-123"}
             )
             assert result is False
 
@@ -456,8 +465,7 @@ class TestAddClient:
 
         with patch.object(client, '_get_session', return_value=mock_session):
             result = await client.add_client(
-                inbound_id=1,
-                client_config={"email": "test@example.com", "id": "abc-123"}
+                [1], {"email": "test@example.com", "id": "abc-123"}
             )
             assert result is False
 

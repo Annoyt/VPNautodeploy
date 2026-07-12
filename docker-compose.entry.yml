@@ -1,0 +1,39 @@
+# Entry-node override for the vpn-bot service.
+#
+# The bot moves off the small exit VPS to entry (2 GB) so it stops
+# competing with xray for RAM/CPU. On entry there is NO 3x-ui service,
+# so the bot manages clients over the 3x-ui HTTP API (self.db stays
+# None because XUI_DB_PATH does not exist here → API-only mode).
+#
+# Run with:
+#   docker compose -f docker-compose.yml -f docker-compose.entry.yml up -d --no-deps vpn-bot
+services:
+  vpn-bot:
+    # Talk to the panel on the exit box over the public net (verified
+    # reachable + login OK from entry). Overrides the base file which
+    # hardcodes http://3x-ui:2026 (that service is exit-only).
+    environment:
+      - XUI_API_URL=http://84.75.76.109:2026
+      # Non-existent path → XUIService falls back to API-only mode.
+      - XUI_DB_PATH=/var/lib/vpn-bot/__no_local_xui_db__
+      # opencode serve runs on the entry HOST (:4096); reach it via the
+      # docker bridge gateway. Base pointed at the old cross-node URL.
+      - OPENCODE_URL=http://host.docker.internal:4096
+      # No host-side xray-reload sidecar on entry; the 3x-ui API reloads
+      # xray itself on add/del, so make the bot reload a no-op.
+      - XRAY_RELOAD_URL=
+      - NODE_ROLE=entry
+      - INBOUND_ID=${INBOUND_ID:-1}
+      - WS2_INBOUND_ID=${WS2_INBOUND_ID:-0}
+      # Route the bots https egress (Telegram) through the exit proxy;
+      # entry is RKN-blocked from api.telegram.org. http (X-UI/opencode)
+      # stays direct via NO_PROXY.
+      - HTTPS_PROXY=${HTTPS_PROXY}
+      - https_proxy=${https_proxy}
+      - NO_PROXY=${NO_PROXY}
+      - no_proxy=${no_proxy}
+    # Expose the admin/subscription web server so Caddy on exit can
+    # reverse-proxy autonekovpn.duckdns.org:9443 → entry:8080. Firewalled
+    # to the exit IP only (see entry iptables). Base bound 127.0.0.1 only.
+    ports: !override
+      - "0.0.0.0:8080:8080"
