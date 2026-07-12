@@ -241,7 +241,8 @@ class TestShowOnlines:
 
         handler.bot.send_message.assert_called_once()
         text = handler.bot.send_message.call_args[1]['text']
-        assert "⚪ Сейчас никто не подключён" in text
+        # message wraps the phrase in <b>…</b> — match the phrase itself
+        assert "Сейчас никто не подключён" in text
 
     def test_show_onlines_single_user(self, handler):
         """Test /onlines with one connected user."""

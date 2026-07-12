@@ -15,6 +15,7 @@ Conversation memory keys:
 
 from __future__ import annotations
 
+import html
 import logging
 import os
 import re
@@ -457,11 +458,16 @@ class AIHandler(BaseHandler):
         footer_bits.append("/ai_reset чтобы сбросить")
         footer = "\n\n<i>" + " · ".join(footer_bits) + "</i>"
 
-        body = (
-            clean_reply
-            if len(clean_reply) <= TELEGRAM_TEXT_LIMIT
-            else clean_reply[:TELEGRAM_TEXT_LIMIT] + "\n… (обрезано)"
-        )
+        # The agent replies in plain text/markdown, not HTML — a raw '<'
+        # (code, generics, reprs) kills sendMessage and the answer is
+        # silently lost. Escape BEFORE truncating: escaping expands
+        # '<' → '&lt;' etc., so a 4000-char reply can overshoot Telegram's
+        # 4096 hard cap after escape.
+        body = html.escape(clean_reply)
+        if len(body) > TELEGRAM_TEXT_LIMIT:
+            # don't leave a sliced-open entity like '&am' at the cut point
+            body = re.sub(r'&[#a-zA-Z0-9]{0,7}$', '', body[:TELEGRAM_TEXT_LIMIT])
+            body += "\n… (обрезано)"
         self._reply(chat_id, thread_id, body + footer, parse_mode="HTML")
 
         for path, caption in files:

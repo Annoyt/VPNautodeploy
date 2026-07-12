@@ -109,7 +109,15 @@ class TelegramClient:
                     f"API request failed (attempt {attempt + 1}/{self.MAX_RETRIES}): {method} "
                     f"{error_msg} | tg='{tg_description}' | {payload_hint}"
                 )
-                
+
+                # Entity-parse failures are deterministic — retrying the same
+                # payload can't succeed. Drop parse_mode and deliver the text
+                # raw instead of losing the message entirely.
+                if "can't parse entities" in tg_description and kwargs.get('parse_mode'):
+                    logger.warning(f"{method}: dropping parse_mode after entity parse failure")
+                    kwargs.pop('parse_mode')
+                    continue
+
                 if attempt < self.MAX_RETRIES - 1:
                     delay = self.RETRY_DELAY_BASE * (2 ** attempt)
                     logger.info(f"Retrying in {delay} seconds...")

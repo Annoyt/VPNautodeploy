@@ -31,6 +31,7 @@ silence that key for 6h.
 
 from __future__ import annotations
 
+import html
 import logging
 import time
 from dataclasses import dataclass, field
@@ -175,9 +176,11 @@ class AlertManager:
         is_dashboard_only = alert.key.startswith(DASHBOARD_ONLY_PREFIXES)
 
         prefix = '🔥' if alert.severity == 'critical' else '⚠️'
-        text = f"{prefix} <b>{alert.title}</b>"
+        # detail is usually a raw exception repr — unescaped '<' breaks
+        # Telegram's HTML parser and the alert is never delivered.
+        text = f"{prefix} <b>{html.escape(alert.title)}</b>"
         if alert.detail:
-            text += f"\n\n<code>{alert.detail}</code>"
+            text += f"\n\n<code>{html.escape(alert.detail)}</code>"
         text += (
             f"\n\n<i>Цикл {tracker.consecutive_fails}; "
             f"ack заглушит на 6 ч.</i>"
