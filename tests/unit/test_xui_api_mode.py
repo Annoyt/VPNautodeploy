@@ -76,6 +76,30 @@ def test_add_client_api_failure_returns_false(svc):
     assert svc.add_client_sync({"email": "u@x", "id": "uuid1"}) is False
 
 
+def test_add_client_replaces_existing_email(svc):
+    # v3.4.0 keys clients globally by email: a re-issue for a known user
+    # collides with "email already in use" — the service must replace
+    # the record (delete by email + re-add with the same UUID).
+    svc.api.add_client = AsyncMock(side_effect=[False, True])
+    svc.api.last_add_error = "Something went wrong (email already in use: u@x"
+    svc.api.del_client_by_email = AsyncMock(return_value=True)
+
+    assert svc.add_client_sync({"email": "u@x", "id": "uuid1"}) is True
+    svc.api.del_client_by_email.assert_awaited_once()
+    assert svc.api.add_client.await_count == 2
+
+
+def test_add_client_no_delete_on_other_errors(svc):
+    # Deleting on arbitrary failures could drop a working client without
+    # putting anything back — only the duplicate error triggers replace.
+    svc.api.add_client = AsyncMock(return_value=False)
+    svc.api.last_add_error = "invalid inbound"
+    svc.api.del_client_by_email = AsyncMock()
+
+    assert svc.add_client_sync({"email": "u@x", "id": "uuid1"}) is False
+    svc.api.del_client_by_email.assert_not_awaited()
+
+
 def test_remove_client_deletes_by_email(svc):
     # v3.4.0 removes clients globally by email (no per-inbound uuid lookup).
     svc.api.del_client_by_email = AsyncMock(return_value=True)

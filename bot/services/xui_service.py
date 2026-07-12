@@ -687,7 +687,23 @@ class XUIService:
                 inbound_ids.remove(ss_id)
 
         if not await self.api.add_client(inbound_ids, client):
-            return False
+            # Re-issue for a user the panel already knows: v3.4.0 keys
+            # clients globally by email, so a second add collides. Replace
+            # the record — the bot passes the user's stored UUID, so their
+            # installed keys keep working. Gate strictly on the duplicate
+            # error: deleting on arbitrary failures could drop a working
+            # client without putting anything back.
+            last_err = str(getattr(self.api, 'last_add_error', '') or '')
+            if 'already in use' not in last_err:
+                return False
+            email = client.get('email', '')
+            logger.info(
+                f"add_client: {redact_email(email)} already in panel — replacing"
+            )
+            if not await self.api.del_client_by_email(email):
+                return False
+            if not await self.api.add_client(inbound_ids, client):
+                return False
         logger.info(
             f"Added client {redact_email(client.get('email'))} via API "
             f"to inbounds {inbound_ids}"

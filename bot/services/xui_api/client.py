@@ -509,6 +509,10 @@ class XUIAPIClient:
         """
         if isinstance(inbound_ids, int):
             inbound_ids = [inbound_ids]
+        # Panel-reported reason for the last failed add ("email already in
+        # use", ...) — XUIService reads it to decide whether a retry after
+        # delete-by-email is safe.
+        self.last_add_error = ""
         try:
             await self._ensure_auth()
             session = await self._get_session()
@@ -523,11 +527,14 @@ class XUIAPIClient:
                     if data.get("success"):
                         logger.info(f"Client added to inbounds {payload['inboundIds']}")
                         return True
-                    logger.warning(f"addClient error: {data.get('msg', 'unknown')}")
+                    self.last_add_error = str(data.get("msg", "unknown"))
+                    logger.warning(f"addClient error: {self.last_add_error}")
                     return False
+                self.last_add_error = f"HTTP {response.status}"
                 logger.warning(f"Failed to add client: HTTP {response.status}")
                 return False
         except Exception as e:
+            self.last_add_error = str(e)
             logger.error(f"Error adding client: {e}")
             return False
 
