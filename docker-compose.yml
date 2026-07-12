@@ -93,6 +93,14 @@ services:
       - AI_DEFAULT_MODE=${AI_DEFAULT_MODE:-fast}
       - AGENT_NODE_TYPE=${AGENT_NODE_TYPE:-control}
       - TOPIC_AI=${TOPIC_AI:-}
+      # Backup key delivery over an external SMTP relay (see
+      # services/email_service.py). Empty SMTP_HOST = feature off.
+      - SMTP_HOST=${SMTP_HOST:-}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_USER=${SMTP_USER:-}
+      - SMTP_PASSWORD=${SMTP_PASSWORD:-}
+      - SMTP_FROM=${SMTP_FROM:-}
+      - SMTP_FROM_NAME=${SMTP_FROM_NAME:-NekoVPN}
       # Host-side Xray reload sidecar — see scripts/xray_reload.py.
       # Empty URL → reload becomes a no-op (debug/dev mode).
       - XRAY_RELOAD_URL=${XRAY_RELOAD_URL:-http://host.docker.internal:7079}
