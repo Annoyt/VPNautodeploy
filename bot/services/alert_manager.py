@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import html
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional
@@ -40,7 +41,7 @@ from typing import Callable, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 
-REPEAT_COOLDOWN_S = 30 * 60       # 30 min before re-alerting same key
+REPEAT_COOLDOWN_S = 2 * 60 * 60   # 2 h before re-alerting the same unacked key
 ACK_COOLDOWN_S = 6 * 60 * 60      # 6 h silence after admin acks
 DEFAULT_MIN_CYCLES = 3            # how many consecutive failures before we alert
 
@@ -173,7 +174,14 @@ class AlertManager:
         # just gets the headline for the alerts that need eyeballs now.
         alert_db_id = self._persist_alert(alert)
 
-        is_dashboard_only = alert.key.startswith(DASHBOARD_ONLY_PREFIXES)
+        # Telegram is for alerts that need eyeballs NOW. By default only
+        # criticals are pushed; warns land in the dashboard's Alerts tab
+        # (set ALERT_TG_MIN_SEVERITY=warn to push those too).
+        min_sev = (getattr(self.config, 'ALERT_TG_MIN_SEVERITY', 'critical') or 'critical').lower()
+        is_dashboard_only = (
+            alert.key.startswith(DASHBOARD_ONLY_PREFIXES)
+            or (min_sev != 'warn' and alert.severity != 'critical')
+        )
 
         prefix = '🔥' if alert.severity == 'critical' else '⚠️'
         # detail is usually a raw exception repr — unescaped '<' breaks
@@ -428,6 +436,11 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
         return None
 
     def check_xray_reload_sidecar() -> Optional[Alert]:
+        # "Not configured" is not "offline": the entry node deliberately
+        # sets XRAY_RELOAD_URL empty (the 3x-ui API reloads xray itself),
+        # and alerting on it fired a bogus critical every cycle.
+        if not (os.environ.get('XRAY_RELOAD_URL') or '').strip():
+            return None
         try:
             from bot.services.xui_reload import reload_xray_health
             h = reload_xray_health()

@@ -149,6 +149,13 @@ class Settings:
         except ValueError:
             self.WS2_INBOUND_ID = 0
 
+        # Minimum severity pushed to Telegram by AlertManager: 'critical'
+        # (default) keeps the chat quiet — warns stay dashboard-only;
+        # 'warn' restores the old push-everything behavior.
+        self.ALERT_TG_MIN_SEVERITY: str = (
+            os.getenv('ALERT_TG_MIN_SEVERITY', 'critical') or 'critical'
+        ).strip().lower()
+
         # Demo limits
         try:
             self.DEMO_TRAFFIC_GB: int = int(os.getenv('DEMO_TRAFFIC_GB', '5'))

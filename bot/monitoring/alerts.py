@@ -98,6 +98,11 @@ class HealthChecker:
         
         Uses asyncio.to_thread() for DB calls to avoid blocking (H-07 fix).
         """
+        # API-only node (no local x-ui.db): reconciliation needs the raw
+        # panel DB, which lives on the panel host. Skipping beats firing
+        # an hourly "health check failed" alert on every cycle.
+        if getattr(self.xui, 'db', None) is None:
+            return True
         try:
             # Get all emails from X-UI (sync call in thread)
             all_traffic = await asyncio.to_thread(
@@ -124,6 +129,9 @@ class HealthChecker:
         
         Uses asyncio.to_thread() for DB calls to avoid blocking (H-07 fix).
         """
+        # Same as check_orphaned_clients: needs the local x-ui.db.
+        if getattr(self.xui, 'db', None) is None:
+            return True
         try:
             # Get active users (sync call in thread)
             all_users = await asyncio.to_thread(self.db.get_all_users)
