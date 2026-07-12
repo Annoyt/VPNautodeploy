@@ -453,6 +453,13 @@ class AgentClient:
                 session_id, effective_prompt,
                 model=eff_model, agent=agent, timeout=eff_timeout,
             )
+        except requests.exceptions.ConnectTimeout as e:
+            # Couldn't even open the TCP connection — the server is sick.
+            raise AgentUnavailable(str(e)) from e
+        except requests.exceptions.Timeout as e:
+            # Connected fine, the agent just outran the read timeout.
+            # Distinct from "server down" so the caller can word it right.
+            raise AgentError(f"agent turn timed out after {eff_timeout}s") from e
         except requests.RequestException as e:
             raise AgentUnavailable(str(e)) from e
 
@@ -468,6 +475,10 @@ class AgentClient:
                     session_id, SYSTEM_PREAMBLE + prompt,
                     model=eff_model, agent=agent, timeout=eff_timeout,
                 )
+            except requests.exceptions.ConnectTimeout as e:
+                raise AgentUnavailable(str(e)) from e
+            except requests.exceptions.Timeout as e:
+                raise AgentError(f"agent turn timed out after {eff_timeout}s") from e
             except requests.RequestException as e:
                 raise AgentUnavailable(str(e)) from e
 

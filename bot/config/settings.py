@@ -149,6 +149,14 @@ class Settings:
         except ValueError:
             self.WS2_INBOUND_ID = 0
 
+        # Ceiling for one /ai agent turn, seconds. The call runs on a
+        # worker thread (doesn't block the bot), so a generous ceiling
+        # is safe — plan-mode multi-tool turns routinely take minutes.
+        try:
+            self.OPENCODE_TIMEOUT: int = int(os.getenv('OPENCODE_TIMEOUT', '600'))
+        except ValueError:
+            self.OPENCODE_TIMEOUT = 600
+
         # Minimum severity pushed to Telegram by AlertManager: 'critical'
         # (default) keeps the chat quiet — warns stay dashboard-only;
         # 'warn' restores the old push-everything behavior.

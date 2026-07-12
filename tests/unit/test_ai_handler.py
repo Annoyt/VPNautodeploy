@@ -27,6 +27,13 @@ from bot.services.agent_client import (
 )
 
 
+
+def _wait_turn(handler):
+    """Join the async agent-turn worker so asserts are deterministic."""
+    t = getattr(handler, "_last_turn_thread", None)
+    if t is not None:
+        t.join(timeout=5)
+
 @pytest.fixture
 def mock_config():
     """Create mock config with AI settings."""
@@ -638,6 +645,7 @@ class TestHandlePrompt:
     def test_handle_prompt_success(self, ai_handler):
         """Test successful prompt handling."""
         ai_handler._handle_prompt('123', None, 'test prompt')
+        _wait_turn(ai_handler)
 
         ai_handler._client.ask.assert_called_once()
         ai_handler.bot.send_message.assert_called_once()
@@ -648,6 +656,7 @@ class TestHandlePrompt:
     def test_handle_prompt_with_session_key(self, ai_handler):
         """Test session key is generated correctly."""
         ai_handler._handle_prompt('123', 42, 'test')
+        _wait_turn(ai_handler)
 
         call_args = ai_handler._client.ask.call_args
         assert call_args[0][0] == 'topic:123:42'  # session_key
@@ -656,6 +665,7 @@ class TestHandlePrompt:
         """Test error when client is not configured."""
         ai_handler._client = None
         ai_handler._handle_prompt('123', None, 'test')
+        _wait_turn(ai_handler)
 
         ai_handler._reply.assert_called_once()
         reply_text = ai_handler._reply.call_args[0][2]
@@ -665,6 +675,7 @@ class TestHandlePrompt:
         """Test handling when bridge is unavailable."""
         ai_handler._client.ask = Mock(side_effect=AgentUnavailable("Connection failed"))
         ai_handler._handle_prompt('123', None, 'test')
+        _wait_turn(ai_handler)
 
         reply_text = ai_handler._reply.call_args[0][2]
         assert 'AI-сервер не отвечает' in reply_text
@@ -674,6 +685,7 @@ class TestHandlePrompt:
         error = AgentError("HTTP 429: rate_limit_exceeded")
         ai_handler._client.ask = Mock(side_effect=error)
         ai_handler._handle_prompt('123', None, 'test')
+        _wait_turn(ai_handler)
 
         reply_text = ai_handler._reply.call_args[0][2]
         assert 'Квота API провайдера исчерпана' in reply_text
@@ -683,15 +695,17 @@ class TestHandlePrompt:
         error = AgentError("HTTP 504: gateway timeout")
         ai_handler._client.ask = Mock(side_effect=error)
         ai_handler._handle_prompt('123', None, 'test')
+        _wait_turn(ai_handler)
 
         reply_text = ai_handler._reply.call_args[0][2]
-        assert 'думал слишком долго' in reply_text
+        assert 'не уложился в лимит' in reply_text
 
     def test_handle_prompt_generic_error(self, ai_handler):
         """Test generic error message."""
         error = AgentError("HTTP 500: internal error")
         ai_handler._client.ask = Mock(side_effect=error)
         ai_handler._handle_prompt('123', None, 'test')
+        _wait_turn(ai_handler)
 
         reply_text = ai_handler._reply.call_args[0][2]
         assert 'Ошибка агента:' in reply_text
@@ -700,6 +714,7 @@ class TestHandlePrompt:
         """Test handling of unexpected exceptions."""
         ai_handler._client.ask = Mock(side_effect=RuntimeError("Unexpected"))
         ai_handler._handle_prompt('123', None, 'test')
+        _wait_turn(ai_handler)
 
         reply_text = ai_handler._reply.call_args[0][2]
         assert 'Неожиданная ошибка' in reply_text
@@ -708,6 +723,7 @@ class TestHandlePrompt:
         """Test empty response from the agent."""
         ai_handler._client.ask = Mock(return_value=("", 1000))
         ai_handler._handle_prompt('123', None, 'test')
+        _wait_turn(ai_handler)
 
         reply_text = ai_handler.bot.send_message.call_args[1]['text']
         assert '(пустой ответ от агента)' in reply_text
@@ -719,6 +735,7 @@ class TestHandlePrompt:
         )
         ai_handler._send_file = Mock()
         ai_handler._handle_prompt('123', None, 'test')
+        _wait_turn(ai_handler)
 
         ai_handler._send_file.assert_called_once_with('123', None, '/tmp/result.png', 'analysis')
 
@@ -727,6 +744,7 @@ class TestHandlePrompt:
         long_text = "A" * (TELEGRAM_TEXT_LIMIT + 1000)
         ai_handler._client.ask = Mock(return_value=(long_text, 1500))
         ai_handler._handle_prompt('123', None, 'test')
+        _wait_turn(ai_handler)
 
         reply_text = ai_handler.bot.send_message.call_args[1]['text']
         assert len(reply_text) <= TELEGRAM_TEXT_LIMIT + 200  # + footer
@@ -736,6 +754,7 @@ class TestHandlePrompt:
         """Test footer includes mode information."""
         ai_handler._client.ask = Mock(return_value=("Response", 1500))
         ai_handler._handle_prompt('123', None, 'test', mode='plan')
+        _wait_turn(ai_handler)
 
         reply_text = ai_handler.bot.send_message.call_args[1]['text']
         assert '🧠 plan' in reply_text
@@ -744,6 +763,7 @@ class TestHandlePrompt:
         """Test footer includes yolo marker."""
         ai_handler._client.ask = Mock(return_value=("Response", 1500))
         ai_handler._handle_prompt('123', None, 'test', yolo=True)
+        _wait_turn(ai_handler)
 
         reply_text = ai_handler.bot.send_message.call_args[1]['text']
         assert '☠️ yolo' in reply_text
@@ -752,6 +772,7 @@ class TestHandlePrompt:
         """Test default mode is resolved from config when None is passed."""
         ai_handler._client.ask = Mock(return_value=("Response", 1500))
         ai_handler._handle_prompt('123', None, 'test', mode=None)
+        _wait_turn(ai_handler)
 
         # Should use config default ('fast' in our mock_config)
         call_args = ai_handler._client.ask.call_args
@@ -764,6 +785,7 @@ class TestHandlePrompt:
             mock_typing.return_value = mock_stop
             ai_handler._client.ask = Mock(return_value=("Response", 1500))
             ai_handler._handle_prompt('123', None, 'test')
+            _wait_turn(ai_handler)
             mock_stop.set.assert_called_once()
 
 

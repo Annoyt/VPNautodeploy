@@ -108,12 +108,24 @@ class AIHandler(BaseHandler):
     def __init__(self, bot, db, config) -> None:
         super().__init__(bot, db, config)
         self._client: Optional[AgentClient] = None
+        # Conversations with an agent turn currently running in a worker
+        # thread — one in-flight turn per session key.
+        self._inflight: set = set()
+        self._inflight_lock = threading.Lock()
+        # Last spawned turn thread — tests join it to assert
+        # deterministically; ops can use it for graceful shutdown.
+        self._last_turn_thread: Optional[threading.Thread] = None
+        try:
+            ai_timeout = int(getattr(config, "OPENCODE_TIMEOUT", 600) or 600)
+        except (TypeError, ValueError):
+            ai_timeout = 600
         if getattr(config, "OPENCODE_URL", ""):
             self._client = AgentClient(
                 base_url=config.OPENCODE_URL,
                 password=getattr(config, "OPENCODE_SERVER_PASSWORD", ""),
                 db_path=config.DB_PATH,
                 username=getattr(config, "OPENCODE_USERNAME", "opencode"),
+                default_timeout=ai_timeout,
                 default_model=getattr(config, "OPENCODE_DEFAULT_MODEL", "") or None,
                 agent_default=getattr(config, "OPENCODE_AGENT_DEFAULT", "") or None,
                 agent_plan=getattr(config, "OPENCODE_AGENT_PLAN", "") or None,
@@ -399,11 +411,53 @@ class AIHandler(BaseHandler):
         if mode is None:
             mode = getattr(self.config, "AI_DEFAULT_MODE", "fast") or "fast"
 
+        key = self._session_key(chat_id, thread_id)
+
+        # The agent call runs in a worker thread: handlers execute on the
+        # polling thread, so a synchronous ask() froze the WHOLE bot for
+        # up to the full agent timeout (minutes). One turn per session —
+        # a second prompt while the first is running gets bounced.
+        with self._inflight_lock:
+            if key in self._inflight:
+                self._reply(
+                    chat_id, thread_id,
+                    "⏳ Агент ещё работает над предыдущим вопросом — "
+                    "дождись ответа, потом спрашивай дальше."
+                )
+                return
+            self._inflight.add(key)
+
         # Keep "typing…" alive for the whole turn — Telegram cancels the
-        # indicator after ~5 s and the agent in plan mode can think 20–60 s.
+        # indicator after ~5 s and the agent in plan mode can think minutes.
         typing_stop = _start_typing_keepalive(self.bot, chat_id, thread_id)
 
-        key = self._session_key(chat_id, thread_id)
+        def _worker() -> None:
+            try:
+                self._run_agent_turn(chat_id, thread_id, key, prompt, mode, yolo)
+            except Exception:
+                logger.exception("unexpected agent worker failure")
+                self._reply(chat_id, thread_id, "⚠️ Неожиданная ошибка, см. логи.")
+            finally:
+                typing_stop.set()
+                with self._inflight_lock:
+                    self._inflight.discard(key)
+
+        t = threading.Thread(
+            target=_worker, daemon=True, name=f"ai-turn-{chat_id}"
+        )
+        self._last_turn_thread = t
+        t.start()
+
+    def _run_agent_turn(
+        self,
+        chat_id: str,
+        thread_id,
+        key: str,
+        prompt: str,
+        mode: Optional[str],
+        yolo: bool,
+    ) -> None:
+        """The blocking part of a /ai turn. Runs on a worker thread."""
         try:
             reply, duration_ms = self._client.ask(key, prompt, mode=mode, yolo=yolo)
         except AgentUnavailable as e:
@@ -426,18 +480,13 @@ class AIHandler(BaseHandler):
             elif '504' in err_text or 'timed out' in low:
                 self._reply(
                     chat_id, thread_id,
-                    "⏱ Агент думал слишком долго и не успел ответить. "
-                    "Попробуйте ещё раз с более коротким запросом."
+                    "⏱ Агент не уложился в лимит времени и был остановлен. "
+                    "Разбей задачу на шаги поменьше или спроси ещё раз — "
+                    "контекст сессии сохранён."
                 )
             else:
                 self._reply(chat_id, thread_id, f"⚠️ Ошибка агента: {err_text[:300]}")
             return
-        except Exception:
-            logger.exception("unexpected kimi failure")
-            self._reply(chat_id, thread_id, "⚠️ Неожиданная ошибка, см. логи.")
-            return
-        finally:
-            typing_stop.set()
 
         if not reply:
             reply = "(пустой ответ от агента)"
