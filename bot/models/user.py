@@ -45,6 +45,11 @@ class User:
     last_city: Optional[str] = None
     last_lat: Optional[float] = None
     last_lon: Optional[float] = None
+    # The user's REAL mailbox from /setemail — backup key delivery
+    # channel. Distinct from ``email``, which is the synthetic
+    # ``user_<name>_<id>@nekovo.ru`` identifier keys are registered
+    # under in X-UI.
+    contact_email: Optional[str] = None
 
     def __post_init__(self):
         if self.created_at is None:
@@ -92,4 +97,5 @@ class User:
             last_city=cls._safe_get(row, 'last_city'),
             last_lat=cls._safe_get(row, 'last_lat'),
             last_lon=cls._safe_get(row, 'last_lon'),
+            contact_email=cls._safe_get(row, 'contact_email'),
         )

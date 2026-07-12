@@ -49,7 +49,8 @@ class TestAsyncUserRepository:
                 last_asn TEXT,
                 last_city TEXT,
                 last_lat REAL,
-                last_lon REAL
+                last_lon REAL,
+                contact_email TEXT
             )
         ''')
         conn.commit()
@@ -392,7 +393,8 @@ class TestAsyncRepositoryConcurrency:
                 last_asn TEXT,
                 last_city TEXT,
                 last_lat REAL,
-                last_lon REAL
+                last_lon REAL,
+                contact_email TEXT
             )
         ''')
         for i in range(10):

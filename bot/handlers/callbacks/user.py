@@ -1,6 +1,7 @@
 """User callback handlers."""
 
 import asyncio
+import html
 import logging
 import threading
 from typing import TYPE_CHECKING, Optional
@@ -458,8 +459,11 @@ class GetKeyHandler(BaseCallbackHandler):
                      else "🆘 Not connecting? Report it")
         email_btn_label = ("📧 Указать email" if lang == 'ru'
                           else "📧 Add email")
+        email_key_label = ("✉️ Ключ на почту" if lang == 'ru'
+                           else "✉️ Email me the key")
         keyboard = {'inline_keyboard': [
-            [{'text': email_btn_label, 'callback_data': 'add_email_prompt'}],
+            [{'text': email_btn_label, 'callback_data': 'add_email_prompt'},
+             {'text': email_key_label, 'callback_data': 'email_key'}],
             [{'text': btn_label, 'callback_data': 'report_failure'}]
         ]}
         self.bot.send_message(
@@ -1063,6 +1067,90 @@ class EmailPromptHandler(BaseCallbackHandler):
 
         self.bot.send_message(chat_id=chat_id, text=text, parse_mode='HTML')
         logger.info(f"User {chat_id} requested email prompt")
+
+
+class EmailKeyHandler(BaseCallbackHandler):
+    """Handle 'email_key' — send the user's subscription URL to their
+    contact_email as a backup delivery channel.
+
+    The SMTP handshake takes seconds, so the actual send runs on a
+    worker thread — the polling loop must never wait on network I/O
+    (same rule as the /ai agent turns).
+    """
+
+    CALLBACK_DATA = 'email_key'
+    RATE_LIMIT_SECONDS = 600  # one letter per user per 10 min
+    _last_sent_times: dict = {}
+
+    def can_handle(self, callback_data: str) -> bool:
+        return callback_data == self.CALLBACK_DATA
+
+    def handle(self, update: dict, chat_id: str, user_id: str, **kwargs) -> None:
+        import time
+        cb_msg = (update.get('callback_query') or {}).get('message') or {}
+        thread_id = cb_msg.get('message_thread_id')
+        user = self.db.get_user(user_id) or self.db.get_user(chat_id)
+        lang = (getattr(user, 'lang', None) or 'ru') if user else 'ru'
+
+        def say(text: str) -> None:
+            self.bot.send_message(chat_id=chat_id, text=text,
+                                  parse_mode='HTML', message_thread_id=thread_id)
+
+        if not user or not user.uuid:
+            say("⚠️ Сначала получите ключ — /start" if lang == 'ru'
+                else "⚠️ Get a key first — /start")
+            return
+
+        from bot.services.email_service import EmailService
+        mailer = EmailService(self.config)
+        if not mailer.is_configured():
+            say("📧 Отправка на почту пока не подключена — ключ доступен здесь, в чате."
+                if lang == 'ru' else
+                "📧 Email delivery isn't set up yet — your key is available here in the chat.")
+            return
+
+        to_addr = (getattr(user, 'contact_email', None) or '').strip()
+        if not to_addr:
+            say("📧 Сначала укажи почту:\n<code>/setemail твой@email.com</code>"
+                if lang == 'ru' else
+                "📧 Set your email first:\n<code>/setemail your@email.com</code>")
+            return
+
+        now = time.time()
+        last_t = type(self)._last_sent_times.get(user_id or chat_id, 0)
+        if now - last_t < self.RATE_LIMIT_SECONDS:
+            say("⏳ Письмо уже отправлено. Проверь почту (и «Спам»), повторить можно через 10 минут."
+                if lang == 'ru' else
+                "⏳ Already sent. Check your inbox (and Spam); retry in 10 minutes.")
+            return
+        type(self)._last_sent_times[user_id or chat_id] = now
+
+        from bot.services.subscription import SubscriptionService
+        sub_url = SubscriptionService(self.config).build_subscription_url(user)
+        if not sub_url:
+            say("⚠️ Не удалось собрать ссылку — напишите в поддержку."
+                if lang == 'ru' else
+                "⚠️ Couldn't build the URL — contact support.")
+            return
+
+        def _worker() -> None:
+            ok = mailer.send_key(to_addr, sub_url, lang)
+            if ok:
+                say(f"✉️ Ключ отправлен на <code>{html.escape(to_addr)}</code>. "
+                    "Если письма нет — загляни в «Спам»."
+                    if lang == 'ru' else
+                    f"✉️ Key sent to <code>{html.escape(to_addr)}</code>. "
+                    "Check Spam if it doesn't show up.")
+            else:
+                # let the user retry right away — the send didn't happen
+                type(self)._last_sent_times.pop(user_id or chat_id, None)
+                say("⚠️ Не получилось отправить письмо, попробуй позже."
+                    if lang == 'ru' else
+                    "⚠️ Couldn't send the letter, try again later.")
+
+        threading.Thread(target=_worker, daemon=True,
+                         name=f"email-key-{user_id or chat_id}").start()
+        logger.info(f"email_key: queued send for user {user_id or chat_id}")
 
 
 class StatsRequestHandler(BaseCallbackHandler):

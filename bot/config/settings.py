@@ -149,6 +149,19 @@ class Settings:
         except ValueError:
             self.WS2_INBOUND_ID = 0
 
+        # Outbound mail (backup key delivery) via an external SMTP relay.
+        # Empty SMTP_HOST = feature off. See services/email_service.py for
+        # why we relay instead of running an MTA on the node.
+        self.SMTP_HOST: str = os.getenv('SMTP_HOST', '').strip()
+        try:
+            self.SMTP_PORT: int = int(os.getenv('SMTP_PORT', '587'))
+        except ValueError:
+            self.SMTP_PORT = 587
+        self.SMTP_USER: str = os.getenv('SMTP_USER', '').strip()
+        self.SMTP_PASSWORD: str = os.getenv('SMTP_PASSWORD', '')
+        self.SMTP_FROM: str = os.getenv('SMTP_FROM', '').strip()
+        self.SMTP_FROM_NAME: str = os.getenv('SMTP_FROM_NAME', 'NekoVPN').strip()
+
         # Ceiling for one /ai agent turn, seconds. The call runs on a
         # worker thread (doesn't block the bot), so a generous ceiling
         # is safe — plan-mode multi-tool turns routinely take minutes.

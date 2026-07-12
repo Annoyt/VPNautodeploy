@@ -108,8 +108,9 @@ class UserRepository(BaseRepository):
                     (chat_id, username, previous_state, reject_count, uuid, email, status, lang, platform,
                      support_topic_id, created_at, subscription_expiry, limit_ip,
                      quota_gb, last_traffic_update, next_protocol_idx,
-                     last_country, last_asn, last_city, last_lat, last_lon)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     last_country, last_asn, last_city, last_lat, last_lon,
+                     contact_email)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
                     user.chat_id, user.username, user.previous_state, user.reject_count,
                     user.uuid, user.email,
@@ -123,6 +124,7 @@ class UserRepository(BaseRepository):
                     getattr(user, 'last_city', None),
                     getattr(user, 'last_lat', None),
                     getattr(user, 'last_lon', None),
+                    getattr(user, 'contact_email', None),
                 ))
             return True
         except Exception as e:

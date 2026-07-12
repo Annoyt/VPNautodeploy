@@ -488,7 +488,11 @@ class CommandHandler(BaseHandler):
         if not user:
             user = self._get_or_create_user(update)
 
-        user.email = user.email or email  # Only set if not already set
+        # contact_email, NOT user.email: the latter is the synthetic
+        # user_<name>_<id>@nekovo.ru identifier keys live under in X-UI.
+        # Writing there either did nothing (or-guard) or corrupted the
+        # panel identifier for keyless users.
+        user.contact_email = email
         self.db.save_user(user)
 
         lang = user.lang or 'ru'
@@ -498,4 +502,4 @@ class CommandHandler(BaseHandler):
             text = f"✅ Email сохранён: {email}\n\nИспользуем его для отправки резервного ключа если VPN заблокируют."
 
         self.bot.send_message(chat_id=chat_id, text=text)
-        logger.info(f"User {chat_id} set email to {email}")
+        logger.info(f"User {chat_id} set contact email")

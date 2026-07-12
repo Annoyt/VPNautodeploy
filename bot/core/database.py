@@ -242,7 +242,8 @@ class Database:
                 last_asn TEXT,
                 last_city TEXT,
                 last_lat REAL,
-                last_lon REAL
+                last_lon REAL,
+                contact_email TEXT
             )
         ''')
 
@@ -256,6 +257,7 @@ class Database:
             "ALTER TABLE users ADD COLUMN last_city TEXT",
             "ALTER TABLE users ADD COLUMN last_lat REAL",
             "ALTER TABLE users ADD COLUMN last_lon REAL",
+            "ALTER TABLE users ADD COLUMN contact_email TEXT",
         ):
             try:
                 c.execute(ddl)

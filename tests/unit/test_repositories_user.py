@@ -45,7 +45,8 @@ class TestUserRepository:
                 last_asn TEXT,
                 last_city TEXT,
                 last_lat REAL,
-                last_lon REAL
+                last_lon REAL,
+                contact_email TEXT
             )
         ''')
         
