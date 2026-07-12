@@ -29,6 +29,10 @@ class CallbackHandler(BaseHandler):
             logger.warning("Cannot handle callback: missing chat_id or user_id")
             return
 
+        # Success paths used to log nothing at all, which made "the
+        # button does nothing" reports undebuggable post-factum.
+        logger.info(f"callback: data={data!r} chat={chat_id} user={user_id}")
+
         callback_id = extract_callback_id(update)
         if callback_id:
             self.bot.answer_callback_query(callback_id)

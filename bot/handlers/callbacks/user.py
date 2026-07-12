@@ -736,34 +736,46 @@ class MyKeyAnswerHandler(BaseCallbackHandler):
     def handle(self, update: dict, chat_id: str, user_id: str, **kwargs) -> None:
         import time
         data = kwargs.get('data', '')
-        user = self.db.get_user(chat_id)
+        # Key the lookup on the PRESSER, not the chat: inside a forum
+        # group chat_id is the group id and get_user(chat_id) is None,
+        # which used to bounce the report with "get a key first".
+        user = self.db.get_user(user_id) or self.db.get_user(chat_id)
         lang = (getattr(user, 'lang', None) or 'ru') if user else 'ru'
+        # Reply into the same forum topic the button lives in — without
+        # this the answer lands in the group's General topic where the
+        # presser never sees it ("the button does nothing").
+        cb_msg = (update.get('callback_query') or {}).get('message') or {}
+        thread_id = cb_msg.get('message_thread_id')
 
         # 'mykey_yes' from legacy messages — user is *confirming* the
         # key works. Just acknowledge, don't log a failure.
         if data == 'mykey_yes':
             text = ("👍 Отлично, рад что работает." if lang == 'ru'
                     else "👍 Glad it works.")
-            self.bot.send_message(chat_id=chat_id, text=text)
+            self.bot.send_message(chat_id=chat_id, text=text,
+                                  message_thread_id=thread_id)
             return
 
         # report_target:<category> — user selected a specific problem
         # from the dropdown. Log it with the chosen category.
         if data.startswith(self.CALLBACK_PATTERN_TARGET):
-            self._handle_target_selection(data, chat_id, user, lang)
+            self._handle_target_selection(
+                data, chat_id, user_id, user, lang, thread_id)
             return
 
         # report_failure, mykey_trigger, mykey_no — show the dropdown.
         if not user or not user.uuid:
             text = ("⚠️ Сначала получите ключ — /start" if lang == 'ru'
                     else "⚠️ Get a key first — /start")
-            self.bot.send_message(chat_id=chat_id, text=text)
+            self.bot.send_message(chat_id=chat_id, text=text,
+                                  message_thread_id=thread_id)
             return
 
         # Show category selection dropdown
-        self._show_category_picker(chat_id, lang)
+        self._show_category_picker(chat_id, lang, thread_id)
 
-    def _show_category_picker(self, chat_id: str, lang: str) -> None:
+    def _show_category_picker(self, chat_id: str, lang: str,
+                              thread_id=None) -> None:
         """Show inline keyboard with failure category options."""
         prompt = (
             "🆘 <b>Что именно не работает?</b>\n\n"
@@ -780,9 +792,11 @@ class MyKeyAnswerHandler(BaseCallbackHandler):
         keyboard = {'inline_keyboard': [buttons[i:i+2] for i in range(0, len(buttons), 2)]}
         self.bot.send_message(
             chat_id=chat_id, text=prompt, parse_mode='HTML', reply_markup=keyboard,
+            message_thread_id=thread_id,
         )
 
-    def _handle_target_selection(self, data: str, chat_id: str, user, lang: str) -> None:
+    def _handle_target_selection(self, data: str, chat_id: str, user_id: str,
+                                 user, lang: str, thread_id=None) -> None:
         """Process the user's category selection and log the failure report."""
         try:
             category = data.split(':', 1)[1]
@@ -800,7 +814,10 @@ class MyKeyAnswerHandler(BaseCallbackHandler):
             k: v for k, v in type(self)._last_report_times.items()
             if v > cutoff
         }
-        last_t = type(self)._last_report_times.get(chat_id, 0)
+        # Rate-limit per presser, not per chat — in a group chat_id is
+        # shared by everyone.
+        rl_key = user_id or chat_id
+        last_t = type(self)._last_report_times.get(rl_key, 0)
         if now - last_t < self.REPORT_RATE_LIMIT_SECONDS:
             remaining = int(self.REPORT_RATE_LIMIT_SECONDS - (now - last_t))
             text = (
@@ -810,9 +827,10 @@ class MyKeyAnswerHandler(BaseCallbackHandler):
                 f"⏳ Got your signal already. Wait {remaining // 60} min before "
                 "the next ping — we'll have a look in the meantime."
             )
-            self.bot.send_message(chat_id=chat_id, text=text)
+            self.bot.send_message(chat_id=chat_id, text=text,
+                                  message_thread_id=thread_id)
             return
-        type(self)._last_report_times[chat_id] = now
+        type(self)._last_report_times[rl_key] = now
 
         # Snapshot context for the report row
         country = getattr(user, 'last_country', None)
@@ -829,12 +847,15 @@ class MyKeyAnswerHandler(BaseCallbackHandler):
                     "(chat_id, country, asn, city, lat, lon, "
                     " last_sub_fetch_ts, last_traffic_ts, target_domain) "
                     "VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)",
-                    (chat_id, country, asn, city, lat, lon, last_traffic_ts, category),
+                    # the report row references the REPORTING USER — in a
+                    # group press chat_id would be the group id
+                    (user_id or chat_id, country, asn, city, lat, lon,
+                     last_traffic_ts, category),
                 )
                 report_id = cur.lastrowid
                 conn.commit()
         except Exception as e:
-            logger.error(f"report_failure: insert failed for {chat_id}: {e}")
+            logger.error(f"report_failure: insert failed for {user_id or chat_id}: {e}")
             report_id = None
 
         # User-facing confirmation
@@ -856,20 +877,21 @@ class MyKeyAnswerHandler(BaseCallbackHandler):
                 "3. Try mobile data instead of Wi-Fi (different ISP = different blocking)\n\n"
                 "Didn't help? Send /support to open a ticket."
             )
-        self.bot.send_message(chat_id=chat_id, text=self_help, parse_mode='HTML')
+        self.bot.send_message(chat_id=chat_id, text=self_help, parse_mode='HTML',
+                              message_thread_id=thread_id)
 
         # Operator-side ping with category
         try:
             forum_group = getattr(self.config, 'FORUM_GROUP_ID', 0)
             topic = getattr(self.config, 'TOPIC_SUPPORT', 0)
             if forum_group and topic:
-                uname = getattr(user, 'username', None) or chat_id
+                uname = getattr(user, 'username', None) or user_id or chat_id
                 ctx = (country or 'unk') + (' / ' + asn if asn else '')
                 last_seen = last_traffic_ts or 'нет'
                 cat_label = self.FAILURE_CATEGORIES[category].get('ru', category)
                 msg = (
                     f"🆘 <b>Failure report #{report_id or '?'}</b>\n"
-                    f"User: <code>@{uname}</code> ({chat_id})\n"
+                    f"User: <code>@{uname}</code> ({user_id or chat_id})\n"
                     f"Problem: {cat_label}\n"
                     f"Network: {ctx}\n"
                     f"Last traffic: {last_seen}"
@@ -884,7 +906,7 @@ class MyKeyAnswerHandler(BaseCallbackHandler):
             logger.warning(f"report_failure: support ping failed: {e}")
 
         logger.info(
-            f"report_failure: chat_id={chat_id} country={country} asn={asn} "
+            f"report_failure: user={user_id or chat_id} country={country} asn={asn} "
             f"category={category} report_id={report_id}"
         )
 
