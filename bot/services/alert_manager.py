@@ -203,17 +203,21 @@ class AlertManager:
             # Forum topic — same place Kimi posts so admin watches one channel.
             topic = getattr(self.config, 'TOPIC_AI', 0) or 0
             group = getattr(self.config, 'FORUM_GROUP_ID', None)
+            sent_to_group = False
             if topic and group:
                 try:
                     self.bot.send_message(
                         chat_id=group, text=text, parse_mode='HTML',
                         message_thread_id=topic, reply_markup=kb,
                     )
+                    sent_to_group = True
                 except Exception as e:
                     logger.warning(f"alert: forum send failed: {e}")
 
-            # Always PM for critical
-            if alert.severity == 'critical':
+            # PM is a FALLBACK for criticals, not a duplicate: while the
+            # forum group is configured and reachable the bot must not
+            # write to the admin's personal chat (house rule).
+            if alert.severity == 'critical' and not sent_to_group:
                 admin = getattr(self.config, 'SUPER_ADMIN_ID', None)
                 if admin:
                     try:

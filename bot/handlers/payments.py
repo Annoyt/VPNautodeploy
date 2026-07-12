@@ -374,17 +374,30 @@ class PaymentHandler(BaseHandler):
             parse_mode='HTML',
         )
 
-        # Ping the admin so they can see the revenue live.
-        admin = getattr(self.config, 'SUPER_ADMIN_ID', None)
-        if admin:
-            uname = user.username or str(chat_id)
+        # Ping the admin so they can see the revenue live. Goes to the
+        # payments topic; the personal chat is only a fallback (house
+        # rule: no PM while the forum group works).
+        uname = user.username or str(chat_id)
+        revenue_text = (
+            f"💰 @{uname} продлил подписку на {months} мес "
+            f"за {total_stars} ⭐ (до {new_dt.strftime('%Y-%m-%d')})"
+        )
+        sent = False
+        topic_payments = getattr(self.config, 'TOPIC_PAYMENTS', 0) or 0
+        if getattr(self.config, 'FORUM_ENABLED', False) and topic_payments:
             try:
-                self.bot.send_message(
-                    chat_id=str(admin),
-                    text=(
-                        f"💰 @{uname} продлил подписку на {months} мес "
-                        f"за {total_stars} ⭐ (до {new_dt.strftime('%Y-%m-%d')})"
-                    ),
+                self.bot.send_message_to_topic(
+                    chat_id=self.config.FORUM_GROUP_ID,
+                    message_thread_id=topic_payments,
+                    text=revenue_text,
                 )
+                sent = True
             except Exception:
                 pass
+        if not sent:
+            admin = getattr(self.config, 'SUPER_ADMIN_ID', None)
+            if admin:
+                try:
+                    self.bot.send_message(chat_id=str(admin), text=revenue_text)
+                except Exception:
+                    pass
