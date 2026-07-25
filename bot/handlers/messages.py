@@ -1,12 +1,22 @@
 """Message handler for text messages"""
 
 import logging
+import time
 
 from bot.config import UserState
 from bot.handlers.base import BaseHandler
 from bot.services.notifications import NotificationService
+from bot.utils.validators import validate_email
 
 logger = logging.getLogger(__name__)
+
+# chat_id → ts of the "📧 Add email" button tap. While a fresh entry
+# exists, the user's next plain-text message is treated as their email
+# address. The old flow demanded a /setemail command — users just sent
+# the address as plain text, which fell into "I don't understand this
+# message" and was silently lost (ziriki, 2026-07-25).
+PENDING_EMAIL: dict = {}
+PENDING_EMAIL_TTL = 600  # seconds
 
 
 class MessageHandler(BaseHandler):
@@ -55,18 +65,58 @@ class MessageHandler(BaseHandler):
             # New user - treat as regular message
             self.handle_regular_message(update, chat_id, text)
             return
-        
+
+        # Pending "add email" prompt → this message IS the email address.
+        if self._maybe_handle_pending_email(chat_id, text, user):
+            return
+
         # Check if this is an admin PM reply
         if self._is_admin(chat_id) and 'reply_to_message' in message:
             self.handle_admin_reply(update)
             return
-            
+
         # Route based on state
         if user.status == UserState.SUPPORT_TOPIC.value:
             self.handle_support_message(update, user)
         else:
             self.handle_regular_message(update, chat_id, text)
-            
+
+    def _maybe_handle_pending_email(self, chat_id: str, text: str, user) -> bool:
+        """Consume a pending email prompt. Returns True if the message
+        was handled (saved or rejected as malformed)."""
+        ts = PENDING_EMAIL.get(chat_id)
+        if ts is None:
+            return False
+        if time.time() - ts > PENDING_EMAIL_TTL:
+            PENDING_EMAIL.pop(chat_id, None)
+            return False
+
+        email = (text or '').strip()
+        lang = getattr(user, 'lang', None) or 'ru'
+        if not validate_email(email):
+            # Keep the pending flag so they can retry within the TTL.
+            msg = ("❌ Это не похоже на email. Попробуй ещё раз "
+                   "(например ivan@gmail.com) или /cancel для отмены."
+                   if lang == 'ru' else
+                   "❌ That doesn't look like an email. Try again "
+                   "(e.g. john@gmail.com) or /cancel to abort.")
+            self.bot.send_message(chat_id=chat_id, text=msg)
+            return True
+
+        PENDING_EMAIL.pop(chat_id, None)
+        # contact_email, NOT user.email — the latter is the synthetic
+        # x-ui identifier and must never be overwritten by user input.
+        user.contact_email = email
+        self.db.save_user(user)
+        msg = (f"✅ Email сохранён: {email}\n\nИспользуем его для отправки "
+               "резервного ключа если VPN заблокируют."
+               if lang == 'ru' else
+               f"✅ Email saved: {email}\n\nWe'll use it to send a backup "
+               "key if your VPN gets blocked.")
+        self.bot.send_message(chat_id=chat_id, text=msg)
+        logger.info(f"User {chat_id} set contact email via pending prompt")
+        return True
+
     def handle_admin_reply(self, update: dict) -> None:
         """Handle admin replying to a user's forwarded message in PM mode."""
         message = update.get('message', {})

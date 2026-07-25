@@ -1078,29 +1078,38 @@ class EmailPromptHandler(BaseCallbackHandler):
         return callback_data == self.CALLBACK_DATA
 
     def handle(self, update: dict, chat_id: str, user_id: str, **kwargs) -> None:
-        """Prompt user to enter their email."""
+        """Prompt user to enter their email.
+
+        Arms the pending-email flag: the user's NEXT plain-text message
+        is consumed as the address (see MessageHandler.PENDING_EMAIL).
+        Asking for a /setemail command didn't work — users just replied
+        with the address and it was lost in the "I don't understand"
+        fallback.
+        """
+        import time as _time
+        from bot.handlers.messages import PENDING_EMAIL
+
         user = self.db.get_user(chat_id)
         lang = user.lang if user else 'ru'
+        PENDING_EMAIL[chat_id] = _time.time()
 
         if lang == 'en':
             text = (
                 "📧 <b>Add your email</b>\n\n"
                 "We'll use it to send you a backup key if your VPN gets blocked.\n\n"
-                "Use the command below:\n"
-                "<code>/setemail your@email.com</code>\n\n"
-                "Example: /setemail john@gmail.com"
+                "👉 Just <b>reply to this message</b> with your email "
+                "(e.g. john@gmail.com) — or send /setemail your@email.com"
             )
         else:
             text = (
                 "📧 <b>Укажи свой email</b>\n\n"
                 "Используем его для отправки резервного ключа если VPN заблокируют.\n\n"
-                "Используй команду ниже:\n"
-                "<code>/setemail твой@email.com</code>\n\n"
-                "Пример: /setemail ivan@gmail.com"
+                "👉 Просто <b>отправь email ответным сообщением</b> "
+                "(например ivan@gmail.com) — или командой /setemail твой@email.com"
             )
 
         self.bot.send_message(chat_id=chat_id, text=text, parse_mode='HTML')
-        logger.info(f"User {chat_id} requested email prompt")
+        logger.info(f"User {chat_id} requested email prompt (pending armed)")
 
 
 class EmailKeyHandler(BaseCallbackHandler):
@@ -1328,7 +1337,12 @@ class LanguageSetHandler(BaseCallbackHandler):
 
 
 class EmailPromptHandler(BaseCallbackHandler):
-    """Handle email prompt callback - shows instructions for setting email."""
+    """Handle email prompt callback - shows instructions for setting email.
+
+    NOTE: this is the ACTIVE copy — there is an older dead duplicate of
+    this class higher up in the file (shadowed at import time). Edit this
+    one.
+    """
 
     CALLBACK_DATA_EXACT = ['add_email_prompt']
 
@@ -1336,9 +1350,20 @@ class EmailPromptHandler(BaseCallbackHandler):
         return callback_data in self.CALLBACK_DATA_EXACT
 
     def handle(self, update: dict, chat_id: str, user_id: str, **kwargs) -> None:
-        """Show email setup instructions."""
+        """Prompt user to enter their email.
+
+        Arms the pending-email flag: the user's NEXT plain-text message
+        is consumed as the address (see MessageHandler.PENDING_EMAIL).
+        Asking for a /setemail command didn't work — users just replied
+        with the address and it was lost in the "I don't understand"
+        fallback (ziriki, 2026-07-25).
+        """
+        import time as _time
+        from bot.handlers.messages import PENDING_EMAIL
+
         user = self.db.get_user(chat_id)
         lang = user.lang if user else 'ru'
+        PENDING_EMAIL[chat_id] = _time.time()
 
         if lang == 'en':
             text = (
@@ -1346,9 +1371,8 @@ class EmailPromptHandler(BaseCallbackHandler):
                 "Why add email?\n"
                 "• If your VPN gets blocked, we'll email you a backup key\n"
                 "• You can contact support via email if Telegram is blocked\n\n"
-                "<b>How to add:</b>\n"
-                "Send: <code>/setemail your@email.com</code>\n\n"
-                "Example: /setemail john@gmail.com"
+                "👉 Just <b>reply to this message</b> with your email "
+                "(e.g. john@gmail.com) — or send /setemail your@email.com"
             )
         else:
             text = (
@@ -1356,9 +1380,8 @@ class EmailPromptHandler(BaseCallbackHandler):
                 "Зачем нужен email?\n"
                 "• Если VPN заблокируют, мы пришлём резервный ключ на почту\n"
                 "• Сможешь связаться с поддержкой через email если Telegram недоступен\n\n"
-                "<b>Как указать:</b>\n"
-                "Отправь: <code>/setemail твой@email.com</code>\n\n"
-                "Пример: /setemail ivan@gmail.com"
+                "👉 Просто <b>отправь email ответным сообщением</b> "
+                "(например ivan@gmail.com) — или командой /setemail твой@email.com"
             )
 
         self.bot.send_message(
@@ -1366,4 +1389,4 @@ class EmailPromptHandler(BaseCallbackHandler):
             text=text,
             parse_mode='HTML'
         )
-        logger.info(f"User {chat_id} requested email instructions")
+        logger.info(f"User {chat_id} requested email prompt (pending armed)")
