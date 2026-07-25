@@ -97,6 +97,18 @@ services:
       # connection failure): primary exit tinyproxy, reserve node, ...
       # If unset, HTTPS_PROXY alone is used (legacy behaviour).
       - TG_PROXY_URLS=${TG_PROXY_URLS:-}
+      - EXIT_NODE_IP=${EXIT_NODE_IP:-}
+      # Reserve DE fallback node for paid users (fallback_node.py).
+      - FALLBACK_NODE_HOST=${FALLBACK_NODE_HOST:-}
+      - FALLBACK_NODE_PORT=${FALLBACK_NODE_PORT:-443}
+      - FALLBACK_NODE_SNI=${FALLBACK_NODE_SNI:-}
+      - FALLBACK_NODE_PBK=${FALLBACK_NODE_PBK:-}
+      - FALLBACK_NODE_SID=${FALLBACK_NODE_SID:-}
+      - FALLBACK_NODE_XUI_URL=${FALLBACK_NODE_XUI_URL:-}
+      - FALLBACK_NODE_XUI_BASE_PATH=${FALLBACK_NODE_XUI_BASE_PATH:-/sub}
+      - FALLBACK_NODE_XUI_USER=${FALLBACK_NODE_XUI_USER:-}
+      - FALLBACK_NODE_XUI_PASS=${FALLBACK_NODE_XUI_PASS:-}
+      - FALLBACK_NODE_INBOUND_ID=${FALLBACK_NODE_INBOUND_ID:-1}
       - NO_PROXY=${NO_PROXY:-}
       - no_proxy=${no_proxy:-}
       - ENTRY_NODE_IP=${ENTRY_NODE_IP}
