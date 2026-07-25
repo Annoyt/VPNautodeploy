@@ -429,7 +429,41 @@ class GetKeyHandler(BaseCallbackHandler):
             return
 
         lang = (user.lang or 'ru')
-        if lang == 'en':
+        # iOS in RU: Hiddify and the other sing-box clients were pulled
+        # from the RU App Store — Happ is the surviving xray client, and
+        # it can't read sing-box JSON. Give iOS users the same URL with
+        # ?format=xray (legacy Xray config, Happ passes it 1:1 to core).
+        is_ios = (getattr(user, 'platform', None) or '') == 'ios'
+        if is_ios:
+            url = url + '?format=xray'
+        if is_ios and lang != 'en':
+            text = (
+                "✅ <b>Твой VPN готов</b>\n\n"
+                "1. Установи Happ из App Store (Hiddify и другие "
+                "удалили из RU-маркета): https://happ.su/ru/\n"
+                "2. Добавь подписку — тапни по ссылке чтобы скопировать:\n\n"
+                f"<code>{url}</code>\n\n"
+                "3. В Happ: <b>+ → Добавить подписку → вставить → Сохранить</b>\n"
+                "4. Нажми «Подключить». Клиент сам выбирает рабочий "
+                "сервер и переключается если что-то падает.\n\n"
+                "💡 Подписка сама обновляется каждые 6 часов — если мы "
+                "меняем сервера, ничего переимпортировать не надо.\n\n"
+                "Нужен сырой ключ одного протокола? /raw"
+            )
+        elif is_ios:
+            text = (
+                "✅ <b>Your VPN is ready</b>\n\n"
+                "1. Install Happ from the App Store: https://happ.su/\n"
+                "2. Add this subscription URL — tap the link below to copy:\n\n"
+                f"<code>{url}</code>\n\n"
+                "3. In Happ: <b>+ → Add subscription → paste → Save</b>\n"
+                "4. Tap «Connect». The client picks the working outbound "
+                "automatically and switches if something dies.\n\n"
+                "💡 The subscription refreshes itself every 6 hours — "
+                "server changes arrive automatically.\n\n"
+                "Need a raw single-protocol key? Send /raw."
+            )
+        elif lang == 'en':
             text = (
                 "✅ <b>Your VPN is ready</b>\n\n"
                 "1. Install Hiddify: https://hiddify.com/\n"

@@ -85,6 +85,221 @@ class SubscriptionService:
             return None
         return f"{base}/sub/{self.derive_token(user.uuid)}"
 
+    # ---------- Xray JSON (Happ / v2rayNG legacy clients) ----------
+
+    def build_xray_config(
+        self,
+        user,
+        enabled_protocols: Tuple[str, ...],
+    ) -> dict:
+        """Xray-core client config for clients that can't read sing-box
+        JSON — primarily **Happ**, which passes an imported JSON 1:1 to
+        its xray core (see happ.su dev-docs, "Принцип прямой передачи").
+
+        Served from the same token-gated /sub URL as the sing-box config
+        (``?format=xray`` or a Happ User-Agent), so it may carry the
+        Reality outbound with the entry IP — same exposure policy as the
+        sing-box variant.
+
+        Xray-core has no Hysteria2 or ShadowTLS client, so those are
+        silently skipped; hy2 remains available to Happ users as a raw
+        ``hy2://`` link (the app runs it through a separate core).
+        """
+        outbounds: List[dict] = []
+        builders = {
+            'reality': self._xray_reality,
+            'ws': self._xray_ws,
+            'xhttp': self._xray_xhttp,
+        }
+        for proto in enabled_protocols:
+            builder = builders.get(proto)
+            if builder is None:
+                continue
+            try:
+                ob = builder(user)
+            except Exception as e:
+                logger.error(f'xray_config: failed to build {proto}: {e}')
+                continue
+            if ob is not None:
+                outbounds.append(ob)
+
+        # Reserve fallback node (DE) — same paid-tier gating as sing-box.
+        if user and getattr(user, 'status', None) in FALLBACK_ALLOWED_STATUSES:
+            try:
+                fb = self._xray_fallback(user)
+            except Exception as e:
+                logger.warning(f'xray_config: fallback skipped: {e}')
+                fb = None
+            if fb is not None:
+                outbounds.append(fb)
+
+        if not outbounds:
+            logger.warning(f'xray_config: no usable outbounds for {getattr(user, "chat_id", "?")}')
+
+        outbounds.append({'protocol': 'freedom', 'tag': 'direct', 'settings': {}})
+        outbounds.append({'protocol': 'blackhole', 'tag': 'block', 'settings': {}})
+
+        return {
+            'log': {'loglevel': 'warning'},
+            'dns': {'servers': ['https+local://1.1.1.1/dns-query', 'localhost']},
+            'inbounds': [
+                {
+                    'listen': '127.0.0.1',
+                    'port': 10808,
+                    'protocol': 'socks',
+                    'settings': {'auth': 'noauth', 'udp': True},
+                    'sniffing': {'enabled': True, 'destOverride': ['http', 'tls']},
+                },
+                {
+                    'listen': '127.0.0.1',
+                    'port': 10809,
+                    'protocol': 'http',
+                    'settings': {},
+                },
+            ],
+            'outbounds': outbounds,
+            'routing': {
+                'domainStrategy': 'AsIs',
+                'rules': [
+                    {'type': 'field', 'ip': ['geoip:private'], 'outboundTag': 'direct'},
+                ],
+            },
+        }
+
+    def _xray_reality(self, user) -> Optional[dict]:
+        cfg = self.config
+        host = getattr(cfg, 'ENTRY_NODE_IP', '') or ''
+        pbk = getattr(cfg, 'REALITY_PUBLIC_KEY', '') or ''
+        sni = getattr(cfg, 'SNI_VALUE', '') or ''
+        if not (host and pbk and sni and user.uuid):
+            return None
+        try:
+            port = int(getattr(cfg, 'ENTRY_NODE_PORT', 443) or 443)
+        except (ValueError, TypeError):
+            port = 443
+        email = getattr(user, 'email', '') or 'user'
+        return {
+            'protocol': 'vless',
+            'tag': f'{email.split("@")[0]}-reality',
+            'settings': {
+                'vnext': [{
+                    'address': host,
+                    'port': port,
+                    'users': [{
+                        'id': user.uuid,
+                        'encryption': 'none',
+                        'flow': 'xtls-rprx-vision',
+                    }],
+                }],
+            },
+            'streamSettings': {
+                'network': 'tcp',
+                'security': 'reality',
+                'realitySettings': {
+                    'serverName': sni,
+                    'publicKey': pbk,
+                    'shortId': getattr(cfg, 'SID_VALUE', '') or '',
+                    'fingerprint': 'chrome',
+                },
+            },
+        }
+
+    def _xray_ws(self, user) -> Optional[dict]:
+        cfg = self.config
+        host = getattr(cfg, 'WS_HOST', '') or ''
+        if not (host and user.uuid):
+            return None
+        try:
+            port = int(getattr(cfg, 'WS_PORT', 2053) or 2053)
+        except (ValueError, TypeError):
+            port = 2053
+        sni = getattr(cfg, 'WS_SNI', '') or host
+        path = getattr(cfg, 'WS_PATH', '/') or '/'
+        email = getattr(user, 'email', '') or 'user'
+        return {
+            'protocol': 'vmess',
+            'tag': f'{email.split("@")[0]}-cdn-ws',
+            'settings': {
+                'vnext': [{
+                    'address': host,
+                    'port': port,
+                    'users': [{'id': user.uuid, 'alterId': 0, 'security': 'auto'}],
+                }],
+            },
+            'streamSettings': {
+                'network': 'httpupgrade',
+                'security': 'tls',
+                'httpupgradeSettings': {'path': path, 'host': host},
+                'tlsSettings': {'serverName': sni, 'fingerprint': 'chrome'},
+            },
+        }
+
+    def _xray_xhttp(self, user) -> Optional[dict]:
+        cfg = self.config
+        host = getattr(cfg, 'WS2_HOST', '') or ''
+        if not (host and user.uuid):
+            return None
+        try:
+            port = int(getattr(cfg, 'WS2_PORT', 443) or 443)
+        except (ValueError, TypeError):
+            port = 443
+        sni = getattr(cfg, 'WS2_SNI', '') or host
+        path = getattr(cfg, 'WS2_PATH', '/') or '/'
+        email = getattr(user, 'email', '') or 'user'
+        return {
+            'protocol': 'vmess',
+            'tag': f'{email.split("@")[0]}-cdn-xhttp',
+            'settings': {
+                'vnext': [{
+                    'address': host,
+                    'port': port,
+                    'users': [{'id': user.uuid, 'alterId': 0, 'security': 'auto'}],
+                }],
+            },
+            'streamSettings': {
+                'network': 'xhttp',
+                'security': 'tls',
+                'xhttpSettings': {'path': path, 'host': host, 'mode': 'auto'},
+                'tlsSettings': {
+                    'serverName': sni,
+                    'fingerprint': 'chrome',
+                    'alpn': ['h2', 'http/1.1'],
+                },
+            },
+        }
+
+    def _xray_fallback(self, user) -> Optional[dict]:
+        """Reserve DE node outbound in xray shape (no vision flow —
+        the reserve inbound doesn't use it)."""
+        if not getattr(user, 'uuid', None):
+            return None
+        fb = FallbackNodeService(self.config)
+        if not fb.enabled:
+            return None
+        host = fb._cfg('FALLBACK_NODE_HOST')
+        email = getattr(user, 'email', '') or 'user'
+        return {
+            'protocol': 'vless',
+            'tag': f'{email.split("@")[0]}-de',
+            'settings': {
+                'vnext': [{
+                    'address': host,
+                    'port': int(fb._cfg('FALLBACK_NODE_PORT', '443') or 443),
+                    'users': [{'id': user.uuid, 'encryption': 'none'}],
+                }],
+            },
+            'streamSettings': {
+                'network': 'tcp',
+                'security': 'reality',
+                'realitySettings': {
+                    'serverName': fb._cfg('FALLBACK_NODE_SNI', 'www.google.com'),
+                    'publicKey': fb._cfg('FALLBACK_NODE_PBK'),
+                    'shortId': fb._cfg('FALLBACK_NODE_SID'),
+                    'fingerprint': 'chrome',
+                },
+            },
+        }
+
     # ---------- Sing-box JSON ----------
 
     def build_singbox_config(

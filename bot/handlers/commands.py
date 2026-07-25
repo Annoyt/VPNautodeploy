@@ -350,7 +350,29 @@ class CommandHandler(BaseHandler):
             logger.warning(f"/sub: WEBAPP_URL not set, cannot build URL for {chat_id}")
             return
 
-        if user.lang == 'ru':
+        # iOS RU App Store lost every sing-box client; Happ (xray core)
+        # survived and needs the ?format=xray variant of the same URL.
+        is_ios = (getattr(user, 'platform', None) or '') == 'ios'
+        if is_ios:
+            url = url + '?format=xray'
+
+        if is_ios and user.lang != 'en':
+            text = (
+                "🔗 <b>Subscription URL для Happ</b>\n\n"
+                f"<code>{url}</code>\n\n"
+                "В Happ: «+» → «Добавить подписку» → вставь URL.\n"
+                "Один URL = весь каскад протоколов. Когда мы меняем "
+                "сервера, клиент сам подтягивает свежее каждые 6 часов."
+            )
+        elif is_ios:
+            text = (
+                "🔗 <b>Subscription URL for Happ</b>\n\n"
+                f"<code>{url}</code>\n\n"
+                "In Happ: «+» → «Add subscription» → paste it.\n"
+                "One URL = the whole cascade. When we rotate servers the "
+                "client picks it up automatically every 6 hours."
+            )
+        elif user.lang == 'ru':
             text = (
                 "🔗 <b>Subscription URL</b>\n\n"
                 f"<code>{url}</code>\n\n"
@@ -440,6 +462,26 @@ class CommandHandler(BaseHandler):
         )
         header = header_ru if user.lang == 'ru' else header_en
         text = header + "\n\n" + "\n\n".join(lines)
+
+        # Happ / xray-core clients: the same subscription URL with
+        # ?format=xray returns a legacy Xray JSON config (Reality inside,
+        # no Hysteria2/ShadowTLS — xray core can't do those).
+        from bot.services.subscription import SubscriptionService
+        sub_url = SubscriptionService(self.config).build_subscription_url(user)
+        if sub_url:
+            happ_ru = (
+                "📱 <b>Для Happ:</b> добавь как подписку эту ссылку "
+                "(отдаст Xray JSON — Reality внутри, Hysteria2 и ShadowTLS "
+                "ядро xray не умеет, они выше отдельными ключами):\n"
+                f"<code>{sub_url}?format=xray</code>"
+            )
+            happ_en = (
+                "📱 <b>For Happ:</b> add this as a subscription "
+                "(serves Xray JSON — Reality included; Hysteria2/ShadowTLS "
+                "aren't supported by the xray core, use the raw keys above):\n"
+                f"<code>{sub_url}?format=xray</code>"
+            )
+            text += "\n\n" + (happ_ru if user.lang == 'ru' else happ_en)
         # Same failure-report button so legacy users have the same
         # escalation path as subscription users.
         btn_label = ("🆘 Не подключается? Сообщить" if user.lang == 'ru'

@@ -695,7 +695,16 @@ class WebAppServer:
             except Exception as e:
                 logger.warning(f'sub: fallback provisioning failed for {user.chat_id}: {e}')
 
-        config_obj = self.subscription.build_singbox_config(user, cascade)
+        # Format selection: default is the sing-box config (Hiddify).
+        # ``?format=xray`` or a Happ User-Agent gets the Xray-core JSON
+        # instead — Happ passes imported JSON 1:1 to its xray core and
+        # can't parse sing-box configs at all.
+        fmt = (request.rel_url.query.get('format') or '').lower()
+        ua = (request.headers.get('User-Agent', '') or '').lower()
+        if fmt == 'xray' or (not fmt and 'happ' in ua):
+            config_obj = self.subscription.build_xray_config(user, cascade)
+        else:
+            config_obj = self.subscription.build_singbox_config(user, cascade)
 
         # Surface quota/expiry to Hiddify's profile panel via the
         # subscription-userinfo header. Bytes-per-GB matches the units
