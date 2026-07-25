@@ -206,17 +206,16 @@ PLATFORM_INSTRUCTIONS = {
             "❓ Если что-то не удалось — напиши /support"
         ),
         Platform.IOS: (
-            "1. Установите Hiddify из App Store\n"
-            "   📱 https://apps.apple.com/app/hiddify\n\n"
-            "   Если Hiddify недоступен, попробуй:\n"
-            "   • Streisand (бесплатно) — https://apps.apple.com/app/streisand\n"
-            "   • Shadowrocket ($2.99)\n"
-            "   • Foxray (с подпиской)\n\n"
-            "2. Открой приложение\n"
-            "3. Нажми «+» → «Импорт из буфера обмена»\n"
-            "4. 💡 Для устойчивости: Settings → Config Options →\n"
-            "   включи «Enable ECH» (Encrypted ClientHello)\n\n"
-            "❓ Если что-то не удалось — напиши /support, подберём альтернативу"
+            "1. Установите Happ из App Store\n"
+            "   📱 https://happ.su/ru/\n\n"
+            "   Hiddify и другие sing-box клиенты удалили из RU App Store —\n"
+            "   Happ остался и полностью работает.\n\n"
+            "2. Откройте приложение\n"
+            "3. Нажмите «+» → «Добавить подписку» и вставьте ссылку из\n"
+            "   сообщения с ключом (она придёт следующим сообщением в\n"
+            "   формате специально для Happ)\n"
+            "4. Нажмите большую кнопку подключения\n\n"
+            "❓ Если что-то не удалось — напишите /support"
         ),
         Platform.WINDOWS: (
             "1. Скачай Hiddify для Windows:\n"
@@ -258,17 +257,15 @@ PLATFORM_INSTRUCTIONS = {
             "❓ If something doesn't work — write /support"
         ),
         Platform.IOS: (
-            "1. Install Hiddify from App Store\n"
-            "   📱 https://apps.apple.com/app/hiddify\n\n"
-            "   If Hiddify unavailable, try:\n"
-            "   • Streisand (free) — https://apps.apple.com/app/streisand\n"
-            "   • Shadowrocket ($2.99)\n"
-            "   • Foxray (subscription)\n\n"
+            "1. Install Happ from the App Store\n"
+            "   📱 https://happ.su/\n\n"
+            "   (Hiddify and other sing-box clients were pulled from the\n"
+            "   RU App Store — Happ remains and works fine.)\n\n"
             "2. Open the app\n"
-            "3. Tap «+» → «Import from clipboard»\n"
-            "4. 💡 For DPI resistance: Settings → Config Options →\n"
-            "   turn on «Enable ECH» (Encrypted ClientHello)\n\n"
-            "❓ If something doesn't work — write /support, we'll suggest alternatives"
+            "3. Tap «+» → «Add subscription» and paste the link from the\n"
+            "   key message (arrives next, in the Happ-specific format)\n"
+            "4. Tap the big connect button\n\n"
+            "❓ If something doesn't work — write /support"
         ),
         Platform.WINDOWS: (
             "1. Download Hiddify for Windows:\n"

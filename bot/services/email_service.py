@@ -29,14 +29,91 @@ logger = logging.getLogger(__name__)
 SMTP_TIMEOUT_S = 20
 
 
-def _key_email(sub_url: str, lang: str) -> tuple[str, str]:
+def _key_email(sub_url: str, lang: str, platform: str = None) -> tuple[str, str]:
     """(subject, plain-text body) for the key letter.
 
     Plain text on purpose: HTML from a fresh sender scores worse with
     spam filters. The instructions are written for a first-time user
     who has never seen a VPN client — every step names the exact
     button to tap.
+
+    iOS gets a dedicated Happ-first variant: Hiddify and the other
+    sing-box clients were pulled from the RU App Store, and Happ (xray
+    core) can't read the sing-box subscription — it needs the same URL
+    with ``?format=xray`` (legacy Xray JSON). The generic letter keeps
+    both links so a multi-device user can pick the right one.
     """
+    happ_url = sub_url + '?format=xray'
+
+    if platform == 'ios':
+        if lang == 'en':
+            subject = "Your NekoVPN access key + iPhone setup guide"
+            body = (
+                "Hi! This letter contains your personal VPN access key and a\n"
+                "step-by-step iPhone setup guide. It takes about 2 minutes.\n"
+                "\n"
+                "=== YOUR KEY (subscription link) ===\n"
+                f"{happ_url}\n"
+                "\n"
+                "=== SETUP (step by step) ===\n"
+                "1. Install the free Happ app from the App Store:\n"
+                "   https://happ.su/ru/ (or search \"Happ\" in the App Store)\n"
+                "\n"
+                "2. Copy the whole key link above (the long line starting\n"
+                "   with https://). Tap and hold it, then choose \"Copy\".\n"
+                "\n"
+                "3. Open Happ. Tap \"+\" and choose \"Add subscription\"\n"
+                "   (Добавить подписку), paste the link, then Save.\n"
+                "\n"
+                "4. A profile appears. Tap the big round Connect button.\n"
+                "   When it shows connected you are done.\n"
+                "\n"
+                "=== GOOD TO KNOW ===\n"
+                "- Don't change any settings - it's tuned already.\n"
+                "- The subscription refreshes itself every 6 hours, so\n"
+                "  server changes arrive automatically.\n"
+                "- Keep this letter. The link keeps working, so you can set\n"
+                "  up a new phone anytime, even if the Telegram bot is down.\n"
+                "- Not connecting? Try mobile data instead of Wi-Fi (a\n"
+                "  different network is often blocked differently).\n"
+            )
+        else:
+            subject = "Ваш ключ доступа NekoVPN + инструкция для iPhone"
+            body = (
+                "Привет! В этом письме — ваш личный ключ доступа к VPN и\n"
+                "пошаговая инструкция для iPhone. Займёт около 2 минут.\n"
+                "\n"
+                "=== ВАШ КЛЮЧ (ссылка-подписка) ===\n"
+                f"{happ_url}\n"
+                "\n"
+                "=== НАСТРОЙКА (по шагам) ===\n"
+                "1. Установите бесплатное приложение Happ из App Store:\n"
+                "   https://happ.su/ru/ (или поиск \"Happ\" в App Store)\n"
+                "   Hiddify и другие клиенты удалили из RU App Store —\n"
+                "   Happ остался и полностью работает.\n"
+                "\n"
+                "2. Скопируйте ссылку-ключ целиком (длинная строка выше,\n"
+                "   начинается с https://). Нажмите и удерживайте её,\n"
+                "   затем выберите \"Копировать\".\n"
+                "\n"
+                "3. Откройте Happ. Нажмите \"+\" и выберите\n"
+                "   \"Добавить подписку\", вставьте ссылку и сохраните.\n"
+                "\n"
+                "4. Появится профиль. Нажмите большую круглую кнопку\n"
+                "   подключения. Подключились — готово.\n"
+                "\n"
+                "=== ПОЛЕЗНО ЗНАТЬ ===\n"
+                "- Ничего в настройках менять не нужно, всё уже настроено.\n"
+                "- Подписка обновляется сама каждые 6 часов — изменения\n"
+                "  серверов приезжают автоматически.\n"
+                "- Сохраните это письмо. Ссылка остаётся рабочей: сможете\n"
+                "  настроить новый телефон когда угодно, даже если\n"
+                "  Telegram-бот будет недоступен.\n"
+                "- Не подключается? Попробуйте мобильный интернет вместо\n"
+                "  Wi-Fi (другая сеть часто блокируется иначе).\n"
+            )
+        return subject, body
+
     if lang == 'en':
         subject = "Your NekoVPN access key + setup guide"
         body = (
@@ -46,18 +123,21 @@ def _key_email(sub_url: str, lang: str) -> tuple[str, str]:
             "=== YOUR KEY (subscription link) ===\n"
             f"{sub_url}\n"
             "\n"
+            "On iPhone/iPad (Happ app) use this link instead:\n"
+            f"{happ_url}\n"
+            "\n"
             "=== SETUP (step by step) ===\n"
-            "1. Install the free Hiddify app:\n"
-            "   - iPhone/iPad: App Store, search \"Hiddify\"\n"
+            "1. Install the free app:\n"
+            "   - iPhone/iPad: Happ from the App Store (Hiddify was pulled\n"
+            "     from the RU App Store; Happ works): https://happ.su/ru/\n"
             "   - Android: Google Play, search \"Hiddify\"\n"
             "   - Windows/Mac: https://hiddify.com/\n"
             "\n"
-            "2. Copy the whole key link above (the long line starting\n"
-            "   with https://). Tap and hold it, then choose \"Copy\".\n"
+            "2. Copy your key link above (the long line starting with\n"
+            "   https://). Tap and hold it, then choose \"Copy\".\n"
             "\n"
-            "3. Open Hiddify. Tap the \"+\" in the top-right corner and\n"
-            "   choose \"Add from clipboard\" (or \"Add from link\" and\n"
-            "   paste the link). Tap Save.\n"
+            "3. Open the app. In Happ: \"+\" → \"Add subscription\".\n"
+            "   In Hiddify: \"+\" → \"Add from clipboard\". Paste and Save.\n"
             "\n"
             "4. A profile appears. Tap the big round Power/Connect button\n"
             "   in the center. When it turns green you are connected.\n"
@@ -66,7 +146,7 @@ def _key_email(sub_url: str, lang: str) -> tuple[str, str]:
             "- Don't change any settings - it's tuned already.\n"
             "- Keep this letter. The link keeps working, so you can set\n"
             "  up a new phone anytime, even if the Telegram bot is down.\n"
-            "- Not connecting? Close Hiddify fully and reopen it, or try\n"
+            "- Not connecting? Close the app fully and reopen it, or try\n"
             "  mobile data instead of Wi-Fi (a different network is often\n"
             "  blocked differently).\n"
         )
@@ -79,9 +159,13 @@ def _key_email(sub_url: str, lang: str) -> tuple[str, str]:
             "=== ВАШ КЛЮЧ (ссылка-подписка) ===\n"
             f"{sub_url}\n"
             "\n"
+            "На iPhone/iPad (приложение Happ) используйте эту ссылку:\n"
+            f"{happ_url}\n"
+            "\n"
             "=== НАСТРОЙКА (по шагам) ===\n"
-            "1. Установите бесплатное приложение Hiddify:\n"
-            "   - iPhone/iPad: App Store, поиск \"Hiddify\"\n"
+            "1. Установите бесплатное приложение:\n"
+            "   - iPhone/iPad: Happ из App Store (Hiddify и другие удалили\n"
+            "     из RU App Store; Happ работает): https://happ.su/ru/\n"
             "   - Android: Google Play, поиск \"Hiddify\"\n"
             "   - Windows/Mac: https://hiddify.com/\n"
             "\n"
@@ -89,9 +173,9 @@ def _key_email(sub_url: str, lang: str) -> tuple[str, str]:
             "   начинается с https://). Нажмите и удерживайте её,\n"
             "   затем выберите \"Копировать\".\n"
             "\n"
-            "3. Откройте Hiddify. Нажмите \"+\" в правом верхнем углу и\n"
-            "   выберите \"Добавить из буфера обмена\" (или \"Добавить\n"
-            "   из ссылки\" и вставьте её). Нажмите \"Сохранить\".\n"
+            "3. Откройте приложение. В Happ: \"+\" → \"Добавить подписку\".\n"
+            "   В Hiddify: \"+\" → \"Добавить из буфера обмена\".\n"
+            "   Вставьте ссылку и сохраните.\n"
             "\n"
             "4. Появится профиль. Нажмите большую круглую кнопку\n"
             "   включения в центре. Стала зелёной — вы подключены.\n"
@@ -101,7 +185,7 @@ def _key_email(sub_url: str, lang: str) -> tuple[str, str]:
             "- Сохраните это письмо. Ссылка остаётся рабочей: сможете\n"
             "  настроить новый телефон когда угодно, даже если\n"
             "  Telegram-бот будет недоступен.\n"
-            "- Не подключается? Полностью закройте Hiddify и откройте\n"
+            "- Не подключается? Полностью закройте приложение и откройте\n"
             "  заново, или попробуйте мобильный интернет вместо Wi-Fi\n"
             "  (другая сеть часто блокируется иначе).\n"
         )
@@ -125,9 +209,13 @@ class EmailService:
     def is_configured(self) -> bool:
         return bool(self.host and self.from_addr)
 
-    def send_key(self, to_addr: str, sub_url: str, lang: str = 'ru') -> bool:
-        """Send the backup-key letter. Returns True on relay acceptance."""
-        subject, body = _key_email(sub_url, lang)
+    def send_key(self, to_addr: str, sub_url: str, lang: str = 'ru',
+                 platform: str = None) -> bool:
+        """Send the backup-key letter. Returns True on relay acceptance.
+
+        ``platform`` selects the Happ-first iPhone variant when 'ios'.
+        """
+        subject, body = _key_email(sub_url, lang, platform)
         return self._send(to_addr, subject, body)
 
     def _send(self, to_addr: str, subject: str, body: str) -> bool:

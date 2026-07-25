@@ -194,6 +194,96 @@ class PlatformSelectHandler(BaseCallbackHandler):
             return Platform.OTHER
 
 
+def build_key_delivery_message(user, config) -> tuple:
+    """(text, keyboard) for the platform/lang-aware key delivery message.
+
+    Returns ``(None, None)`` when the subscription URL can't be built
+    (WEBAPP_URL unset) so the caller can degrade to a raw key. Shared by
+    GetKeyHandler (first-time issuance) and SetPlatformHandler
+    (re-selection from the /sub message — users switch devices). iOS gets
+    the Happ variant with ``?format=xray`` (sing-box clients were pulled
+    from the RU App Store and Happ can't read sing-box JSON); everyone
+    else gets the Hiddify sing-box flow.
+    """
+    from bot.services.subscription import SubscriptionService
+    sub = SubscriptionService(config)
+    url = sub.build_subscription_url(user)
+    if not url:
+        return None, None
+    lang = (getattr(user, 'lang', None) or 'ru')
+    is_ios = (getattr(user, 'platform', None) or '') == 'ios'
+    if is_ios:
+        url = url + '?format=xray'
+    if is_ios and lang != 'en':
+        text = (
+            "✅ <b>Твой VPN готов</b>\n\n"
+            "1. Установи Happ из App Store (Hiddify и другие "
+            "удалили из RU-маркета): https://happ.su/ru/\n"
+            "2. Добавь подписку — тапни по ссылке чтобы скопировать:\n\n"
+            f"<code>{url}</code>\n\n"
+            "3. В Happ: <b>+ → Добавить подписку → вставить → Сохранить</b>\n"
+            "4. Нажми «Подключить». Клиент сам выбирает рабочий "
+            "сервер и переключается если что-то падает.\n\n"
+            "💡 Подписка сама обновляется каждые 6 часов — если мы "
+            "меняем сервера, ничего переимпортировать не надо.\n\n"
+            "Нужен сырой ключ одного протокола? /raw"
+        )
+    elif is_ios:
+        text = (
+            "✅ <b>Your VPN is ready</b>\n\n"
+            "1. Install Happ from the App Store: https://happ.su/\n"
+            "2. Add this subscription URL — tap the link below to copy:\n\n"
+            f"<code>{url}</code>\n\n"
+            "3. In Happ: <b>+ → Add subscription → paste → Save</b>\n"
+            "4. Tap «Connect». The client picks the working outbound "
+            "automatically and switches if something dies.\n\n"
+            "💡 The subscription refreshes itself every 6 hours — "
+            "server changes arrive automatically.\n\n"
+            "Need a raw single-protocol key? Send /raw."
+        )
+    elif lang == 'en':
+        text = (
+            "✅ <b>Your VPN is ready</b>\n\n"
+            "1. Install Hiddify: https://hiddify.com/\n"
+            "2. Add this subscription URL — tap the link below to copy:\n\n"
+            f"<code>{url}</code>\n\n"
+            "3. In Hiddify: <b>+ → Add from URL → paste → Save</b>\n"
+            "4. Tap «Connect». The client picks the working outbound "
+            "automatically and switches if something dies.\n\n"
+            "💡 Don't change settings — ECH is already on, RU sites "
+            "bypass the VPN, foreign sites tunnel through us.\n\n"
+            "Need a raw single-protocol key (legacy client)? Send /raw."
+        )
+    else:
+        text = (
+            "✅ <b>Твой VPN готов</b>\n\n"
+            "1. Установи Hiddify: https://hiddify.com/\n"
+            "2. Добавь subscription URL — тапни по ссылке чтобы скопировать:\n\n"
+            f"<code>{url}</code>\n\n"
+            "3. В Hiddify: <b>+ → Добавить из ссылки → вставить → Сохранить</b>\n"
+            "4. Нажми «Подключить». Клиент сам выбирает рабочий "
+            "протокол и переключается если что-то падает.\n\n"
+            "💡 Ничего настраивать не надо — ECH уже включён, RU-сайты "
+            "идут напрямую, заграничные — через нас.\n\n"
+            "Нужен сырой ключ одного протокола для legacy-клиента? /raw"
+        )
+    btn_label = ("🆘 Не подключается? Сообщить" if lang == 'ru'
+                 else "🆘 Not connecting? Report it")
+    email_btn_label = ("📧 Указать email" if lang == 'ru'
+                       else "📧 Add email")
+    email_key_label = ("✉️ Ключ на почту" if lang == 'ru'
+                       else "✉️ Email me the key")
+    keyboard = {'inline_keyboard': [
+        [{'text': email_btn_label, 'callback_data': 'add_email_prompt'},
+         {'text': email_key_label, 'callback_data': 'email_key'}],
+        [{'text': '🍎 iOS (Happ)', 'callback_data': 'setplat:ios'},
+         {'text': '📱 Android', 'callback_data': 'setplat:android'},
+         {'text': '💻 ПК', 'callback_data': 'setplat:windows'}],
+        [{'text': btn_label, 'callback_data': 'report_failure'}]
+    ]}
+    return text, keyboard
+
+
 class GetKeyHandler(BaseCallbackHandler):
     """Handle get key callback."""
 
@@ -390,9 +480,9 @@ class GetKeyHandler(BaseCallbackHandler):
         """First-time delivery — hand the user their subscription URL.
 
         Post-round-robin onboarding: one URL, one paste, urltest does
-        the rest. No raw key in this message: Reality / Hy2 would leak
-        the entry IP if forwarded, and the CDN URLs are available via
-        /raw for the rare client that can't read sing-box subscriptions.
+        the rest. Message body/keyboard live in build_key_delivery_message
+        (shared with SetPlatformHandler so a platform switch re-renders
+        the exact same card).
         """
         if not user.uuid or not user.email:
             logger.error(
@@ -405,20 +495,18 @@ class GetKeyHandler(BaseCallbackHandler):
             self.bot.send_message(chat_id=chat_id, text=text)
             return
 
-        from bot.services.subscription import SubscriptionService
-        sub = SubscriptionService(self.config)
-        url = sub.build_subscription_url(user)
-        if not url:
+        text, keyboard = build_key_delivery_message(user, self.config)
+        if text is None:
             # WEBAPP_URL missing — degrade gracefully to a single CDN
             # raw key so onboarding doesn't completely fail.
             logger.error(f"WEBAPP_URL not configured, no sub URL for {chat_id}")
             vpn = VPNService(self.config)
             fallback = vpn.generate_vless_ws_link(user.uuid, user.email)
             if not fallback:
-                text = ("⚠️ Сервис не настроен — напишите в поддержку."
-                        if (user.lang or 'ru') == 'ru'
-                        else "⚠️ Service not configured — contact support.")
-                self.bot.send_message(chat_id=chat_id, text=text)
+                msg = ("⚠️ Сервис не настроен — напишите в поддержку."
+                       if (user.lang or 'ru') == 'ru'
+                       else "⚠️ Service not configured — contact support.")
+                self.bot.send_message(chat_id=chat_id, text=msg)
                 return
             self.bot.send_message(
                 chat_id=chat_id,
@@ -427,84 +515,62 @@ class GetKeyHandler(BaseCallbackHandler):
             )
             logger.info(f"Sent fallback raw key to {chat_id}")
             return
-
-        lang = (user.lang or 'ru')
-        # iOS in RU: Hiddify and the other sing-box clients were pulled
-        # from the RU App Store — Happ is the surviving xray client, and
-        # it can't read sing-box JSON. Give iOS users the same URL with
-        # ?format=xray (legacy Xray config, Happ passes it 1:1 to core).
-        is_ios = (getattr(user, 'platform', None) or '') == 'ios'
-        if is_ios:
-            url = url + '?format=xray'
-        if is_ios and lang != 'en':
-            text = (
-                "✅ <b>Твой VPN готов</b>\n\n"
-                "1. Установи Happ из App Store (Hiddify и другие "
-                "удалили из RU-маркета): https://happ.su/ru/\n"
-                "2. Добавь подписку — тапни по ссылке чтобы скопировать:\n\n"
-                f"<code>{url}</code>\n\n"
-                "3. В Happ: <b>+ → Добавить подписку → вставить → Сохранить</b>\n"
-                "4. Нажми «Подключить». Клиент сам выбирает рабочий "
-                "сервер и переключается если что-то падает.\n\n"
-                "💡 Подписка сама обновляется каждые 6 часов — если мы "
-                "меняем сервера, ничего переимпортировать не надо.\n\n"
-                "Нужен сырой ключ одного протокола? /raw"
-            )
-        elif is_ios:
-            text = (
-                "✅ <b>Your VPN is ready</b>\n\n"
-                "1. Install Happ from the App Store: https://happ.su/\n"
-                "2. Add this subscription URL — tap the link below to copy:\n\n"
-                f"<code>{url}</code>\n\n"
-                "3. In Happ: <b>+ → Add subscription → paste → Save</b>\n"
-                "4. Tap «Connect». The client picks the working outbound "
-                "automatically and switches if something dies.\n\n"
-                "💡 The subscription refreshes itself every 6 hours — "
-                "server changes arrive automatically.\n\n"
-                "Need a raw single-protocol key? Send /raw."
-            )
-        elif lang == 'en':
-            text = (
-                "✅ <b>Your VPN is ready</b>\n\n"
-                "1. Install Hiddify: https://hiddify.com/\n"
-                "2. Add this subscription URL — tap the link below to copy:\n\n"
-                f"<code>{url}</code>\n\n"
-                "3. In Hiddify: <b>+ → Add from URL → paste → Save</b>\n"
-                "4. Tap «Connect». The client picks the working outbound "
-                "automatically and switches if something dies.\n\n"
-                "💡 Don't change settings — ECH is already on, RU sites "
-                "bypass the VPN, foreign sites tunnel through us.\n\n"
-                "Need a raw single-protocol key (legacy client)? Send /raw."
-            )
-        else:
-            text = (
-                "✅ <b>Твой VPN готов</b>\n\n"
-                "1. Установи Hiddify: https://hiddify.com/\n"
-                "2. Добавь subscription URL — тапни по ссылке чтобы скопировать:\n\n"
-                f"<code>{url}</code>\n\n"
-                "3. В Hiddify: <b>+ → Добавить из ссылки → вставить → Сохранить</b>\n"
-                "4. Нажми «Подключить». Клиент сам выбирает рабочий "
-                "протокол и переключается если что-то падает.\n\n"
-                "💡 Ничего настраивать не надо — ECH уже включён, RU-сайты "
-                "идут напрямую, заграничные — через нас.\n\n"
-                "Нужен сырой ключ одного протокола для legacy-клиента? /raw"
-            )
-        btn_label = ("🆘 Не подключается? Сообщить" if lang == 'ru'
-                     else "🆘 Not connecting? Report it")
-        email_btn_label = ("📧 Указать email" if lang == 'ru'
-                          else "📧 Add email")
-        email_key_label = ("✉️ Ключ на почту" if lang == 'ru'
-                           else "✉️ Email me the key")
-        keyboard = {'inline_keyboard': [
-            [{'text': email_btn_label, 'callback_data': 'add_email_prompt'},
-             {'text': email_key_label, 'callback_data': 'email_key'}],
-            [{'text': btn_label, 'callback_data': 'report_failure'}]
-        ]}
         self.bot.send_message(
             chat_id=chat_id, text=text, parse_mode='HTML',
             reply_markup=keyboard, disable_web_page_preview=True,
         )
         logger.info(f"Sent first-time sub URL to {chat_id}")
+
+
+class SetPlatformHandler(BaseCallbackHandler):
+    """Re-select platform from the key card (user switched devices).
+
+    Callback data: ``setplat:<platform>``. Unlike the onboarding
+    PlatformSelectHandler this must NOT touch the state machine — a paid
+    user re-picking a platform is not a demo transition. It just stores
+    the new platform and re-renders the key card in the right format
+    (iOS → Happ + ?format=xray, everything else → Hiddify sing-box).
+    """
+
+    CALLBACK_PATTERN = 'setplat:'
+    ALLOWED = ('android', 'ios', 'windows', 'macos', 'linux', 'other')
+    KEY_STATUSES = ('demo', 'paid', 'support_topic')
+
+    def can_handle(self, callback_data: str) -> bool:
+        return callback_data.startswith(self.CALLBACK_PATTERN)
+
+    def handle(self, update: dict, chat_id: str, user_id: str, **kwargs) -> None:
+        data = kwargs.get('data', '')
+        try:
+            platform = data.split(':', 1)[1]
+        except IndexError:
+            return
+        if platform not in self.ALLOWED:
+            logger.warning(f'setplat: unknown platform {platform!r}')
+            return
+
+        user = self.db.get_user(chat_id)
+        lang = (getattr(user, 'lang', None) or 'ru') if user else 'ru'
+        if (
+            not user or user.status not in self.KEY_STATUSES
+            or not user.uuid or not user.email
+        ):
+            self.bot.send_message(
+                chat_id=chat_id,
+                text="⚠️ Сначала получите ключ — /start" if lang == 'ru'
+                     else "⚠️ Get a key first — /start",
+            )
+            return
+
+        user.platform = platform
+        self.db.save_user(user)
+        logger.info(f'User {chat_id} re-selected platform → {platform}')
+
+        text, keyboard = build_key_delivery_message(user, self.config)
+        self.bot.send_message(
+            chat_id=chat_id, text=text, parse_mode='HTML',
+            reply_markup=keyboard, disable_web_page_preview=True,
+        )
 
 
 class MyKeyAnswerHandler(BaseCallbackHandler):
@@ -1177,7 +1243,8 @@ class EmailKeyHandler(BaseCallbackHandler):
             return
 
         def _worker() -> None:
-            ok = mailer.send_key(to_addr, sub_url, lang)
+            ok = mailer.send_key(to_addr, sub_url, lang,
+                                 platform=getattr(user, 'platform', None))
             if ok:
                 say(f"✉️ Ключ отправлен на <code>{html.escape(to_addr)}</code>. "
                     "Если письма нет — загляни в «Спам»."

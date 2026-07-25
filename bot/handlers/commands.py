@@ -356,6 +356,14 @@ class CommandHandler(BaseHandler):
         if is_ios:
             url = url + '?format=xray'
 
+        # Platform quick-switch: user may have changed devices since
+        # onboarding. One tap re-renders the key in the right format.
+        plat_keyboard = {'inline_keyboard': [[
+            {'text': '🍎 iOS (Happ)', 'callback_data': 'setplat:ios'},
+            {'text': '📱 Android', 'callback_data': 'setplat:android'},
+            {'text': '💻 ПК', 'callback_data': 'setplat:windows'},
+        ]]}
+
         if is_ios and user.lang != 'en':
             text = (
                 "🔗 <b>Subscription URL для Happ</b>\n\n"
@@ -392,7 +400,10 @@ class CommandHandler(BaseHandler):
                 "💡 ECH is already on per-outbound — no need to flip the "
                 "global toggle in Hiddify settings."
             )
-        self.bot.send_message(chat_id=chat_id, text=text, parse_mode='HTML')
+        self.bot.send_message(
+            chat_id=chat_id, text=text, parse_mode='HTML',
+            reply_markup=plat_keyboard,
+        )
         logger.info(f"Sent /sub URL to {chat_id}")
 
     # CDN/stealth-only protocols safe to expose as raw URLs. Reality

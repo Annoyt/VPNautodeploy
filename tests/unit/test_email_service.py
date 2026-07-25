@@ -135,7 +135,8 @@ class TestEmailKeyCallback:
             for t in threading.enumerate():
                 if t.name.startswith("email-key-"):
                     t.join(timeout=5)
-            send.assert_called_once_with("u@x.com", "https://sub.url/abc", "ru")
+            send.assert_called_once_with("u@x.com", "https://sub.url/abc", "ru",
+                                         platform=user.platform)
         text = h.bot.send_message.call_args.kwargs["text"]
         assert "отправлен" in text.lower()
 

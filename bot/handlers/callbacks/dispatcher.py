@@ -13,6 +13,7 @@ from bot.handlers.callbacks.base import BaseCallbackHandler
 from bot.handlers.callbacks.user import (
     DemoRequestHandler,
     PlatformSelectHandler,
+    SetPlatformHandler,
     GetKeyHandler,
     MyKeyAnswerHandler,
     TryAltProtocolHandler,
@@ -70,6 +71,9 @@ class CallbackDispatcher:
         self.handlers.append(DemoRequestHandler(self.bot, self.db, self.config))
         self.handlers.append(GetKeyHandler(self.bot, self.db, self.config))
         self.handlers.append(PlatformSelectHandler(self.bot, self.db, self.config))
+        # Platform re-selection from the key card (device switch) — must
+        # precede SupportRequestHandler so 'setplat:' isn't swallowed.
+        self.handlers.append(SetPlatformHandler(self.bot, self.db, self.config))
         # /mykey Y/N answer (current UX).  The old cascading-fallback
         # button (TryAltProtocolHandler) stays registered for backward
         # compatibility with key messages already sitting in users'
