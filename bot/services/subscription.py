@@ -85,6 +85,80 @@ class SubscriptionService:
             return None
         return f"{base}/sub/{self.derive_token(user.uuid)}"
 
+    # ---------- Share-links subscription (Happ / v2rayNG / Streisand) ----------
+
+    def build_links(
+        self,
+        user,
+        enabled_protocols: Tuple[str, ...],
+    ) -> str:
+        """v2ray-style share-links subscription: newline-joined share URLs
+        (vless://, hysteria2://, vmess://, ss://) as PLAIN TEXT.
+
+        Plain text, not the traditional base64 blob: Happ's docs define a
+        plain subscription as "конфигурации серверов в открытом виде" and
+        its iOS build (4.11.0) silently imports nothing from a base64
+        response (ziriki, 2026-07-25). v2rayNG / Streisand / Karing all
+        accept plain per-line links too, so plain text is the universal
+        choice.
+
+        This is THE format for client apps that show a per-server list.
+        A full xray JSON config (``?format=xray``) imports into Happ as a
+        SINGLE profile because the app passes it 1:1 to the core; only
+        the links list renders as separate switchable servers.
+
+        Reuses VPNService's own generators so the links are identical to
+        what /raw and try_alt emit. The DE fallback link for paid users
+        is built here (no generator exists for it in VPNService).
+        """
+        from bot.services.vpn import VPNService
+        vpn = VPNService(self.config)
+        generators = {
+            'reality': vpn.generate_vless_link,
+            'hy2': vpn.generate_hy2_link,
+            'ws': vpn.generate_vless_ws_link,
+            'xhttp': vpn.generate_vmess_xhttp_link,
+            'stls': vpn.generate_stls_link,
+        }
+        links: List[str] = []
+        for proto in enabled_protocols:
+            gen = generators.get(proto)
+            if gen is None:
+                continue
+            try:
+                link = gen(user.uuid, user.email)
+            except Exception as e:
+                logger.error(f'links: {proto} generation failed: {e}')
+                continue
+            if link:
+                links.append(link)
+
+        if user and getattr(user, 'status', None) in FALLBACK_ALLOWED_STATUSES:
+            fb_link = self._fallback_share_link(user)
+            if fb_link:
+                links.append(fb_link)
+
+        return '\n'.join(links)
+
+    def _fallback_share_link(self, user) -> Optional[str]:
+        """vless:// share link for the reserve DE node (paid tier)."""
+        fb = FallbackNodeService(self.config)
+        if not fb.enabled or not getattr(user, 'uuid', None):
+            return None
+        from urllib.parse import quote
+        email = getattr(user, 'email', '') or 'user'
+        name = quote(f"{email.split('@')[0]}-de")
+        host = fb._cfg('FALLBACK_NODE_HOST')
+        port = fb._cfg('FALLBACK_NODE_PORT', '443') or '443'
+        sni = fb._cfg('FALLBACK_NODE_SNI', 'www.google.com')
+        pbk = fb._cfg('FALLBACK_NODE_PBK')
+        sid = fb._cfg('FALLBACK_NODE_SID')
+        params = (
+            'encryption=none&security=reality&type=tcp&fp=chrome'
+            f'&sni={sni}&pbk={pbk}&sid={sid}'
+        )
+        return f'vless://{user.uuid}@{host}:{port}?{params}#{name}'
+
     # ---------- Xray JSON (Happ / v2rayNG legacy clients) ----------
 
     def build_xray_config(

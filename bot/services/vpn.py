@@ -304,6 +304,19 @@ class VPNService:
         sni = getattr(self.config, 'HY2_SNI', host) or host
         connection_name = quote(f"{email.split('@')[0]}-hy2")
         params = [f"sni={sni}", "insecure=0"]
+        # Salamander obfs + port hopping — must mirror the hysteria
+        # server config or the daemon silently drops every packet
+        # (this is exactly what killed raw hy2 links for users whose
+        # subscription was fresh but who used try_alt:hy2).
+        obfs = getattr(self.config, 'HY2_OBFS_PASSWORD', '') or ''
+        if obfs:
+            params.append('obfs=salamander')
+            params.append(f'obfs-password={obfs}')
+        hop = (getattr(self.config, 'HY2_HOP_PORTS', '') or '').strip()
+        if hop:
+            # "20000:40000" → hy2 URL multi-port form "20000-40000"
+            params.append(f'mport={hop.replace(":", "-")}')
+            params.append('mportHopInt=30')
         return (
             f"hysteria2://{client_uuid}@{host}:{port}"
             f"?{'&'.join(params)}#{connection_name}"

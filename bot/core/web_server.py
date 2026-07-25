@@ -699,12 +699,17 @@ class WebAppServer:
                 logger.warning(f'sub: fallback provisioning failed for {user.chat_id}: {e}')
 
         # Format selection: default is the sing-box config (Hiddify).
-        # ``?format=xray`` or a Happ User-Agent gets the Xray-core JSON
-        # instead — Happ passes imported JSON 1:1 to its xray core and
-        # can't parse sing-box configs at all.
+        # ``?format=xray`` gets the Xray-core JSON (imports into Happ as
+        # ONE profile — the app passes it 1:1 to the core).
+        # ``?format=links`` (or a Happ User-Agent) gets the v2ray-style
+        # share-links list — the format that renders as separate servers
+        # in Happ / v2rayNG / Streisand.
         fmt = (request.rel_url.query.get('format') or '').lower()
         ua = (request.headers.get('User-Agent', '') or '').lower()
-        if fmt == 'xray' or (not fmt and 'happ' in ua):
+        links_body = None
+        if fmt == 'links' or (not fmt and 'happ' in ua):
+            links_body = self.subscription.build_links(user, cascade)
+        elif fmt == 'xray':
             config_obj = self.subscription.build_xray_config(user, cascade)
         else:
             config_obj = self.subscription.build_singbox_config(user, cascade)
@@ -736,6 +741,10 @@ class WebAppServer:
         except Exception as e:
             logger.warning(f"subscription: userinfo header skipped: {e}")
 
+        if links_body is not None:
+            return web.Response(
+                text=links_body, content_type='text/plain', headers=headers,
+            )
         return web.json_response(config_obj, headers=headers)
 
     # ==================== Admin — Read ====================

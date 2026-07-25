@@ -195,15 +195,15 @@ class PlatformSelectHandler(BaseCallbackHandler):
 
 
 def build_key_delivery_message(user, config) -> tuple:
-    """(text, keyboard) for the platform/lang-aware key delivery message.
+    """    (text, keyboard) for the platform/lang-aware key delivery message.
 
     Returns ``(None, None)`` when the subscription URL can't be built
     (WEBAPP_URL unset) so the caller can degrade to a raw key. Shared by
     GetKeyHandler (first-time issuance) and SetPlatformHandler
     (re-selection from the /sub message — users switch devices). iOS gets
-    the Happ variant with ``?format=xray`` (sing-box clients were pulled
-    from the RU App Store and Happ can't read sing-box JSON); everyone
-    else gets the Hiddify sing-box flow.
+    Karing instructions (sing-box client — the RU App Store pulled both
+    Hiddify and Happ); the URL itself is the plain sing-box subscription
+    for every platform.
     """
     from bot.services.subscription import SubscriptionService
     sub = SubscriptionService(config)
@@ -212,16 +212,14 @@ def build_key_delivery_message(user, config) -> tuple:
         return None, None
     lang = (getattr(user, 'lang', None) or 'ru')
     is_ios = (getattr(user, 'platform', None) or '') == 'ios'
-    if is_ios:
-        url = url + '?format=xray'
     if is_ios and lang != 'en':
         text = (
             "✅ <b>Твой VPN готов</b>\n\n"
-            "1. Установи Happ из App Store (Hiddify и другие "
-            "удалили из RU-маркета): https://happ.su/ru/\n"
+            "1. Установи Karing из App Store (Hiddify и Happ удалили "
+            "из RU-маркета): https://karing.app/\n"
             "2. Добавь подписку — тапни по ссылке чтобы скопировать:\n\n"
             f"<code>{url}</code>\n\n"
-            "3. В Happ: <b>+ → Добавить подписку → вставить → Сохранить</b>\n"
+            "3. В Karing: <b>+ → Добавить из ссылки → вставить → Сохранить</b>\n"
             "4. Нажми «Подключить». Клиент сам выбирает рабочий "
             "сервер и переключается если что-то падает.\n\n"
             "💡 Подписка сама обновляется каждые 6 часов — если мы "
@@ -231,10 +229,10 @@ def build_key_delivery_message(user, config) -> tuple:
     elif is_ios:
         text = (
             "✅ <b>Your VPN is ready</b>\n\n"
-            "1. Install Happ from the App Store: https://happ.su/\n"
+            "1. Install Karing from the App Store: https://karing.app/\n"
             "2. Add this subscription URL — tap the link below to copy:\n\n"
             f"<code>{url}</code>\n\n"
-            "3. In Happ: <b>+ → Add subscription → paste → Save</b>\n"
+            "3. In Karing: <b>+ → Add from URL → paste → Save</b>\n"
             "4. Tap «Connect». The client picks the working outbound "
             "automatically and switches if something dies.\n\n"
             "💡 The subscription refreshes itself every 6 hours — "
@@ -276,7 +274,7 @@ def build_key_delivery_message(user, config) -> tuple:
     keyboard = {'inline_keyboard': [
         [{'text': email_btn_label, 'callback_data': 'add_email_prompt'},
          {'text': email_key_label, 'callback_data': 'email_key'}],
-        [{'text': '🍎 iOS (Happ)', 'callback_data': 'setplat:ios'},
+        [{'text': '🍎 iOS (Karing)', 'callback_data': 'setplat:ios'},
          {'text': '📱 Android', 'callback_data': 'setplat:android'},
          {'text': '💻 ПК', 'callback_data': 'setplat:windows'}],
         [{'text': btn_label, 'callback_data': 'report_failure'}]
@@ -529,7 +527,8 @@ class SetPlatformHandler(BaseCallbackHandler):
     PlatformSelectHandler this must NOT touch the state machine — a paid
     user re-picking a platform is not a demo transition. It just stores
     the new platform and re-renders the key card in the right format
-    (iOS → Happ + ?format=xray, everything else → Hiddify sing-box).
+    (iOS → Karing instructions, everything else → Hiddify).
+    The subscription URL itself is the plain sing-box one for all.
     """
 
     CALLBACK_PATTERN = 'setplat:'

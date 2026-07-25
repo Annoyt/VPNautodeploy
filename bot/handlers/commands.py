@@ -350,33 +350,31 @@ class CommandHandler(BaseHandler):
             logger.warning(f"/sub: WEBAPP_URL not set, cannot build URL for {chat_id}")
             return
 
-        # iOS RU App Store lost every sing-box client; Happ (xray core)
-        # survived and needs the ?format=xray variant of the same URL.
+        # iOS RU App Store lost Hiddify AND Happ; Karing (sing-box)
+        # survives and reads the plain sing-box subscription.
         is_ios = (getattr(user, 'platform', None) or '') == 'ios'
-        if is_ios:
-            url = url + '?format=xray'
 
         # Platform quick-switch: user may have changed devices since
         # onboarding. One tap re-renders the key in the right format.
         plat_keyboard = {'inline_keyboard': [[
-            {'text': '🍎 iOS (Happ)', 'callback_data': 'setplat:ios'},
+            {'text': '🍎 iOS (Karing)', 'callback_data': 'setplat:ios'},
             {'text': '📱 Android', 'callback_data': 'setplat:android'},
             {'text': '💻 ПК', 'callback_data': 'setplat:windows'},
         ]]}
 
         if is_ios and user.lang != 'en':
             text = (
-                "🔗 <b>Subscription URL для Happ</b>\n\n"
+                "🔗 <b>Subscription URL для Karing</b>\n\n"
                 f"<code>{url}</code>\n\n"
-                "В Happ: «+» → «Добавить подписку» → вставь URL.\n"
+                "В Karing: «+» → «Добавить из ссылки» → вставь URL.\n"
                 "Один URL = весь каскад протоколов. Когда мы меняем "
                 "сервера, клиент сам подтягивает свежее каждые 6 часов."
             )
         elif is_ios:
             text = (
-                "🔗 <b>Subscription URL for Happ</b>\n\n"
+                "🔗 <b>Subscription URL for Karing</b>\n\n"
                 f"<code>{url}</code>\n\n"
-                "In Happ: «+» → «Add subscription» → paste it.\n"
+                "In Karing: «+» → «Add from URL» → paste it.\n"
                 "One URL = the whole cascade. When we rotate servers the "
                 "client picks it up automatically every 6 hours."
             )
@@ -475,22 +473,20 @@ class CommandHandler(BaseHandler):
         text = header + "\n\n" + "\n\n".join(lines)
 
         # Happ / xray-core clients: the same subscription URL with
-        # ?format=xray returns a legacy Xray JSON config (Reality inside,
-        # no Hysteria2/ShadowTLS — xray core can't do those).
+        # ?format=links returns a share-links list that renders as
+        # separate servers in Happ / v2rayNG / Streisand.
         from bot.services.subscription import SubscriptionService
         sub_url = SubscriptionService(self.config).build_subscription_url(user)
         if sub_url:
             happ_ru = (
-                "📱 <b>Для Happ:</b> добавь как подписку эту ссылку "
-                "(отдаст Xray JSON — Reality внутри, Hysteria2 и ShadowTLS "
-                "ядро xray не умеет, они выше отдельными ключами):\n"
-                f"<code>{sub_url}?format=xray</code>"
+                "📱 <b>Для v2rayNG / Streisand:</b> добавь как подписку эту "
+                "ссылку (каждый протокол появится отдельным сервером):\n"
+                f"<code>{sub_url}?format=links</code>"
             )
             happ_en = (
-                "📱 <b>For Happ:</b> add this as a subscription "
-                "(serves Xray JSON — Reality included; Hysteria2/ShadowTLS "
-                "aren't supported by the xray core, use the raw keys above):\n"
-                f"<code>{sub_url}?format=xray</code>"
+                "📱 <b>For v2rayNG / Streisand:</b> add this as a subscription "
+                "(each protocol shows up as a separate server):\n"
+                f"<code>{sub_url}?format=links</code>"
             )
             text += "\n\n" + (happ_ru if user.lang == 'ru' else happ_en)
         # Same failure-report button so legacy users have the same

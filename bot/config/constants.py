@@ -206,15 +206,14 @@ PLATFORM_INSTRUCTIONS = {
             "❓ Если что-то не удалось — напиши /support"
         ),
         Platform.IOS: (
-            "1. Установите Happ из App Store\n"
-            "   📱 https://happ.su/ru/\n\n"
-            "   Hiddify и другие sing-box клиенты удалили из RU App Store —\n"
-            "   Happ остался и полностью работает.\n\n"
+            "1. Установите Karing из App Store\n"
+            "   📱 https://karing.app/\n\n"
+            "   Hiddify и Happ удалили из RU App Store —\n"
+            "   Karing остался и полностью работает.\n\n"
             "2. Откройте приложение\n"
-            "3. Нажмите «+» → «Добавить подписку» и вставьте ссылку из\n"
-            "   сообщения с ключом (она придёт следующим сообщением в\n"
-            "   формате специально для Happ)\n"
-            "4. Нажмите большую кнопку подключения\n\n"
+            "3. Нажмите «+» → «Добавить из ссылки» и вставьте ссылку из\n"
+            "   сообщения с ключом (придёт следующим сообщением)\n"
+            "4. Нажмите кнопку подключения\n\n"
             "❓ Если что-то не удалось — напишите /support"
         ),
         Platform.WINDOWS: (
@@ -257,14 +256,14 @@ PLATFORM_INSTRUCTIONS = {
             "❓ If something doesn't work — write /support"
         ),
         Platform.IOS: (
-            "1. Install Happ from the App Store\n"
-            "   📱 https://happ.su/\n\n"
-            "   (Hiddify and other sing-box clients were pulled from the\n"
-            "   RU App Store — Happ remains and works fine.)\n\n"
+            "1. Install Karing from the App Store\n"
+            "   📱 https://karing.app/\n\n"
+            "   (Hiddify and Happ were pulled from the RU App Store —\n"
+            "   Karing remains and works fine.)\n\n"
             "2. Open the app\n"
-            "3. Tap «+» → «Add subscription» and paste the link from the\n"
-            "   key message (arrives next, in the Happ-specific format)\n"
-            "4. Tap the big connect button\n\n"
+            "3. Tap «+» → «Add from URL» and paste the link from the key\n"
+            "   message (arrives next)\n"
+            "4. Tap the connect button\n\n"
             "❓ If something doesn't work — write /support"
         ),
         Platform.WINDOWS: (

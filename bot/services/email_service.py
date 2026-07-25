@@ -37,14 +37,10 @@ def _key_email(sub_url: str, lang: str, platform: str = None) -> tuple[str, str]
     who has never seen a VPN client — every step names the exact
     button to tap.
 
-    iOS gets a dedicated Happ-first variant: Hiddify and the other
-    sing-box clients were pulled from the RU App Store, and Happ (xray
-    core) can't read the sing-box subscription — it needs the same URL
-    with ``?format=xray`` (legacy Xray JSON). The generic letter keeps
-    both links so a multi-device user can pick the right one.
+    iOS gets a dedicated Karing-first variant: both Hiddify and Happ were
+    pulled from the RU App Store. Karing is sing-box based and reads the
+    plain subscription URL — no special format needed.
     """
-    happ_url = sub_url + '?format=xray'
-
     if platform == 'ios':
         if lang == 'en':
             subject = "Your NekoVPN access key + iPhone setup guide"
@@ -53,17 +49,17 @@ def _key_email(sub_url: str, lang: str, platform: str = None) -> tuple[str, str]
                 "step-by-step iPhone setup guide. It takes about 2 minutes.\n"
                 "\n"
                 "=== YOUR KEY (subscription link) ===\n"
-                f"{happ_url}\n"
+                f"{sub_url}\n"
                 "\n"
                 "=== SETUP (step by step) ===\n"
-                "1. Install the free Happ app from the App Store:\n"
-                "   https://happ.su/ru/ (or search \"Happ\" in the App Store)\n"
+                "1. Install the free Karing app from the App Store:\n"
+                "   https://karing.app/ (or search \"Karing\" in the App Store)\n"
                 "\n"
                 "2. Copy the whole key link above (the long line starting\n"
                 "   with https://). Tap and hold it, then choose \"Copy\".\n"
                 "\n"
-                "3. Open Happ. Tap \"+\" and choose \"Add subscription\"\n"
-                "   (Добавить подписку), paste the link, then Save.\n"
+                "3. Open Karing. Tap \"+\" → \"Add from URL\" and paste\n"
+                "   the link. Tap Save.\n"
                 "\n"
                 "4. A profile appears. Tap the big round Connect button.\n"
                 "   When it shows connected you are done.\n"
@@ -84,20 +80,20 @@ def _key_email(sub_url: str, lang: str, platform: str = None) -> tuple[str, str]
                 "пошаговая инструкция для iPhone. Займёт около 2 минут.\n"
                 "\n"
                 "=== ВАШ КЛЮЧ (ссылка-подписка) ===\n"
-                f"{happ_url}\n"
+                f"{sub_url}\n"
                 "\n"
                 "=== НАСТРОЙКА (по шагам) ===\n"
-                "1. Установите бесплатное приложение Happ из App Store:\n"
-                "   https://happ.su/ru/ (или поиск \"Happ\" в App Store)\n"
-                "   Hiddify и другие клиенты удалили из RU App Store —\n"
-                "   Happ остался и полностью работает.\n"
+                "1. Установите бесплатное приложение Karing из App Store:\n"
+                "   https://karing.app/ (или поиск \"Karing\" в App Store)\n"
+                "   Hiddify и Happ удалили из RU App Store — Karing\n"
+                "   остался и полностью работает.\n"
                 "\n"
                 "2. Скопируйте ссылку-ключ целиком (длинная строка выше,\n"
                 "   начинается с https://). Нажмите и удерживайте её,\n"
                 "   затем выберите \"Копировать\".\n"
                 "\n"
-                "3. Откройте Happ. Нажмите \"+\" и выберите\n"
-                "   \"Добавить подписку\", вставьте ссылку и сохраните.\n"
+                "3. Откройте Karing. Нажмите \"+\" → \"Добавить из ссылки\",\n"
+                "   вставьте ссылку и сохраните.\n"
                 "\n"
                 "4. Появится профиль. Нажмите большую круглую кнопку\n"
                 "   подключения. Подключились — готово.\n"
@@ -123,20 +119,17 @@ def _key_email(sub_url: str, lang: str, platform: str = None) -> tuple[str, str]
             "=== YOUR KEY (subscription link) ===\n"
             f"{sub_url}\n"
             "\n"
-            "On iPhone/iPad (Happ app) use this link instead:\n"
-            f"{happ_url}\n"
-            "\n"
             "=== SETUP (step by step) ===\n"
             "1. Install the free app:\n"
-            "   - iPhone/iPad: Happ from the App Store (Hiddify was pulled\n"
-            "     from the RU App Store; Happ works): https://happ.su/ru/\n"
+            "   - iPhone/iPad: Karing from the App Store (Hiddify was\n"
+            "     pulled from the RU App Store): https://karing.app/\n"
             "   - Android: Google Play, search \"Hiddify\"\n"
             "   - Windows/Mac: https://hiddify.com/\n"
             "\n"
             "2. Copy your key link above (the long line starting with\n"
             "   https://). Tap and hold it, then choose \"Copy\".\n"
             "\n"
-            "3. Open the app. In Happ: \"+\" → \"Add subscription\".\n"
+            "3. Open the app. In Karing: \"+\" → \"Add from URL\".\n"
             "   In Hiddify: \"+\" → \"Add from clipboard\". Paste and Save.\n"
             "\n"
             "4. A profile appears. Tap the big round Power/Connect button\n"
@@ -159,13 +152,10 @@ def _key_email(sub_url: str, lang: str, platform: str = None) -> tuple[str, str]
             "=== ВАШ КЛЮЧ (ссылка-подписка) ===\n"
             f"{sub_url}\n"
             "\n"
-            "На iPhone/iPad (приложение Happ) используйте эту ссылку:\n"
-            f"{happ_url}\n"
-            "\n"
             "=== НАСТРОЙКА (по шагам) ===\n"
             "1. Установите бесплатное приложение:\n"
-            "   - iPhone/iPad: Happ из App Store (Hiddify и другие удалили\n"
-            "     из RU App Store; Happ работает): https://happ.su/ru/\n"
+            "   - iPhone/iPad: Karing из App Store (Hiddify и Happ удалили\n"
+            "     из RU App Store): https://karing.app/\n"
             "   - Android: Google Play, поиск \"Hiddify\"\n"
             "   - Windows/Mac: https://hiddify.com/\n"
             "\n"
@@ -173,7 +163,7 @@ def _key_email(sub_url: str, lang: str, platform: str = None) -> tuple[str, str]
             "   начинается с https://). Нажмите и удерживайте её,\n"
             "   затем выберите \"Копировать\".\n"
             "\n"
-            "3. Откройте приложение. В Happ: \"+\" → \"Добавить подписку\".\n"
+            "3. Откройте приложение. В Karing: \"+\" → \"Добавить из ссылки\".\n"
             "   В Hiddify: \"+\" → \"Добавить из буфера обмена\".\n"
             "   Вставьте ссылку и сохраните.\n"
             "\n"
@@ -213,7 +203,7 @@ class EmailService:
                  platform: str = None) -> bool:
         """Send the backup-key letter. Returns True on relay acceptance.
 
-        ``platform`` selects the Happ-first iPhone variant when 'ios'.
+        ``platform`` selects the Karing-first iPhone variant when 'ios'..
         """
         subject, body = _key_email(sub_url, lang, platform)
         return self._send(to_addr, subject, body)
