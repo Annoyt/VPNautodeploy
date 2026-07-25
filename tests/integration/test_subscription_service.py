@@ -367,8 +367,8 @@ class TestSubscriptionService:
         assert selector['type'] == 'selector'
         assert selector['default'] == 'auto'
 
-        # Should include auto + all protocol outbounds + direct
-        expected_outbound_count = 1 + len(protocols) + 1  # auto + protocols + direct
+        # Should include auto + all protocol outbounds
+        expected_outbound_count = 1 + len(protocols)  # auto + protocols
         assert len(selector['outbounds']) == expected_outbound_count
         assert 'auto' in selector['outbounds']
 
@@ -469,6 +469,123 @@ class TestSubscriptionService:
 
         assert direct_rule is not None
         assert 'geosite-category-ru' in direct_rule['rule_set']
+
+    # ===== Sing-box Config: Telegram Call Routing Tests =====
+
+    def _rules(self, service, user, protocols=('reality', 'hy2')):
+        return service.build_singbox_config(user, protocols)['route']['rules']
+
+    def test_telegram_ip_cidr_rules_present(self, mock_config_full, sample_user_ru):
+        """Telegram is routed by literal IP CIDR (reflector media has no SNI)."""
+        service = SubscriptionService(mock_config_full)
+        rules = self._rules(service, sample_user_ru)
+
+        cidr_rules = [r for r in rules if 'ip_cidr' in r]
+        # A well-known Telegram range must be present (signaling → proxy).
+        assert cidr_rules, "expected a Telegram ip_cidr rule"
+        assert any('149.154.160.0/20' in r['ip_cidr'] for r in cidr_rules)
+        # None of the Telegram rules leak to a direct route.
+        assert all(r['outbound'] != 'direct' for r in cidr_rules)
+        # Telegram UDP call media is covered by the blanket UDP rule (below),
+        # not a dedicated cidr+udp rule.
+
+    def test_telegram_cidr_above_ru_direct(self, mock_config_full, sample_user_ru):
+        """Telegram-by-IP must be evaluated before the RU-direct bypass."""
+        service = SubscriptionService(mock_config_full)
+        rules = self._rules(service, sample_user_ru)
+
+        tg_idx = min(i for i, r in enumerate(rules) if 'ip_cidr' in r)
+        ru_direct_idx = min(
+            i for i, r in enumerate(rules)
+            if r.get('outbound') == 'direct' and 'rule_set' in r
+        )
+        assert tg_idx < ru_direct_idx
+
+    def test_ru_direct_is_tcp_only(self, mock_config_full, sample_user_ru):
+        """RU-domestic direct bypass must be TCP-only so UDP calls tunnel."""
+        service = SubscriptionService(mock_config_full)
+        rules = self._rules(service, sample_user_ru)
+
+        ru_direct = [
+            r for r in rules
+            if r.get('outbound') == 'direct' and 'rule_set' in r
+            and 'geoip-ru' in r['rule_set']
+        ]
+        assert ru_direct, "expected an RU-direct rule"
+        assert all(r.get('network') == 'tcp' for r in ru_direct)
+
+    def test_ru_udp_never_direct(self, mock_config_full, sample_user_ru):
+        """No UDP rule may send RU-domestic traffic direct (would be throttled).
+
+        The RU-direct bypass is TCP-only; RU UDP (incl. P2P call media to a
+        Russian peer) must fall to the blanket UDP rule and tunnel.
+        """
+        service = SubscriptionService(mock_config_full)
+        rules = self._rules(service, sample_user_ru)
+
+        udp_direct = [
+            r for r in rules
+            if r.get('network') == 'udp' and r['outbound'] == 'direct'
+        ]
+        assert not udp_direct, "UDP must never be routed direct"
+
+    def test_foreign_peer_call_udp_tunneled(self, mock_config_full, sample_user_ru):
+        """P2P call to a peer ABROAD: catch-all UDP must tunnel via UDP-native.
+
+        The peer's IP is neither Russian nor a Telegram range, so only a
+        blanket UDP rule (no rule_set / no ip_cidr) can catch it — otherwise
+        it falls to `final` on a possibly-CDN outbound that can't do UDP.
+        """
+        service = SubscriptionService(mock_config_full)
+        rules = self._rules(service, sample_user_ru)
+
+        blanket_udp = [
+            r for r in rules
+            if r.get('network') == 'udp'
+            and 'rule_set' not in r and 'ip_cidr' not in r
+        ]
+        assert len(blanket_udp) == 1, "expected exactly one catch-all UDP rule"
+        assert blanket_udp[0]['outbound'] == 'calls'
+        # It MUST sit above clash_mode Global: when the user manually picks a
+        # server (Global mode), call UDP must still be diverted to the UDP
+        # transport instead of following the picked (maybe TCP-only) proxy.
+        udp_idx = rules.index(blanket_udp[0])
+        global_idx = next(
+            i for i, r in enumerate(rules) if r.get('clash_mode') == 'Global'
+        )
+        assert udp_idx < global_idx, "UDP→calls must precede clash_mode Global"
+
+    def test_calls_selector_udp_native_only(self, mock_config_full, sample_user_ru):
+        """'calls' selector ranks only UDP-native outbounds (Reality/Hy2)."""
+        service = SubscriptionService(mock_config_full)
+        config = service.build_singbox_config(
+            sample_user_ru, ('reality', 'hy2', 'ws', 'xhttp', 'stls')
+        )
+        outbounds = {o['tag']: o for o in config['outbounds']}
+
+        assert 'calls' in outbounds
+        calls = outbounds['calls']
+        assert calls['type'] == 'urltest'
+        # Only reality/hy2 tags; no CDN (ws/xhttp) or ShadowTLS tags.
+        assert all(
+            t.endswith('-reality') or t.endswith('-hy2')
+            for t in calls['outbounds']
+        )
+        assert calls['outbounds'], "calls selector should not be empty"
+
+    def test_calls_falls_back_to_proxy_without_udp_native(
+        self, mock_config_full, sample_user_ru
+    ):
+        """CDN-only deployment: no 'calls' selector, UDP falls back to proxy."""
+        service = SubscriptionService(mock_config_full)
+        config = service.build_singbox_config(sample_user_ru, ('ws', 'xhttp'))
+        outbounds = {o['tag']: o for o in config['outbounds']}
+        rules = config['route']['rules']
+
+        assert 'calls' not in outbounds
+        udp_rules = [r for r in rules if r.get('network') == 'udp']
+        assert udp_rules, "expected UDP routing rules"
+        assert all(r['outbound'] == 'proxy' for r in udp_rules)
 
     # ===== Sing-box Config: DNS Tests =====
 
@@ -739,6 +856,8 @@ class TestSubscriptionService:
         config.HY2_HOST = 'hy2.example.com'
         config.HY2_PORT = None  # Not set
         config.HY2_SNI = 'hy2.example.com'
+        config.HY2_OBFS_PASSWORD = ''
+        config.HY2_HOP_PORTS = ''
         config.ENTRY_NODE_IP = '1.2.3.4'
         config.REALITY_PUBLIC_KEY = 'test_key'
         config.SNI_VALUE = 'test.com'
@@ -749,7 +868,7 @@ class TestSubscriptionService:
 
         # Should use default 8400
         outbound = service._build_hy2(user.uuid, 'test')
-        assert outbound is None  # Because other required configs missing
+        assert outbound['server_port'] == 8400
 
     def test_default_ws_port(self):
         """Test default WS port when not specified"""
@@ -763,9 +882,9 @@ class TestSubscriptionService:
         service = SubscriptionService(config)
         user = User(chat_id='1', uuid='uuid', email='u@t.com')
 
-        # Should handle missing port gracefully
+        # Should fall back to the default port 2053
         outbound = service._build_ws(user.uuid, 'test')
-        assert outbound is None
+        assert outbound['server_port'] == 2053
 
     def test_default_sni_fallbacks(self):
         """Test SNI fallbacks to host when not specified"""

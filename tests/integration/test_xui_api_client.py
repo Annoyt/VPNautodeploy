@@ -151,7 +151,7 @@ class TestXUIAPIClientClientOperations:
 
         with patch.object(client, '_get_session', return_value=mock_session):
             result = await client.add_client(
-                inbound_id=1,
+                inbound_ids=1,
                 client_config={"email": "test@example.com", "id": "abc-123"}
             )
 

@@ -1,3 +1,20 @@
+# ============================================================================
+# STALE / NOT ACTUALLY DEPLOYED — do not trust this file's claims.
+# Verified 2026-07-19 (`docker exec vpn-bot env`): the live entry deploy
+# runs the BASE docker-compose.yml alone. Entry gained its own local
+# `3x-ui` service at some point after this file was written (it now
+# serves the CF-fronted WS/SS-2022/WS2 inbounds directly), which
+# contradicts the "on entry there is NO 3x-ui" claim below. Trusting
+# this file's deploy command (missing the HTTPS_PROXY wiring that's
+# now in the base file) contributed to an incident — see
+# project_xui_incident_2026_07_19 in memory / bot/services/xui_reload.py.
+# If you actually need this file (e.g. to restore the public :8080
+# dashboard port override), verify every line against the CURRENT
+# entry `.env` and `docker exec vpn-bot env` first. Otherwise, delete
+# it — an unused file describing a wrong architecture is worse than no
+# file at all.
+# ============================================================================
+#
 # Entry-node override for the vpn-bot service.
 #
 # The bot moves off the small exit VPS to entry (2 GB) so it stops
@@ -30,6 +47,7 @@ services:
       # stays direct via NO_PROXY.
       - HTTPS_PROXY=${HTTPS_PROXY}
       - https_proxy=${https_proxy}
+      - TG_PROXY_URLS=${TG_PROXY_URLS:-}
       - NO_PROXY=${NO_PROXY}
       - no_proxy=${no_proxy}
     # Expose the admin/subscription web server so Caddy on exit can

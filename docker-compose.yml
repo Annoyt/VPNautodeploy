@@ -2,12 +2,27 @@ name: vpn-bot
 
 services:
   3x-ui:
-    image: ghcr.io/mhsanaei/3x-ui:latest
+    # Pinned by digest, NOT :latest — an unpinned tag let a routine
+    # container recreate silently pull a breaking major upgrade
+    # (3.4.0→3.5.0) that reset the panel to factory defaults and wiped
+    # every inbound (incident 2026-07-19). This digest is what's
+    # actually running now (verified v3.5.0). To upgrade deliberately:
+    # pull+inspect the new tag's digest, update this line, THEN
+    # `docker compose up -d --no-deps 3x-ui` as its own reviewed step —
+    # never let a vpn-bot deploy drag this along.
+    image: ghcr.io/mhsanaei/3x-ui@sha256:344f7a68a91e59d592fc355d67e32d8c2041b1c2082a7eaa3c413dc3a5cab7db
     container_name: 3x-ui
     restart: unless-stopped
     # Cap 3x-ui memory: without a limit its Go runtime balloons on this
     # 929 MB VPS and pushes the host into heavy swap, causing VPN stalls.
     mem_limit: 600m
+    sysctls:
+      # 2026-07-20: Reality dest dial (bing/microsoft :443) must not go
+      # over IPv6. The container gets AAAA answers but has no working v6
+      # route, so xray's random address pick hits AAAA ~80% of the time
+      # and the handshake dies ("REALITY: processed invalid connection").
+      # errno-99 fail-fast makes Go fall back to IPv4 immediately.
+      - net.ipv6.conf.all.disable_ipv6=1
     environment:
       XRAY_VMESS_AEAD_FORCED: "false"
       # Force x-ui/xray logs (including access.log) onto the shared
@@ -21,9 +36,13 @@ services:
       # this container after renewals so Xray re-reads them.
       - /etc/ssl/cdn:/etc/ssl/cdn:ro
     ports:
-      - "443:443"
+      # NOTE: do NOT publish 443 or 8443 here. Both are owned by
+      # host-level services on entry — shadow-tls.service (:443,
+      # forwards to the exit node) and haproxy (:8443, SNI-routes
+      # Reality to the exit node). This container binding either one
+      # will fail on container recreate ("address already in use")
+      # since neither is a Docker port — see incident 2026-07-19.
       - "2026:2026"
-      - "8443:8443"
       # Cloudflare-fronted VLESS+WS+TLS — CF free plan supports 2053
       # as origin port for orange-cloud proxying. Client connects to
       # https://cdn.nekoweather.xyz:2053/..., CF terminates TLS at
@@ -66,6 +85,20 @@ services:
       - SUPER_ADMIN_ID=${SUPER_ADMIN_ID}
       - MODE=${MODE}
       - FORUM_GROUP_ID=${FORUM_GROUP_ID}
+      # entry is RKN-blocked from api.telegram.org — route Telegram's
+      # HTTPS egress through the exit-node proxy. NO_PROXY keeps
+      # in-cluster/host traffic (3x-ui, opencode, xray-reload) direct.
+      # Was previously only wired in docker-compose.entry.yml, which
+      # isn't actually used for the current deploy — see incident
+      # 2026-07-19 (bot silently couldn't reach Telegram at all).
+      - HTTPS_PROXY=${HTTPS_PROXY:-}
+      - https_proxy=${https_proxy:-}
+      # Failover pool for Telegram egress (TelegramClient rotates on
+      # connection failure): primary exit tinyproxy, reserve node, ...
+      # If unset, HTTPS_PROXY alone is used (legacy behaviour).
+      - TG_PROXY_URLS=${TG_PROXY_URLS:-}
+      - NO_PROXY=${NO_PROXY:-}
+      - no_proxy=${no_proxy:-}
       - ENTRY_NODE_IP=${ENTRY_NODE_IP}
       - REALITY_PUBLIC_KEY=${REALITY_PUBLIC_KEY}
       # Reality short ID and SNI - must match what x-ui inbound has configured,
@@ -90,6 +123,12 @@ services:
       - OPENCODE_AGENT_DEFAULT=${OPENCODE_AGENT_DEFAULT:-}
       - OPENCODE_AGENT_PLAN=${OPENCODE_AGENT_PLAN:-}
       - OPENCODE_AGENT_YOLO=${OPENCODE_AGENT_YOLO:-}
+      # Agent backend selector + Hermes Agent API server (OpenAI-compatible).
+      # AGENT_BACKEND=hermes routes /ai to HERMES_URL instead of OPENCODE_URL.
+      - AGENT_BACKEND=${AGENT_BACKEND:-opencode}
+      - HERMES_URL=${HERMES_URL:-}
+      - HERMES_API_KEY=${HERMES_API_KEY:-}
+      - HERMES_MODEL=${HERMES_MODEL:-hermes-agent}
       - AI_DEFAULT_MODE=${AI_DEFAULT_MODE:-fast}
       - AGENT_NODE_TYPE=${AGENT_NODE_TYPE:-control}
       - TOPIC_AI=${TOPIC_AI:-}
@@ -105,18 +144,33 @@ services:
       # Empty URL → reload becomes a no-op (debug/dev mode).
       - XRAY_RELOAD_URL=${XRAY_RELOAD_URL:-http://host.docker.internal:7079}
       - XRAY_RELOAD_TOKEN=${XRAY_RELOAD_TOKEN:-}
-      - XUI_API_URL=http://3x-ui:2026
-      - XUI_BASE_PATH=/this_is_fine
-      - XUI_API_PATH=/this_is_fine/panel/api/inbounds
+      # Which 3x-ui the bot PROVISIONS to. Defaults to the co-located
+      # container (single-box deploy). On the split entry/exit topology
+      # the real inbounds (VLESS-Reality id1, cf-ws id4, ss id5,
+      # xhttp id6) live on the EXIT box, so entry's .env overrides
+      # XUI_API_URL to the exit panel and points XUI_DB_PATH at a
+      # non-existent file to force API-only mode (the exit DB isn't
+      # locally accessible, and direct-DB writes to a bind that's
+      # read-only for uid 1000 fail). Pointing the bot at entry's
+      # vestigial local 3x-ui broke key issuance: "No VLESS inbound /
+      # attempt to write a readonly database" (incident 2026-07-19).
+      - XUI_API_URL=${XUI_API_URL:-http://3x-ui:2026}
+      - XUI_BASE_PATH=${XUI_BASE_PATH:-/this_is_fine}
+      - XUI_API_PATH=${XUI_API_PATH:-/this_is_fine/panel/api/inbounds}
       - DB_PATH=/var/lib/vpn-bot/bot.db
-      # XUI_DB_PATH must point to the actual Docker volume used by 3x-ui container
-      - XUI_DB_PATH=/var/lib/docker/volumes/vpn-bot_3xui-data/_data/x-ui.db
+      # Local x-ui.db path for direct-DB mode. A non-existent path →
+      # API-only mode (see entry .env override).
+      - XUI_DB_PATH=${XUI_DB_PATH:-/var/lib/docker/volumes/vpn-bot_3xui-data/_data/x-ui.db}
       - XUI_USERNAME=${XUI_USERNAME:-admin}
       - XUI_PASSWORD=${XUI_PASSWORD:-admin}
       # Hysteria2 sidecar — empty HY2_HOST disables Hy2 link emission.
       - HY2_HOST=${HY2_HOST:-}
       - HY2_PORT=${HY2_PORT:-8400}
       - HY2_SNI=${HY2_SNI:-}
+      # Salamander obfs secret (must match hysteria server) — anti-throttle.
+      - HY2_OBFS_PASSWORD=${HY2_OBFS_PASSWORD:-}
+      # Port-hopping range "start:end"; entry DNATs it to exit:HY2_PORT.
+      - HY2_HOP_PORTS=${HY2_HOP_PORTS:-}
       # Cloudflare-fronted VLESS+WS+TLS (Phase H) — empty WS_HOST
       # disables WS link emission and dual-write to WS inbound.
       - WS_HOST=${WS_HOST:-}
@@ -130,6 +184,13 @@ services:
       - WS2_PORT=${WS2_PORT:-443}
       - WS2_SNI=${WS2_SNI:-}
       - WS2_PATH=${WS2_PATH:-/api/v2/observations}
+      # Inbound IDs the bot provisions each new client into. WS2 (xhttp)
+      # and the primary Reality inbound were previously NOT passed into
+      # the container, so the bot defaulted WS2_INBOUND_ID to 0 and left
+      # every user off the xhttp inbound (id 6). INBOUND_ID is the
+      # primary VLESS-Reality inbound (id 1). See incident 2026-07-19.
+      - WS2_INBOUND_ID=${WS2_INBOUND_ID:-0}
+      - INBOUND_ID=${INBOUND_ID:-1}
       # Reality entry-side port. Used to be 443; we moved HAProxy to
       # 8443 to free :443 for the ShadowTLS frontend. Old Reality
       # keys with :443 in the URL now hit ShadowTLS instead and break.
@@ -167,10 +228,19 @@ services:
         condition: service_healthy
     networks:
       - vpn-net
-    # Note: Web server port is exposed for health checks
-    # In production, use reverse proxy (nginx) for external access
+    # Web server port. Bind address is configurable so the base file
+    # stays secure-by-default (127.0.0.1) while the entry node — where
+    # the subscription/admin web server must be reachable by Caddy
+    # running on the SEPARATE exit box — sets WEB_BIND=0.0.0.0 in its
+    # .env. On entry, 8080 is firewalled to the exit IP only via the
+    # DOCKER-USER chain (comment "entry-fw-8080"), so 0.0.0.0 is not a
+    # public exposure. Do NOT hardcode 0.0.0.0 here: other deployments
+    # (bot co-located with Caddy) rely on the localhost default.
+    # (Regression 2026-07-19: an rsync of this file reverted a hand-set
+    #  0.0.0.0 binding to 127.0.0.1 and 502'd every subscription refresh
+    #  because exit's Caddy could no longer reach entry:8080.)
     ports:
-      - "127.0.0.1:8080:8080"  # Bind to localhost only for security
+      - "${WEB_BIND:-127.0.0.1}:8080:8080"
 
 volumes:
   3xui-data:

@@ -1,0 +1,7 @@
+[Unit]
+Description=Daily snapshot of 3x-ui's SQLite DB
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/local/bin/backup_xui_db.py
