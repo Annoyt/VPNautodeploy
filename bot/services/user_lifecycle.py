@@ -38,6 +38,20 @@ def revoke_user_key(user, xui_service, db) -> None:
             # be temporarily down. We still want to clear the DB row.
             logger.warning(f"revoke_user_key: x-ui remove failed for {redact_email(email)}: {e}")
 
+    # Mirror the revocation onto the reserve fallback node (paid tier).
+    # Best-effort: a dead reserve panel must not block the local revoke.
+    uuid = getattr(user, "uuid", None)
+    if uuid:
+        try:
+            from bot.services.fallback_node import FallbackNodeService
+            from bot.config import Settings
+            fb = FallbackNodeService(Settings())
+            if fb.enabled and fb._api_configured:
+                fb.remove_client(uuid)
+                logger.info(f"revoke_user_key: removed fallback-node client for user {user.chat_id}")
+        except Exception as e:
+            logger.warning(f"revoke_user_key: fallback-node remove failed for {user.chat_id}: {e}")
+
     if getattr(user, "uuid", None) or getattr(user, "email", None):
         user.uuid = None
         user.email = None
