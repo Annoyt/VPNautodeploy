@@ -35,6 +35,9 @@ ACTION_STATE_MAP = {
     # `revoke` is like `ban` but also implies the user already had a key —
     # the side-effect handler will additionally call revoke_user_key.
     'revoke': UserState.BANNED,
+    # Promote demo/support user to paid. Unlocks the full protocol cascade
+    # (hy2/reality) and the DE fallback node on the user's next /sub refresh.
+    'grant_paid': UserState.PAID,
 }
 
 # Actions that don't translate to a simple state transition. They're handled
@@ -3307,6 +3310,22 @@ class WebAppServer:
                     msg = f"🎁 Администратор увеличил ваш лимит до {user.quota_gb:.0f} ГБ."
                 else:
                     msg = f"🎁 Admin raised your quota to {user.quota_gb:.0f} GB."
+                self.bot.send_message(chat_id=chat_id, text=msg)
+            elif action == 'grant_paid':
+                if user.lang == 'ru':
+                    msg = (
+                        "⭐ Вам выдан полный доступ!\n\n"
+                        "Теперь доступны все протоколы (включая Hysteria2) и "
+                        "резервный сервер в Германии. Обновите подписку в "
+                        "приложении, чтобы изменения подтянулись."
+                    )
+                else:
+                    msg = (
+                        "⭐ You've been upgraded to full access!\n\n"
+                        "All protocols (including Hysteria2) and the DE "
+                        "backup server are now available. Refresh your "
+                        "subscription in the app to pick up the changes."
+                    )
                 self.bot.send_message(chat_id=chat_id, text=msg)
         except Exception as e:
             logger.error(

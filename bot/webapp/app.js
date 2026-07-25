@@ -841,9 +841,9 @@
             case 'pending_demo':    return ['approve', 'reject', 'ban'];
             case 'platform_select': return ['reset', 'reject', 'ban'];
             case 'rejected':        return ['approve', 'ban', 'reset'];
-            case 'demo':
+            case 'demo':            return ['grant_paid', 'grant_100gb', 'revoke', 'ban', 'reset'];
             case 'paid':            return ['grant_100gb', 'revoke', 'ban', 'reset'];
-            case 'support_topic':   return ['grant_100gb', 'revoke', 'ban', 'reset'];
+            case 'support_topic':   return ['grant_paid', 'grant_100gb', 'revoke', 'ban', 'reset'];
             case 'banned':          return ['unban', 'reset'];
             default:                return ['reset'];
         }
@@ -858,6 +858,7 @@
             revoke: '🗝️ Revoke',
             reset: '🔄 Reset',
             grant_100gb: '🎁 +100GB',
+            grant_paid: '⭐ Paid',
         };
         return map[action] || action;
     }
@@ -872,6 +873,7 @@
             revoke: 'отозвать ключ и забанить',
             reset: 'сбросить пользователя (всё обнулится)',
             grant_100gb: 'выдать +100 ГБ к квоте',
+            grant_paid: 'сделать пользователя платным (полный доступ)',
         };
         showModal(
             `Подтвердите: ${labels[action]}`,
