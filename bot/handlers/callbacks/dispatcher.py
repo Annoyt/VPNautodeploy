@@ -34,6 +34,7 @@ from bot.handlers.callbacks.admin import (
     BanFromTicketHandler,
     AlertAckHandler,
 )
+from bot.handlers.callbacks.ai_model import AiModelSelectHandler
 
 if TYPE_CHECKING:
     from bot.core.bot import Bot
@@ -94,7 +95,8 @@ class CallbackDispatcher:
         self.handlers.append(CloseTicketHandler(self.bot, self.db, self.config))
         self.handlers.append(BanFromTicketHandler(self.bot, self.db, self.config))
         self.handlers.append(AlertAckHandler(self.bot, self.db, self.config))
-        
+        self.handlers.append(AiModelSelectHandler(self.bot, self.db, self.config))
+
         logger.info(f"Registered {len(self.handlers)} callback handlers")
     
     def dispatch(self, update: dict, chat_id: str, user_id: str, data: str) -> bool:

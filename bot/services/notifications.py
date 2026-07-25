@@ -1838,21 +1838,16 @@ class NotificationService:
         # Hand off to the OpenCode agent for deeper analysis if configured.
         # Daily analysis is stored ONLY in the database (dashboard-viewable).
         # No chat spam — incident alerts already fire real-time via AlertManager.
-        url = getattr(self.config, 'OPENCODE_URL', '')
+        from bot.services.agent_factory import build_agent_client, get_agent_url
+        url = get_agent_url(self.config)
         if not url:
             return
         try:
             import json, time as _time
-            from bot.services.agent_client import AgentClient
-            client = AgentClient(
-                url,
-                getattr(self.config, 'OPENCODE_SERVER_PASSWORD', ''),
+            client = build_agent_client(
+                self.config,
                 getattr(self.config, 'DB_PATH', '') or '/var/lib/vpn-bot/bot.db',
                 default_timeout=240,
-                username=getattr(self.config, 'OPENCODE_USERNAME', 'opencode'),
-                default_model=getattr(self.config, 'OPENCODE_DEFAULT_MODEL', '') or None,
-                node_type=getattr(self.config, 'AGENT_NODE_TYPE', 'control'),
-                sshfs_mount=getattr(self.config, 'ENTRY_NODE_SSHFS_MOUNT', '/mnt/entry_node'),
             )
             # Pack the rollups into compact JSON so the agent has structured
             # data to read without needing to query the DB itself.

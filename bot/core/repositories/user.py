@@ -266,4 +266,9 @@ class UserRepository(BaseRepository):
             last_city=_safe_get(row, 'last_city'),
             last_lat=_safe_get(row, 'last_lat'),
             last_lon=_safe_get(row, 'last_lon'),
+            # Without this, save() persists contact_email but every
+            # subsequent get_by_id() dropped it → the "email the key"
+            # flow always saw None and answered "set your email first"
+            # even right after /setemail succeeded.
+            contact_email=_safe_get(row, 'contact_email'),
         )

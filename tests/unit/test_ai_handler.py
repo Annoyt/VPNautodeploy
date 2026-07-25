@@ -841,7 +841,6 @@ class TestHandleStatus:
         reply_text = ai_handler.bot.send_message.call_args[1]['text']
         assert '🤖 <b>AI Status:</b>' in reply_text
         assert 'Server Status:' in reply_text
-        assert 'OpenCode Version:' in reply_text
 
     def test_handle_status_no_client(self, ai_handler):
         """Test status when client is not configured."""

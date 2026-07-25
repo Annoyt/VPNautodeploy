@@ -90,17 +90,11 @@ class AdminOpsMixin(AdminHandlerBase):
         ai_status = '—'
         ai_error = None
         try:
-            from bot.services.agent_client import AgentClient, AgentUnavailable
-            ocu = getattr(self.config, 'OPENCODE_URL', '')
+            from bot.services.agent_client import AgentUnavailable
+            from bot.services.agent_factory import build_agent_client, get_agent_url
+            ocu = get_agent_url(self.config)
             if ocu:
-                client = AgentClient(
-                    ocu,
-                    getattr(self.config, 'OPENCODE_SERVER_PASSWORD', ''),
-                    self.config.DB_PATH,
-                    username=getattr(self.config, 'OPENCODE_USERNAME', 'opencode'),
-                    node_type=getattr(self.config, 'AGENT_NODE_TYPE', 'control'),
-                    sshfs_mount=getattr(self.config, 'ENTRY_NODE_SSHFS_MOUNT', '/mnt/entry_node'),
-                )
+                client = build_agent_client(self.config, self.config.DB_PATH)
                 try:
                     h = client.ping()
                     ai_status = h.get('status', '?')

@@ -458,6 +458,12 @@ class CommandHandler(BaseHandler):
         message = update.get('message', {})
         text = message.get('text', '').strip()
 
+        # Reply inside the same forum topic the command was sent from —
+        # without this, send_message() drops the reply into the group's
+        # General topic and the admin (who lives in forum topics, never
+        # PM) never sees it, even though the command otherwise succeeds.
+        thread_id = message.get('message_thread_id')
+
         # Extract email from command
         parts = text.split(maxsplit=1)
         if len(parts) < 2:
@@ -467,7 +473,7 @@ class CommandHandler(BaseHandler):
                 text = "📧 <b>Set your email</b>\n\nUsage: /setemail your@email.com\n\nExample: /setemail john@gmail.com"
             else:
                 text = "📧 <b>Укажи свой email</b>\n\nИспользование: /setemail твой@email.com\n\nПример: /setemail ivan@gmail.com"
-            self.bot.send_message(chat_id=chat_id, text=text, parse_mode='HTML')
+            self.bot.send_message(chat_id=chat_id, text=text, parse_mode='HTML', message_thread_id=thread_id)
             return
 
         email = parts[1].strip()
@@ -480,7 +486,7 @@ class CommandHandler(BaseHandler):
                 text = "❌ Invalid email format.\n\nUsage: /setemail your@email.com"
             else:
                 text = "❌ Неверный формат email.\n\nИспользование: /setemail твой@email.com"
-            self.bot.send_message(chat_id=chat_id, text=text)
+            self.bot.send_message(chat_id=chat_id, text=text, message_thread_id=thread_id)
             return
 
         # Save email
@@ -501,5 +507,5 @@ class CommandHandler(BaseHandler):
         else:
             text = f"✅ Email сохранён: {email}\n\nИспользуем его для отправки резервного ключа если VPN заблокируют."
 
-        self.bot.send_message(chat_id=chat_id, text=text)
+        self.bot.send_message(chat_id=chat_id, text=text, message_thread_id=thread_id)
         logger.info(f"User {chat_id} set contact email")

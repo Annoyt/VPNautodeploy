@@ -42,6 +42,7 @@ from bot.services.agent_client import (
     AgentUnavailable,
     AgentClient,
 )
+from bot.services.agent_factory import build_agent_client, get_agent_url, get_agent_backend
 
 logger = logging.getLogger(__name__)
 
@@ -119,19 +120,10 @@ class AIHandler(BaseHandler):
             ai_timeout = int(getattr(config, "OPENCODE_TIMEOUT", 600) or 600)
         except (TypeError, ValueError):
             ai_timeout = 600
-        if getattr(config, "OPENCODE_URL", ""):
-            self._client = AgentClient(
-                base_url=config.OPENCODE_URL,
-                password=getattr(config, "OPENCODE_SERVER_PASSWORD", ""),
-                db_path=config.DB_PATH,
-                username=getattr(config, "OPENCODE_USERNAME", "opencode"),
-                default_timeout=ai_timeout,
-                default_model=getattr(config, "OPENCODE_DEFAULT_MODEL", "") or None,
-                agent_default=getattr(config, "OPENCODE_AGENT_DEFAULT", "") or None,
-                agent_plan=getattr(config, "OPENCODE_AGENT_PLAN", "") or None,
-                agent_yolo=getattr(config, "OPENCODE_AGENT_YOLO", "") or None,
-                node_type=getattr(config, "AGENT_NODE_TYPE", "control"),
-                sshfs_mount=getattr(config, "ENTRY_NODE_SSHFS_MOUNT", "/mnt/entry_node"),
+        # Backend (Hermes or OpenCode) is chosen by the factory from config.
+        if get_agent_url(config):
+            self._client = build_agent_client(
+                config, config.DB_PATH, default_timeout=ai_timeout
             )
 
     # ----- Routing -----
@@ -157,7 +149,7 @@ class AIHandler(BaseHandler):
         # in the caption.
         first_token = text.split(maxsplit=1)[0].split("@", 1)[0].lower() if text else ""
         if first_token in ("/ai", "/ai_reset", "/ai_fast", "/ai_plan",
-                            "/ai_status", "/ai_skill", "/ai_yolo"):
+                            "/ai_status", "/ai_skill", "/ai_yolo", "/ai_model"):
             return True
 
         # Free-text or photo inside TOPIC_AI from the super-admin.
@@ -208,6 +200,10 @@ class AIHandler(BaseHandler):
 
         if first == "/ai_yolo":
             self._handle_yolo(chat_id, thread_id, text)
+            return
+
+        if first == "/ai_model":
+            self._handle_model(chat_id, thread_id, text)
             return
 
         # Mode resolution: /ai_plan forces deep thinking, /ai_fast skips it,
@@ -338,14 +334,77 @@ class AIHandler(BaseHandler):
         key = self._session_key(chat_id, thread_id)
         current_session = self._client.get_session(key)
 
+        model_line = ""
+        if get_agent_backend(self.config) == "hermes":
+            from bot.services.agent_models import (
+                get_selected_model, DEFAULT_MODEL_ID, label_for,
+            )
+            cur_model = get_selected_model(self.config.DB_PATH) or DEFAULT_MODEL_ID
+            model_line = f"• <b>Model:</b> {label_for(cur_model)} (<code>/ai_model</code>)\n"
+
         msg_text = (
             "🤖 <b>AI Status:</b>\n"
             f"• <b>Server Status:</b> {status_text}\n"
-            f"• <b>OpenCode Version:</b> <code>{version_text}</code>\n"
+            f"{model_line}"
             f"• <b>Total Active Sessions:</b> {total_sessions}\n"
             f"• <b>Current Chat Session:</b> <code>{current_session or 'None'}</code>"
         )
         self._reply(chat_id, thread_id, msg_text, parse_mode="HTML")
+
+    def _handle_model(self, chat_id: str, thread_id, text: str) -> None:
+        """Switch the free model the /ai agent uses (Hermes backend only).
+
+        No arg → inline-button switcher. With an arg (number / id / substring)
+        → set directly. The choice is per-request and persisted in bot.db, so
+        it takes effect immediately with no server restart.
+        """
+        from bot.services.agent_models import (
+            FREE_MODELS, DEFAULT_MODEL_ID, get_selected_model,
+            set_selected_model, resolve_arg, label_for, build_model_keyboard,
+        )
+        if get_agent_backend(self.config) != "hermes":
+            self._reply(
+                chat_id, thread_id,
+                "ℹ️ Переключение модели доступно только на бэкенде Hermes.",
+            )
+            return
+
+        parts = text.split(maxsplit=1)
+        arg = parts[1].strip() if len(parts) > 1 else ""
+        db_path = self.config.DB_PATH
+
+        if arg:
+            chosen = resolve_arg(arg)
+            if not chosen:
+                listing = "\n".join(
+                    f"{i + 1}. <code>{mid}</code>"
+                    for i, (mid, _label) in enumerate(FREE_MODELS)
+                )
+                self._reply(
+                    chat_id, thread_id,
+                    "⚠️ Не понял модель. Укажи номер, id или часть названия:\n" + listing,
+                    parse_mode="HTML",
+                )
+                return
+            set_selected_model(db_path, chosen)
+            self._reply(
+                chat_id, thread_id,
+                f"✅ Модель /ai: <b>{label_for(chosen)}</b>\n<code>{chosen}</code>",
+                parse_mode="HTML",
+            )
+            return
+
+        current = get_selected_model(db_path) or DEFAULT_MODEL_ID
+        self.bot.send_message(
+            chat_id=chat_id,
+            text=(
+                "🤖 <b>Модель для /ai</b> — все бесплатные, с tool-calling.\n"
+                f"Сейчас: <b>{label_for(current)}</b>\n\nВыбери:"
+            ),
+            parse_mode="HTML",
+            reply_markup=build_model_keyboard(current),
+            message_thread_id=thread_id,
+        )
 
     def _handle_skill(self, chat_id: str, thread_id, text: str) -> None:
         if not self._client:
@@ -364,7 +423,10 @@ class AIHandler(BaseHandler):
         skill_name = parts[1].strip()
         prompt = parts[2].strip()
 
-        allowed_skills = ("vpn-ops", "server-admin", "code-review")
+        allowed_skills = (
+            "vpn-ops", "server-admin", "code-review",
+            "incident-response", "billing-ops", "dpi-analysis",
+        )
         if skill_name not in allowed_skills:
             self._reply(
                 chat_id, thread_id,
