@@ -134,6 +134,10 @@ class FallbackNodeService:
     def _new_session(self) -> requests.Session:
         s = requests.Session()
         s.verify = False
+        # The panel call must go DIRECT — the bot's HTTPS_PROXY is for
+        # api.telegram.org only, and tinyproxy's ConnectPort allowlist
+        # (443/563) would 403 our :2026 CONNECT anyway.
+        s.trust_env = False
         return s
 
     def _login(self, s: requests.Session) -> bool:
