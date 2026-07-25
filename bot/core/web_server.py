@@ -450,25 +450,40 @@ class WebAppServer:
         # Resolve country / ASN / city once — used by the audit row,
         # the dashboard adoption widget, the per-region cascade tuning,
         # and the new Signals map markers.
+        #
+        # Entry-node DNAT+MASQUERADE caveat: the hysteria daemon sits on
+        # the exit host and all hy2 traffic arrives via the entry node's
+        # UDP DNAT with SNAT, so ``addr_ip`` is ALWAYS the entry node's
+        # own IP, never the real client IP. Geo-resolving it would pin
+        # the user to the entry node's city (Moscow) and clobber the
+        # accurate geo captured by /sub fetches. Detect our own node IPs
+        # and skip both the geo lookup and the users.last_geo write.
+        node_ips = {
+            (getattr(self.config, 'ENTRY_NODE_IP', '') or '').strip(),
+            (getattr(self.config, 'EXIT_NODE_IP', '') or '').strip(),
+        }
+        is_node_ip = addr_ip in {ip for ip in node_ips if ip}
+
         cc = asn = org = None
         city = lat = lon = None
-        try:
-            from bot.services.geoip import (
-                lookup as _geo_lookup, lookup_asn, lookup_city,
-            )
-            if addr_ip:
-                g = _geo_lookup(addr_ip)
-                if g:
-                    cc = g[0]
-                a = lookup_asn(addr_ip)
-                if a:
-                    asn = a[0]
-                    org = a[1] if len(a) > 1 else None
-                c = lookup_city(addr_ip)
-                if c:
-                    city, _region, lat, lon = c
-        except Exception:
-            pass
+        if not is_node_ip:
+            try:
+                from bot.services.geoip import (
+                    lookup as _geo_lookup, lookup_asn, lookup_city,
+                )
+                if addr_ip:
+                    g = _geo_lookup(addr_ip)
+                    if g:
+                        cc = g[0]
+                    a = lookup_asn(addr_ip)
+                    if a:
+                        asn = a[0]
+                        org = a[1] if len(a) > 1 else None
+                    c = lookup_city(addr_ip)
+                    if c:
+                        city, _region, lat, lon = c
+            except Exception:
+                pass
 
         decision = 'deny'
         chat_id_str = None
@@ -660,9 +675,26 @@ class WebAppServer:
         # and — when we know it — ASN/country tuned. ASN wins; country
         # is the fallback.
         from bot.handlers.callbacks.user import MyKeyAnswerHandler
+        from bot.services.fallback_node import (
+            FALLBACK_ALLOWED_STATUSES,
+            FallbackNodeService,
+        )
         cascade = MyKeyAnswerHandler.get_cascade_order(
             self.db, user=user, country=country, asn=asn,
         )
+
+        # Paid-tier users get the reserve fallback node appended by the
+        # builder below. Provision them there lazily (idempotent, cached)
+        # so the outbound actually authenticates when they switch to it.
+        # Sync HTTP to the reserve panel — must not block the loop.
+        if user.status in FALLBACK_ALLOWED_STATUSES:
+            try:
+                await asyncio.to_thread(
+                    FallbackNodeService(self.config).ensure_client, user,
+                )
+            except Exception as e:
+                logger.warning(f'sub: fallback provisioning failed for {user.chat_id}: {e}')
+
         config_obj = self.subscription.build_singbox_config(user, cascade)
 
         # Surface quota/expiry to Hiddify's profile panel via the

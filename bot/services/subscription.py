@@ -25,6 +25,10 @@ import logging
 from typing import Optional, Tuple, List, Any
 
 from bot.config import Settings
+from bot.services.fallback_node import (
+    FALLBACK_ALLOWED_STATUSES,
+    FallbackNodeService,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +103,12 @@ class SubscriptionService:
         """
         outbounds: List[dict] = []
         proxy_tags: List[str] = []
+        # Reality (xudp) and Hy2 (native UDP) carry Telegram call media
+        # well; the CDN transports (ws/xhttp) can't do real UDP. Collect
+        # the UDP-native tags for a dedicated 'calls' selector so voice/
+        # video isn't stranded on a CDN outbound that the auto-selector
+        # happened to pick by its TCP latency probe.
+        udp_call_tags: List[str] = []
         lang = (getattr(user, 'lang', None) or 'ru') if user else 'ru'
 
         for proto in enabled_protocols:
@@ -110,15 +120,44 @@ class SubscriptionService:
                 # both registered. The first item is the one the
                 # selector targets.
                 outbounds.extend(ob)
-                proxy_tags.append(ob[0]['tag'])
+                tag = ob[0]['tag']
             else:
                 outbounds.append(ob)
-                proxy_tags.append(ob['tag'])
+                tag = ob['tag']
+            proxy_tags.append(tag)
+            if proto in ('reality', 'hy2'):
+                udp_call_tags.append(tag)
+
+        # Reserve fallback node (DE) — paid-tier only. The client was
+        # provisioned lazily by the /sub handler before this build; here
+        # we just append the outbound so it joins the auto-selector. A
+        # broken reserve panel must never kill the whole subscription.
+        if user and getattr(user, 'status', None) in FALLBACK_ALLOWED_STATUSES:
+            try:
+                fb = FallbackNodeService(self.config).build_outbound(user)
+            except Exception as e:
+                logger.warning(f'subscription: fallback outbound skipped: {e}')
+                fb = None
+            if fb is not None:
+                outbounds.append(fb)
+                proxy_tags.append(fb['tag'])
+                # Reality carries UDP — usable for calls too.
+                udp_call_tags.append(fb['tag'])
 
         if not proxy_tags:
             # Empty cascade — return a no-op config rather than a
             # broken one. Client will just show no servers.
             proxy_tags = []
+
+        # A bare Reality outbound can pass the 'calls' urltest probe via its
+        # TLS masquerade even when the user isn't provisioned as a client on
+        # the Reality inbound (false-healthy) — the selector then picks it
+        # and silently swallows call media. Hy2 only probes healthy when the
+        # tunnel really carries data, so when Hy2 is present make it the sole
+        # call transport; only fall back to Reality if there's no Hy2.
+        hy2_call_tags = [t for t in udp_call_tags if t.endswith('-hy2')]
+        if hy2_call_tags:
+            udp_call_tags = hy2_call_tags
 
         # urltest auto-selector at the top so Hiddify's default mode
         # picks the fastest live outbound, falling back along the
@@ -138,6 +177,23 @@ class SubscriptionService:
             'outbounds': selector_tags or ['direct'],
             'default': 'auto' if proxy_tags else 'direct',
         })
+
+        # UDP-native selector for Telegram call media (see udp_call_tags).
+        # Ranks only Reality/Hy2, so a call never lands on a CDN transport
+        # that can't carry UDP. The route rules send Telegram + RU-domestic
+        # UDP here; if no UDP-native outbound exists on this deployment the
+        # rules fall back to 'proxy'.
+        calls_tag: Optional[str] = None
+        if udp_call_tags:
+            calls_tag = 'calls'
+            outbounds.insert(2, {
+                'type': 'urltest',
+                'tag': 'calls',
+                'outbounds': udp_call_tags,
+                'url': 'https://www.gstatic.com/generate_204',
+                'interval': '3m',
+                'tolerance': 50,
+            })
 
         # Required system outbounds.
         outbounds.append({'type': 'direct', 'tag': 'direct'})
@@ -184,7 +240,7 @@ class SubscriptionService:
             'outbounds': outbounds,
             'route': {
                 'rule_set': self._build_rule_sets(),
-                'rules': self._build_route_rules(lang, ru_exit_tag),
+                'rules': self._build_route_rules(lang, ru_exit_tag, calls_tag),
                 'final': 'proxy',
                 'auto_detect_interface': True,
             },
@@ -212,6 +268,33 @@ class SubscriptionService:
     _DIRECT_RULE_SET_TAGS = (
         'geoip-ru',
         'geosite-category-ru',
+    )
+
+    # Telegram's own IP ranges (signaling + the voice/video "reflector"
+    # servers that carry calls), from
+    # https://core.telegram.org/resources/cidr.txt. Matched literally as
+    # ``ip_cidr`` instead of a downloaded ``geoip-telegram`` rule set so
+    # call routing has ZERO dependency on the .srs mirror (and keeps
+    # working under a whitelist/lockdown where the mirror may be
+    # unreachable). This is what actually forces call media through the
+    # tunnel: the media is raw UDP to these IPs with no SNI, so the
+    # domain-based ``geosite-telegram`` rule can never match it.
+    _TELEGRAM_IP_CIDRS = (
+        '91.105.192.0/23',
+        '91.108.4.0/22',
+        '91.108.8.0/22',
+        '91.108.12.0/22',
+        '91.108.16.0/22',
+        '91.108.20.0/22',
+        '91.108.56.0/22',
+        '95.161.64.0/20',
+        '149.154.160.0/20',
+        '185.76.151.0/24',
+        '2001:67c:4e8::/48',
+        '2001:b28:f23c::/48',
+        '2001:b28:f23d::/48',
+        '2001:b28:f23f::/48',
+        '2a0a:f280::/32',
     )
 
     # Self-hosted rule sets are served from the dashboard domain so
@@ -266,7 +349,9 @@ class SubscriptionService:
             })
         return rs
 
-    def _build_route_rules(self, lang: str = 'ru', ru_exit_tag: str = None) -> list:
+    def _build_route_rules(
+        self, lang: str = 'ru', ru_exit_tag: str = None, calls_tag: str = None
+    ) -> list:
         """Route table evaluated top-to-bottom; first match wins.
 
         Order rationale:
@@ -275,18 +360,47 @@ class SubscriptionService:
            Hiddify mode switch wins over the auto rules below.
         3. For lang='en': RU-geo content (VK/Yandex/etc) → ru-exit so foreign
            users can access RU-geo-blocked services from abroad.
-        4. Always-proxy allow-list (YT/Meta/X/GitHub/etc.) — these have
+        4. Telegram by IP — force calls (UDP media) + signaling through the
+           tunnel, ABOVE the RU-direct bypass, so voice/video isn't throttled.
+        5. Always-proxy allow-list (YT/Meta/X/GitHub/etc.) — these have
            to tunnel even when their CDN serves from a Russian PoP.
-        5. RU geoip + geosite bypass — VK/Yandex/banks/госуслуги direct (for RU users).
-        6. Final ``proxy`` — anything not matched defaults to tunneling.
+        6. RU geoip + geosite bypass — VK/Yandex/banks/госуслуги direct, but
+           TCP only.
+        7. Blanket UDP → UDP-native path — carries Telegram voice/video to
+           any peer (RU or abroad); TCP falls through to ``final``.
+        8. Final ``proxy`` — anything not matched defaults to tunneling.
 
         Args:
             lang: User's language ('en' or 'ru'). EN users get RU-exit routing.
             ru_exit_tag: Tag of the RU-exit outbound (if lang='en' and it exists).
+            calls_tag: Tag of the UDP-native 'calls' selector, or None if this
+                deployment has no UDP-native outbound (then UDP falls to proxy).
         """
+        # Telegram call media (and all UDP) prefers a UDP-native outbound
+        # (Reality/Hy2); fall back to the general proxy selector when the
+        # deployment has none.
+        udp_out = calls_tag or 'proxy'
+
+        tg_cidr = list(self._TELEGRAM_IP_CIDRS)
         rules = [
             {'protocol': 'dns', 'outbound': 'dns-out'},
+            # Explicit Direct mode wins (user chose "no VPN").
             {'clash_mode': 'Direct', 'outbound': 'direct'},
+            # ALL UDP → the UDP-native transport (Hy2/Reality). This sits
+            # ABOVE clash_mode Global on purpose: when the user manually
+            # picks a server in the client (Hiddify sets Global, routing
+            # everything through that one outbound), call media would
+            # otherwise go down whatever they picked — and a TCP-only
+            # transport (ShadowTLS/CDN) simply can't carry UDP, so the call
+            # dies. Confirmed in the field: calls work ONLY when Hy2 is the
+            # active protocol; any other selection breaks them. Forcing UDP
+            # to `udp_out` here makes voice/video ride Hy2 no matter what
+            # the user selected. DNS is already peeled off above.
+            {'network': 'udp', 'outbound': udp_out},
+            # Telegram signaling (TCP, by IP — MTProto hits DC IPs with no
+            # SNI so the domain rule can't catch it) must tunnel too.
+            {'ip_cidr': tg_cidr, 'outbound': 'proxy'},
+            # Explicit Global mode → remaining (TCP) traffic via selected proxy.
             {'clash_mode': 'Global', 'outbound': 'proxy'},
             # max.ru — direct (no VPN, no blocking).
             {'domain_suffix': ['max.ru'], 'outbound': 'direct'},
@@ -299,16 +413,20 @@ class SubscriptionService:
                 'outbound': ru_exit_tag,
             })
 
-        # Always-proxy allow-list (YT/Meta/etc)
+        # Always-proxy allow-list (YT/Meta/etc) — TCP; UDP already routed above.
         rules.append({
             'rule_set': list(self._PROXY_RULE_SET_TAGS),
             'outbound': 'proxy',
         })
 
-        # For RU users: domestic traffic direct (skip if EN user already has RU-exit rule)
+        # For RU users: domestic TCP traffic direct (skip if EN user already
+        # has RU-exit rule). UDP is intentionally NOT here — it was already
+        # sent to the UDP transport at the top so P2P call media to a Russian
+        # peer tunnels instead of going direct into RKN's call throttle.
         if lang != 'en' or not ru_exit_tag:
             rules.append({
                 'rule_set': list(self._DIRECT_RULE_SET_TAGS),
+                'network': 'tcp',
                 'outbound': 'direct',
             })
 
@@ -374,7 +492,7 @@ class SubscriptionService:
             return None
         port = int(getattr(cfg, 'HY2_PORT', 8400) or 8400)
         sni = getattr(cfg, 'HY2_SNI', host) or host
-        return {
+        ob = {
             'type': 'hysteria2',
             'tag': f'{name_prefix}-hy2',
             'server': host,
@@ -386,6 +504,27 @@ class SubscriptionService:
                 'alpn': ['h3'],
             },
         }
+        # Salamander obfuscation — makes the QUIC packets look like random
+        # noise so РКН's UDP/QUIC throttle can't fingerprint them. Without
+        # it plain Hy2 handshakes through but the data stream gets choked
+        # to a timeout (observed: client connects, tx=0, idle-disconnect),
+        # which kills Telegram calls (the only UDP transport). Must match
+        # the server's obfs.salamander.password.
+        obfs_pw = getattr(cfg, 'HY2_OBFS_PASSWORD', '') or ''
+        if obfs_pw:
+            ob['obfs'] = {'type': 'salamander', 'password': obfs_pw}
+        # Port hopping — the client sprays the QUIC flow across a whole
+        # UDP port range instead of a single port. РКН throttles Hy2 by
+        # port/flow on the user's last mile (confirmed: handshake passes,
+        # sustained stream chokes to a timeout even WITH obfs), so a
+        # single fixed port gets rate-limited to death; hopping spreads
+        # the flow so no one port trips the throttle. The entry node DNATs
+        # the whole range to the exit's :8400 (iptables 'hy2-hop').
+        hop = getattr(cfg, 'HY2_HOP_PORTS', '') or ''
+        if hop:
+            ob['server_ports'] = [hop]
+            ob['hop_interval'] = '30s'
+        return ob
 
     def _build_ws(self, uuid: str, name_prefix: str) -> Optional[dict]:
         """VMess over httpupgrade through Cloudflare. ECH enabled."""

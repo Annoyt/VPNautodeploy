@@ -60,6 +60,9 @@ class Settings:
         # to the real prod entry node. The validate() call below rejects
         # blank values so the bot won't even start if these are missing.
         self.ENTRY_NODE_IP: str = os.getenv('ENTRY_NODE_IP', '')
+        # Exit node public IP — optional; used by hy2_auth to recognise
+        # our own node traffic (geo lookup must not pin users to it).
+        self.EXIT_NODE_IP: str = os.getenv('EXIT_NODE_IP', '')
         self.REALITY_PUBLIC_KEY: str = os.getenv('REALITY_PUBLIC_KEY', '')
         self.SNI_VALUE: str = os.getenv('SNI_VALUE', '')
         self.SID_VALUE: str = os.getenv('SID_VALUE', '')
@@ -73,6 +76,35 @@ class Settings:
         except ValueError:
             self.HY2_PORT = 8400
         self.HY2_SNI: str = os.getenv('HY2_SNI', '') or self.HY2_HOST
+        # Salamander obfs shared secret — must match the hysteria server's
+        # obfs.salamander.password. Empty → plain Hy2 (throttled by РКН's
+        # QUIC filter). See subscription._build_hy2.
+        self.HY2_OBFS_PASSWORD: str = os.getenv('HY2_OBFS_PASSWORD', '')
+        # Port-hopping range "start:end" (e.g. "20000:40000"). Empty →
+        # single fixed HY2_PORT. Entry must DNAT the range to exit:HY2_PORT.
+        self.HY2_HOP_PORTS: str = os.getenv('HY2_HOP_PORTS', '').strip()
+
+        # Reserve fallback node (DE) for paid users — a second,
+        # provider-independent VLESS+Reality server appended to the
+        # subscription for FALLBACK_ALLOWED_STATUSES. Users are
+        # provisioned there lazily on /sub fetch via the 2.8.x panel API.
+        # Empty FALLBACK_NODE_HOST disables the whole feature.
+        self.FALLBACK_NODE_HOST: str = os.getenv('FALLBACK_NODE_HOST', '')
+        try:
+            self.FALLBACK_NODE_PORT: int = int(os.getenv('FALLBACK_NODE_PORT', '443'))
+        except ValueError:
+            self.FALLBACK_NODE_PORT = 443
+        self.FALLBACK_NODE_SNI: str = os.getenv('FALLBACK_NODE_SNI', 'www.google.com')
+        self.FALLBACK_NODE_PBK: str = os.getenv('FALLBACK_NODE_PBK', '')
+        self.FALLBACK_NODE_SID: str = os.getenv('FALLBACK_NODE_SID', '')
+        self.FALLBACK_NODE_XUI_URL: str = os.getenv('FALLBACK_NODE_XUI_URL', '')
+        self.FALLBACK_NODE_XUI_BASE_PATH: str = os.getenv('FALLBACK_NODE_XUI_BASE_PATH', '/sub')
+        self.FALLBACK_NODE_XUI_USER: str = os.getenv('FALLBACK_NODE_XUI_USER', 'admin')
+        self.FALLBACK_NODE_XUI_PASS: str = os.getenv('FALLBACK_NODE_XUI_PASS', '')
+        try:
+            self.FALLBACK_NODE_INBOUND_ID: int = int(os.getenv('FALLBACK_NODE_INBOUND_ID', '1'))
+        except ValueError:
+            self.FALLBACK_NODE_INBOUND_ID = 1
 
         # Cloudflare-fronted VLESS+WS+TLS (Phase H).
         # Client connects to <host>:<port>, CF terminates TLS at edge,
@@ -224,6 +256,17 @@ class Settings:
         self.ENTRY_NODE_SSH_HOST: str = os.getenv('ENTRY_NODE_SSH_HOST', '')  # e.g., "root@entry.local"
         self.ENTRY_NODE_SSH_KEY: str = os.getenv('ENTRY_NODE_SSH_KEY', '')  # Path to SSH private key
         self.ENTRY_NODE_SSHFS_MOUNT: str = os.getenv('ENTRY_NODE_SSHFS_MOUNT', '/mnt/entry_node')  # Mount point
+        # Which agent runner backs /ai + alert analysis: "hermes" (Hermes
+        # Agent API server, OpenAI-compatible) or "opencode" (legacy). The
+        # factory in bot/services/agent_factory.py picks the client from this.
+        self.AGENT_BACKEND: str = os.getenv('AGENT_BACKEND', 'opencode').strip().lower()
+        # Hermes Agent API server — used when AGENT_BACKEND=hermes. URL empty
+        # disables /ai just like an empty OPENCODE_URL does. HERMES_MODEL is
+        # the API alias ("hermes-agent"); the real model lives in Hermes'
+        # own config.yaml (model.default).
+        self.HERMES_URL: str = os.getenv('HERMES_URL', '')
+        self.HERMES_API_KEY: str = os.getenv('HERMES_API_KEY', '')
+        self.HERMES_MODEL: str = os.getenv('HERMES_MODEL', 'hermes-agent')
         # If set, ANY message the super-admin posts inside this forum topic
         # is treated as an AI prompt (no /ai prefix needed).
         try:
