@@ -260,23 +260,18 @@ class AlertManager:
         the result to the alert row in alert_history. Result is visible in
         the dashboard's Alerts tab — no chat noise.
         """
-        url = getattr(self.config, 'OPENCODE_URL', '')
+        from bot.services.agent_factory import build_agent_client, get_agent_url
+        url = get_agent_url(self.config)
         if not url:
             return
         try:
-            from bot.services.agent_client import AgentClient
             # 600s (10 min) gives the agent room to finish the multi-step
             # skill: read dpi_metrics rows + grep error.log for the same
             # hour, compare to 7d baseline, render HTML output.
-            client = AgentClient(
-                url,
-                getattr(self.config, 'OPENCODE_SERVER_PASSWORD', ''),
+            client = build_agent_client(
+                self.config,
                 getattr(self.config, 'DB_PATH', '') or '/var/lib/vpn-bot/bot.db',
                 default_timeout=600,
-                username=getattr(self.config, 'OPENCODE_USERNAME', 'opencode'),
-                default_model=getattr(self.config, 'OPENCODE_DEFAULT_MODEL', '') or None,
-                node_type=getattr(self.config, 'AGENT_NODE_TYPE', 'control'),
-                sshfs_mount=getattr(self.config, 'ENTRY_NODE_SSHFS_MOUNT', '/mnt/entry_node'),
             )
             prompt = (
                 f"DPI ALERT fired: {alert.title}\n\n"
@@ -341,6 +336,46 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
     the tests can plug in fakes.
     """
     checks: List[Callable[[], Optional[Alert]]] = []
+
+    def check_telegram_api() -> Optional[Alert]:
+        """Telegram Bot API reachability (via the proxy pool).
+
+        TelegramClient tracks consecutive connection failures into
+        TG_API_OUTAGE. Two alerts: ongoing outage (critical) and a
+        one-shot recovery notice. The recovery alert rides the normal
+        Telegram delivery — it can only be sent once the API is back,
+        which is exactly when we want it.
+        """
+        from bot.core.telegram_client import TG_API_OUTAGE
+        now = time.time()
+        since = TG_API_OUTAGE.get('since')
+        if since and now - since > 180:
+            return Alert(
+                key='tg_api',
+                severity='critical',
+                title='Telegram API недоступен',
+                detail=(
+                    f'Бот не может достучаться до api.telegram.org уже '
+                    f'{int(now - since)}с — ни через один прокси. Бот не '
+                    f'отвечает пользователям. Проверь tinyproxy на exit и '
+                    f'reserve-ноде (systemctl status tinyproxy).'
+                ),
+                min_cycles=1,
+            )
+        if TG_API_OUTAGE.get('recovery_pending'):
+            TG_API_OUTAGE['recovery_pending'] = False
+            dur = int(TG_API_OUTAGE.get('last_duration', 0))
+            if dur >= 60:
+                return Alert(
+                    key='tg_api_recovered',
+                    severity='warn',
+                    title='Telegram API восстановлен',
+                    detail=f'Связь с api.telegram.org вернулась. Простой составил {dur}с.',
+                    min_cycles=1,
+                )
+        return None
+
+    checks.append(check_telegram_api)
 
     def check_cpu() -> Optional[Alert]:
         try:
@@ -414,18 +449,11 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
 
     def check_opencode() -> Optional[Alert]:
         try:
-            from bot.services.agent_client import AgentClient
-            url = getattr(config, 'OPENCODE_URL', '')
+            from bot.services.agent_factory import build_agent_client, get_agent_url
+            url = get_agent_url(config)
             if not url:
                 return None
-            client = AgentClient(
-                url,
-                getattr(config, 'OPENCODE_SERVER_PASSWORD', ''),
-                config.DB_PATH,
-                username=getattr(config, 'OPENCODE_USERNAME', 'opencode'),
-                node_type=getattr(config, 'AGENT_NODE_TYPE', 'control'),
-                sshfs_mount=getattr(config, 'ENTRY_NODE_SSHFS_MOUNT', '/mnt/entry_node'),
-            )
+            client = build_agent_client(config, config.DB_PATH)
             health = client.ping()
             if health.get('status') == 'ok':
                 return None
@@ -433,7 +461,7 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
             return Alert(
                 key='opencode',
                 severity='warn',
-                title='opencode-сервер не отвечает',
+                title='AI-агент не отвечает',
                 detail=str(e)[:200],
                 min_cycles=2,
             )
@@ -454,6 +482,44 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
                     severity='critical',
                     title='xray-reload sidecar offline',
                     detail='новые ключи не будут активироваться',
+                    min_cycles=2,
+                )
+            return None
+        except Exception:
+            return None
+
+    def check_xui_inbounds() -> Optional[Alert]:
+        """Catch a wiped/reset 3x-ui panel fast.
+
+        2026-07-19: an unpinned :latest image + a dependency-triggered
+        container recreate silently upgraded 3x-ui and reset its DB to
+        factory defaults, wiping every inbound. The bot's own startup
+        sync already detects this (`XUIService.validate_db_path_sync`)
+        but only logs it once at boot — nobody watches raw logs, so it
+        went unnoticed. This makes the same condition a recurring,
+        paged alert instead.
+        """
+        db_path = (getattr(config, 'XUI_DB_PATH', '') or '').strip()
+        if not db_path or not os.path.exists(db_path):
+            return None  # API-only deployments have no local DB to check
+        try:
+            import sqlite3
+            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+            try:
+                row = conn.execute("SELECT COUNT(*) FROM inbounds").fetchone()
+            finally:
+                conn.close()
+            count = row[0] if row else 0
+            if count == 0:
+                return Alert(
+                    key='xui-inbounds',
+                    severity='critical',
+                    title='X-UI панель без inbound\'ов',
+                    detail=(
+                        'inbounds пуст — похоже панель сброшена (обновление '
+                        'образа / ручной reset). Новые ключи не выдать, '
+                        'существующие клиенты могут не работать.'
+                    ),
                     min_cycles=2,
                 )
             return None
@@ -605,7 +671,7 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
 
     checks.extend([
         check_cpu, check_ram, check_disk,
-        check_opencode, check_xray_reload_sidecar,
+        check_opencode, check_xray_reload_sidecar, check_xui_inbounds,
         check_dpi_short_sessions, check_dpi_handshake_spike, check_dpi_rst_spike,
     ])
     return checks

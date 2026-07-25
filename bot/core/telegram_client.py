@@ -2,6 +2,8 @@
 
 import json
 import logging
+import os
+import threading
 import time
 from typing import Optional, Dict, Any
 
@@ -17,6 +19,16 @@ from bot.config import (
 
 logger = logging.getLogger(__name__)
 
+# Shared outage state, read by AlertManager's check_telegram_api.
+# Written under each TelegramClient's own lock; readers should treat it
+# as eventually-consistent (worst case the alert fires one cycle late).
+TG_API_OUTAGE: Dict[str, Any] = {
+    'since': None,            # ts when api.telegram.org became unreachable
+    'last_duration': 0.0,     # seconds the most recent outage lasted
+    'recovered_at': None,     # ts of the most recent recovery
+    'recovery_pending': False,  # one-shot flag consumed by the alert check
+}
+
 
 class TelegramClient:
     """Low-level Telegram Bot API client with retry logic."""
@@ -24,10 +36,104 @@ class TelegramClient:
     API_URL = "https://api.telegram.org/bot{token}/{method}"
     MAX_RETRIES = MAX_RETRIES_API
     RETRY_DELAY_BASE = RETRY_DELAY_BASE
+    # How long a failed proxy stays out of rotation before a half-open retry.
+    PROXY_COOLDOWN_SEC = 120
+    # Consecutive connection failures that count as a full API outage.
+    OUTAGE_FAIL_STREAK = 2
     
     def __init__(self, token: str):
         self.token = token
         self.session = requests.Session()
+        # Proxy failover pool. TG_PROXY_URLS is a comma-separated list of
+        # proxy URLs (http://user:pass@host:port) plus the literal "direct"
+        # for a no-proxy attempt. When unset we keep the legacy behaviour:
+        # requests picks HTTPS_PROXY from the environment itself.
+        self._proxy_pool = [
+            p.strip() for p in os.environ.get('TG_PROXY_URLS', '').split(',')
+            if p.strip()
+        ]
+        if self._proxy_pool:
+            self.session.trust_env = False
+        self._proxy_lock = threading.Lock()
+        self._proxy_dead_until: Dict[str, float] = {}
+        self._active_proxy: Optional[str] = None
+        self._conn_fail_streak = 0
+    
+    # ----- proxy failover -----
+    
+    def _pick_proxy(self) -> str:
+        """Return the proxy entry to use for the next attempt.
+
+        Sticky: keep using the active proxy while it's healthy so a
+        long-poll connection doesn't flap between endpoints. Dead entries
+        are skipped until their cooldown expires; if all are dead we take
+        the one whose cooldown ends soonest (half-open probe).
+        """
+        with self._proxy_lock:
+            now = time.time()
+            alive = [p for p in self._proxy_pool
+                     if self._proxy_dead_until.get(p, 0) <= now]
+            if self._active_proxy in alive:
+                return self._active_proxy
+            if alive:
+                self._active_proxy = alive[0]
+            else:
+                self._active_proxy = min(
+                    self._proxy_pool,
+                    key=lambda p: self._proxy_dead_until.get(p, 0),
+                )
+            return self._active_proxy
+    
+    def _mark_proxy_dead(self, entry: str) -> None:
+        with self._proxy_lock:
+            self._proxy_dead_until[entry] = time.time() + self.PROXY_COOLDOWN_SEC
+            if self._active_proxy == entry:
+                self._active_proxy = None
+    
+    def _proxies_kwarg(self, entry: str) -> dict:
+        """Per-request ``proxies=`` for requests. ``direct`` → no proxy."""
+        if entry == 'direct':
+            return {}
+        return {'http': entry, 'https': entry}
+    
+    @staticmethod
+    def _safe_proxy_label(entry: Optional[str]) -> str:
+        """Proxy label for logs — strip credentials."""
+        if not entry:
+            return 'env-default'
+        if entry == 'direct':
+            return entry
+        return entry.split('@')[-1]
+    
+    # ----- outage tracking -----
+    
+    def _note_success(self, proxy_entry: Optional[str]) -> None:
+        if self._conn_fail_streak == 0 and not TG_API_OUTAGE['since']:
+            return
+        self._conn_fail_streak = 0
+        since = TG_API_OUTAGE.get('since')
+        if since:
+            duration = time.time() - since
+            TG_API_OUTAGE['last_duration'] = duration
+            TG_API_OUTAGE['recovered_at'] = time.time()
+            TG_API_OUTAGE['recovery_pending'] = True
+            TG_API_OUTAGE['since'] = None
+            logger.warning(
+                f"Telegram API recovered after {duration:.0f}s outage "
+                f"(via {self._safe_proxy_label(proxy_entry)})"
+            )
+    
+    def _note_conn_failure(self, proxy_entry: Optional[str]) -> None:
+        self._conn_fail_streak += 1
+        if (
+            self._conn_fail_streak >= self.OUTAGE_FAIL_STREAK
+            and not TG_API_OUTAGE['since']
+        ):
+            TG_API_OUTAGE['since'] = time.time()
+            logger.error(
+                "Telegram API outage started — all connection attempts failing "
+                f"(last via {self._safe_proxy_label(proxy_entry)})"
+            )
     
     def _sanitize_url(self, url: str) -> str:
         """Sanitize URL for logging by masking bot token.
@@ -73,11 +179,28 @@ class TelegramClient:
         
         for attempt in range(self.MAX_RETRIES):
             response = None
+            proxy_entry = self._pick_proxy() if self._proxy_pool else None
+            extra = (
+                {'proxies': self._proxies_kwarg(proxy_entry)}
+                if proxy_entry is not None else {}
+            )
             try:
-                response = self.session.post(url, json=kwargs, timeout=_read_timeout)
+                response = self.session.post(url, json=kwargs, timeout=_read_timeout, **extra)
                 response.raise_for_status()
+                self._note_success(proxy_entry)
                 return response.json()
             except requests.RequestException as e:
+                # Connection-level failure (proxy down, host unreachable):
+                # rotate the pool so the next retry hits another endpoint.
+                # HTTP 4xx means the API itself answered — not a proxy issue.
+                if isinstance(e, requests.ConnectionError):
+                    self._note_conn_failure(proxy_entry)
+                    if proxy_entry is not None:
+                        self._mark_proxy_dead(proxy_entry)
+                        logger.warning(
+                            f"Proxy {self._safe_proxy_label(proxy_entry)} marked dead "
+                            f"for {self.PROXY_COOLDOWN_SEC}s, rotating"
+                        )
                 # Sanitize error message to prevent token leak in logs and exceptions
                 error_msg = str(e)
                 error_msg = self._sanitize_url(error_msg)
