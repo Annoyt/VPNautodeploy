@@ -18,12 +18,12 @@ EMAIL = 'user_paidguy_123@nekovo.ru'
 
 def make_config(**over):
     base = dict(
-        FALLBACK_NODE_HOST='212.60.153.208',
+        FALLBACK_NODE_HOST='<reserve-node-ip>',
         FALLBACK_NODE_PORT=443,
         FALLBACK_NODE_SNI='www.google.com',
         FALLBACK_NODE_PBK='pbk123',
         FALLBACK_NODE_SID='c7',
-        FALLBACK_NODE_XUI_URL='https://212.60.153.208:2026',
+        FALLBACK_NODE_XUI_URL='https://<reserve-node-ip>:2026',
         FALLBACK_NODE_XUI_BASE_PATH='/sub',
         FALLBACK_NODE_XUI_USER='admin',
         FALLBACK_NODE_XUI_PASS='pw',
@@ -50,7 +50,7 @@ class TestOutbound:
         ob = svc.build_outbound(make_user())
         assert ob['type'] == 'vless'
         assert ob['tag'] == 'user_paidguy_123-de'
-        assert ob['server'] == '212.60.153.208'
+        assert ob['server'] == '<reserve-node-ip>'
         assert ob['server_port'] == 443
         assert ob['uuid'] == UUID
         assert 'flow' not in ob

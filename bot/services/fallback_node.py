@@ -6,7 +6,7 @@ The whole main cascade (entry+exit) sits behind one provider pair. When
 it degrades — РКН pressure on the entry IP, hoster network flaps,
 whatever — paid users need a second, fully independent server to switch
 to. This service provisions them on the reserve x-ui panel (mytherm,
-212.60.153.208) and the subscription builder adds the extra outbound.
+<reserve-node-ip>) and the subscription builder adds the extra outbound.
 
 Design
 ------
@@ -22,7 +22,7 @@ Design
 - Self-signed panel cert → ``verify=False`` scoped to this session only.
 
 Config (all optional — empty host disables everything):
-    FALLBACK_NODE_HOST          client-facing address (212.60.153.208)
+    FALLBACK_NODE_HOST          client-facing address (<reserve-node-ip>)
     FALLBACK_NODE_PORT          443
     FALLBACK_NODE_SNI           reality serverName (www.google.com)
     FALLBACK_NODE_PBK           reality public key
