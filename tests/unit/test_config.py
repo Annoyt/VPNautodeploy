@@ -29,7 +29,7 @@ class TestSettings:
         assert s.TOPIC_SOLVED == 37
         assert s.DB_PATH == '/etc/cascade-vpn/bot.db'
         assert s.XUI_DB_PATH == '/opt/3x-ui/db/x-ui.db'
-        assert s.DEMO_TRAFFIC_GB == 5
+        assert s.DEMO_TRAFFIC_GB == 10
         # Freemium: a fresh demo key must live until the next monthly
         # quota-reset run, not just a 7-day trial window.
         assert s.DEMO_DAYS == 30
@@ -39,7 +39,7 @@ class TestSettings:
         s1 = Settings()
         s2 = Settings()
         s1.DEMO_TRAFFIC_GB = 99
-        assert s2.DEMO_TRAFFIC_GB == 5
+        assert s2.DEMO_TRAFFIC_GB == 10
 
     def test_validate_empty_token(self):
         """Test validation with empty BOT_TOKEN"""

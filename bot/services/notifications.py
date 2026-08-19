@@ -881,10 +881,11 @@ class NotificationService:
         for chat_id, email in renewed:
             try:
                 # Notify user quietly; failures are non-fatal.
+                demo_gb = int(getattr(self.config, 'DEMO_TRAFFIC_GB', 10) or 10)
                 self.bot.send_message(
                     chat_id=chat_id,
-                    text="🔄 Ваш тестовый трафик 5 ГБ обновлён на новый месяц.\n"
-                         "Your 5 GB demo traffic has been refreshed for the new month.",
+                    text=f"🔄 Ваш тестовый трафик {demo_gb} ГБ обновлён на новый месяц.\n"
+                         f"Your {demo_gb} GB demo traffic has been refreshed for the new month.",
                     parse_mode='HTML',
                 )
             except Exception as e:
@@ -1589,7 +1590,7 @@ class NotificationService:
             replace_existing=True,
         )
         # Monthly on the 1st at 00:00 UTC: reset demo traffic counters
-        # and extend expiry so demo users keep their 5 GB allowance.
+        # and extend expiry so demo users keep their monthly allowance.
         self.scheduler.add_job(
             self._reset_demo_quota_sync,
             CronTrigger(day=1, hour=0, minute=0),

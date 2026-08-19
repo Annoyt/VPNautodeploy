@@ -120,7 +120,7 @@ services:
       # if these are missing — that's wrong, prod inbound has a 16-char sid.
       - SID_VALUE=${SID_VALUE}
       - SNI_VALUE=${SNI_VALUE:-www.microsoft.com}
-      - DEMO_TRAFFIC_GB=${DEMO_TRAFFIC_GB:-5}
+      - DEMO_TRAFFIC_GB=${DEMO_TRAFFIC_GB:-10}
       - DEMO_DAYS=${DEMO_DAYS:-30}
       # Admin dashboard URL (Caddy + Let's Encrypt on the host serves
       # https://<domain>:9443 → http://localhost:8080)

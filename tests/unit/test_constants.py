@@ -158,7 +158,7 @@ class TestDemoDefaults:
     
     def test_default_demo_traffic_gb(self):
         """Test default demo traffic in GB."""
-        assert DEFAULT_DEMO_TRAFFIC_GB == 5
+        assert DEFAULT_DEMO_TRAFFIC_GB == 10
         assert isinstance(DEFAULT_DEMO_TRAFFIC_GB, int)
         assert DEFAULT_DEMO_TRAFFIC_GB > 0
     
