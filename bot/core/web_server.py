@@ -987,9 +987,11 @@ class WebAppServer:
 
         # Live traffic from x-ui, may be stale if the inbound was reloaded
         traffic_up = traffic_down = 0
-        if user.email and self.xui and getattr(self.xui, 'db', None):
+        if user.email and self.xui:
             try:
-                t = await asyncio.to_thread(self.xui.db.get_client_traffic, user.email)
+                # API-aware — the old db-only guard silently skipped
+                # this on the entry node (xui.db is None there).
+                t = await self.xui.get_client_traffic(user.email)
                 if t:
                     traffic_up = int(t.get('upload') or 0)
                     traffic_down = int(t.get('download') or 0)
