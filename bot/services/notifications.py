@@ -1058,13 +1058,18 @@ class NotificationService:
         return True
 
     def _sync_traffic_to_botdb_sync(self):
-        """Every 10 min: mirror panel traffic into users.traffic_up/down.
+        """Every 10 min: mirror panel traffic into users.traffic_up/down
+        and warn users crossing 80% / 100% of their monthly quota.
 
-        Those columns (in GB) feed the dashboard user list and admin
-        /stats. They used to be written by the standalone
-        traffic-collector container, which is not deployed anywhere —
-        so they've been frozen since. One bulk API read, one UPDATE
-        per user with a key.
+        The GB columns feed the dashboard user list and admin /stats.
+        They used to be written by the standalone traffic-collector
+        container, which is not deployed anywhere — so they'd been
+        frozen since. One bulk API read, one UPDATE per user.
+
+        Threshold alerts piggyback on the same fresh data: without them
+        the first sign of a spent quota is the VPN going dark. De-duped
+        via notification_log with the month baked into the type, so the
+        warning re-arms when the counters reset on the 1st.
         """
         import sqlite3
         from datetime import datetime
@@ -1081,6 +1086,7 @@ class NotificationService:
 
         gb = 1024 ** 3
         now_iso = datetime.utcnow().isoformat()
+        users_by_email = {}
         try:
             conn = sqlite3.connect(bot_db_path, timeout=15)
             with conn:
@@ -1095,9 +1101,70 @@ class NotificationService:
                             email,
                         ),
                     )
+                rows = conn.execute(
+                    "SELECT email, chat_id, status FROM users "
+                    "WHERE email IS NOT NULL "
+                    "AND status IN ('demo', 'paid', 'support_topic')"
+                ).fetchall()
+                users_by_email = {r[0]: (r[1], r[2]) for r in rows}
             conn.close()
         except Exception as e:
             logger.warning(f"traffic_botdb_sync failed: {e}")
+            return
+
+        self._send_quota_threshold_alerts(traffic, users_by_email)
+
+    def _send_quota_threshold_alerts(self, traffic: dict,
+                                     users_by_email: dict) -> None:
+        """Warn each active user once per month at 80% and at 100%."""
+        from datetime import datetime
+
+        gb = 1024 ** 3
+        month = datetime.utcnow().strftime('%Y-%m')
+        for email, t in traffic.items():
+            entry = users_by_email.get(email)
+            if not entry:
+                continue
+            chat_id, status = entry
+            total = int(t.get('total') or 0)
+            if total <= 0:
+                continue   # unlimited — nothing to warn about
+            used = int(t.get('upload') or 0) + int(t.get('download') or 0)
+            pct = used / total
+            if pct >= 1.0:
+                kind = f'quota100:{month}'
+                text = (
+                    "🚫 Месячный трафик исчерпан — доступ приостановлен "
+                    "до 1-го числа.\n"
+                    "Monthly traffic exhausted — access paused until "
+                    "the 1st."
+                )
+                if status == 'demo':
+                    text += (
+                        "\n\n💳 Нужно больше уже сейчас? /buy — платный "
+                        "тариф со 100 ГБ/мес."
+                    )
+            elif pct >= 0.8:
+                kind = f'quota80:{month}'
+                text = (
+                    f"⚠️ Использовано {int(pct * 100)}% месячного трафика "
+                    f"({used / gb:.1f} из {total / gb:.0f} ГБ). "
+                    f"Счётчик обнулится 1-го числа.\n"
+                    f"You've used {int(pct * 100)}% of your monthly "
+                    f"traffic."
+                )
+            else:
+                continue
+            try:
+                # 45 days > any month: the month-stamped type is the
+                # real dedup key, the window just has to outlast it.
+                if self.db.was_notified(chat_id, kind, hours=45 * 24):
+                    continue
+                self.bot.send_message(chat_id=chat_id, text=text,
+                                      parse_mode='HTML')
+                self.db.mark_notified(chat_id, kind)
+            except Exception as e:
+                logger.warning(f"quota alert for {email} failed: {e}")
 
     def _keep_xray_log_readable_sync(self):
         """Hourly: chmod 644 on Xray access.log AND error.log so the

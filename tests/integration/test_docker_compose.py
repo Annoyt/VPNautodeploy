@@ -141,27 +141,3 @@ class TestXUIAPIIntegration:
             result = await client.login()
             assert result is True
     
-    @pytest.mark.asyncio
-    async def test_traffic_collection_via_api(self):
-        """Test traffic collection via API (no docker exec)."""
-        import os
-        
-        # Skip if not in docker environment
-        if not os.path.exists('/.dockerenv') and not os.getenv('CI'):
-            pytest.skip("Not in Docker environment")
-        
-        from bot.services.xui_api import XRayStatsService
-        
-        async with XRayStatsService('http://3x-ui:2026') as service:
-            # Login first
-            logged_in = await service.login()
-            assert logged_in, "Failed to login"
-            
-            # Get stats
-            stats = await service.get_all_clients_stats()
-            
-            # Verify we got a dict (even if empty)
-            assert isinstance(stats, dict)
-            
-            # Verify no docker exec was used (this is implicit - if API works, we didn't use docker exec)
-            print(f"Collected stats for {len(stats)} clients via HTTP API")

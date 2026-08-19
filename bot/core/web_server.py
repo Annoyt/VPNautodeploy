@@ -76,6 +76,11 @@ class WebAppServer:
         # client repaints instantly instead of waiting for the next
         # 5s poll.
         self._ws_clients: set = set()
+        # hy2 auth quota gate: per-email TTL cache of the panel lookup.
+        # Each auth callback otherwise costs a full inbounds fetch, and
+        # a reconnect-looping client would hammer the panel.
+        # {email: (monotonic_ts, traffic_dict_or_None)}
+        self._hy2_quota_cache: dict = {}
         self._setup_routes()
     
     def _setup_routes(self):
@@ -534,11 +539,17 @@ class WebAppServer:
         # (availability over enforcement; the exit-side kick loop still
         # covers connected sessions).
         if decision == 'allow' and email_id and self.xui:
-            try:
-                t = await self.xui.get_client_traffic(email_id)
-            except Exception as e:
-                logger.warning(f"hy2_auth: panel quota lookup failed: {e}")
-                t = None
+            import time as _time
+            cached = self._hy2_quota_cache.get(email_id)
+            if cached and _time.monotonic() - cached[0] < 30:
+                t = cached[1]
+            else:
+                try:
+                    t = await self.xui.get_client_traffic(email_id)
+                except Exception as e:
+                    logger.warning(f"hy2_auth: panel quota lookup failed: {e}")
+                    t = None
+                self._hy2_quota_cache[email_id] = (_time.monotonic(), t)
             if t:
                 # XUIService's API path speaks upload/download, its DB
                 # fallback up/down — accept both.

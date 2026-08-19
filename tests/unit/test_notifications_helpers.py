@@ -325,3 +325,71 @@ class TestResetPaidQuota:
             "SELECT traffic_up + traffic_down FROM users").fetchone()[0]
         assert up_down == 4.0   # bot.db untouched on failure
         svc.bot.send_message.assert_not_called()
+
+
+class TestQuotaThresholdAlerts:
+    """80% / 100% warnings from the 10-min traffic mirror."""
+
+    def _svc(self, notified=False):
+        from unittest.mock import Mock
+        from bot.services.notifications import NotificationService
+        svc = NotificationService(Mock(), Mock(), Mock())
+        svc.db.was_notified = Mock(return_value=notified)
+        svc.db.mark_notified = Mock()
+        return svc
+
+    def test_warns_at_80_percent(self):
+        svc = self._svc()
+        gb = 1024 ** 3
+        svc._send_quota_threshold_alerts(
+            {'u@x': {'upload': 0, 'download': 4 * gb, 'total': 5 * gb}},
+            {'u@x': ('42', 'demo')},
+        )
+        text = svc.bot.send_message.call_args.kwargs['text']
+        assert '80%' in text
+        kind = svc.db.mark_notified.call_args.args[1]
+        assert kind.startswith('quota80:')
+
+    def test_exhausted_demo_gets_buy_hint(self):
+        svc = self._svc()
+        gb = 1024 ** 3
+        svc._send_quota_threshold_alerts(
+            {'u@x': {'upload': gb, 'download': 4 * gb, 'total': 5 * gb}},
+            {'u@x': ('42', 'demo')},
+        )
+        text = svc.bot.send_message.call_args.kwargs['text']
+        assert 'исчерпан' in text and '/buy' in text
+        assert svc.db.mark_notified.call_args.args[1].startswith('quota100:')
+
+    def test_exhausted_paid_no_buy_hint(self):
+        svc = self._svc()
+        gb = 1024 ** 3
+        svc._send_quota_threshold_alerts(
+            {'u@x': {'upload': 0, 'download': 100 * gb, 'total': 100 * gb}},
+            {'u@x': ('42', 'paid')},
+        )
+        text = svc.bot.send_message.call_args.kwargs['text']
+        assert '/buy' not in text
+
+    def test_dedup_within_month(self):
+        svc = self._svc(notified=True)
+        gb = 1024 ** 3
+        svc._send_quota_threshold_alerts(
+            {'u@x': {'upload': 0, 'download': 4 * gb, 'total': 5 * gb}},
+            {'u@x': ('42', 'demo')},
+        )
+        svc.bot.send_message.assert_not_called()
+        svc.db.mark_notified.assert_not_called()
+
+    def test_unlimited_and_low_usage_silent(self):
+        svc = self._svc()
+        gb = 1024 ** 3
+        svc._send_quota_threshold_alerts(
+            {
+                'unlim@x': {'upload': 0, 'download': 900 * gb, 'total': 0},
+                'low@x': {'upload': 0, 'download': 1 * gb, 'total': 5 * gb},
+                'unknown@x': {'upload': 0, 'download': 5 * gb, 'total': 5 * gb},
+            },
+            {'unlim@x': ('1', 'demo'), 'low@x': ('2', 'demo')},
+        )
+        svc.bot.send_message.assert_not_called()

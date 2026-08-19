@@ -306,9 +306,9 @@ Unit Tests:
    - Volumes: vpn-bot-data, vpn-bot-logs, 3xui-data (ro)
    - Port: 8080 (localhost only)
    
-3. **traffic-collector**: Custom build
-   - Script: collect_traffic_api.py
-   - HTTP API mode for cross-container access
+3. ~~traffic-collector~~ — retired 2026-08-19: панель снова считает
+   трафик сама, hy2 доливается мостом на exit, а в bot.db цифры
+   зеркалит 10-минутная джоба внутри бота
 
 ---
 
