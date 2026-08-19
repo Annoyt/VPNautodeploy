@@ -608,17 +608,17 @@ class AdminOpsMixin(AdminHandlerBase):
         user.quota_gb = gb
         self.db.save_user(user)
 
-        # Propagate to x-ui
+        # Propagate to x-ui. In-place update — NOT add_client: re-adding
+        # an existing email makes the service delete + re-add the client,
+        # which wipes its accounted traffic (and with it the quota state).
         xui_msg = ''
         if user.email:
             xui = self.bot.services.get('xui') if hasattr(self.bot, 'services') else None
             if xui:
                 try:
-                    client = xui.get_client_sync(user.email)
-                    if client:
-                        client['totalGB'] = int(gb * BYTES_PER_GB)
-                        xui.add_client_sync(client, client.get('inbound_id', 1))
-                        xui_msg = ' (x-ui sync OK)'
+                    ok = xui.sync_client_settings_sync(
+                        user.email, {'totalGB': int(gb * BYTES_PER_GB)})
+                    xui_msg = ' (x-ui sync OK)' if ok else ' (x-ui sync FAILED)'
                 except Exception as e:
                     xui_msg = f' (x-ui error: {e})'
 
@@ -690,6 +690,23 @@ class AdminOpsMixin(AdminHandlerBase):
         except Exception as e:
             subs_msg = f' (subscriptions sync error: {e})'
 
+        # Mirror into the panel client — otherwise 3x-ui keeps the old
+        # expiryTime and disables the key while the bot considers the
+        # user paid (bit every paid user when the July grant lapsed).
+        xui_msg = ''
+        if user.email:
+            xui = self.bot.services.get('xui') if hasattr(self.bot, 'services') else None
+            if xui:
+                try:
+                    expiry_ms = int(
+                        (dt + timedelta(hours=23, minutes=59)).timestamp() * 1000
+                    )
+                    ok = xui.sync_client_settings_sync(
+                        user.email, {'expiryTime': expiry_ms, 'enable': True})
+                    xui_msg = ' (x-ui OK)' if ok else ' (x-ui FAILED)'
+                except Exception as e:
+                    xui_msg = f' (x-ui error: {e})'
+
         try:
             admin_id = str(self.config.SUPER_ADMIN_ID)
             self.db.log_admin_action(
@@ -702,7 +719,7 @@ class AdminOpsMixin(AdminHandlerBase):
         uname = f"@{target.username}" if target.username else f"user_{target.chat_id}"
         self.bot.send_message(
             chat_id=chat_id,
-            text=f"📅 Подписка {uname} до <b>{date_str}</b>{subs_msg}",
+            text=f"📅 Подписка {uname} до <b>{date_str}</b>{subs_msg}{xui_msg}",
             parse_mode='HTML',
             message_thread_id=self._get_thread_id(chat_id),
         )
@@ -830,6 +847,7 @@ class AdminOpsMixin(AdminHandlerBase):
             client = vpn.create_client_config(
                 chat_id=target_chat, username=None,
                 traffic_gb=gb, expiry_days=days,
+                comment=email,
             )
             user.uuid = client['id']
             user.email = client['email']
@@ -839,6 +857,7 @@ class AdminOpsMixin(AdminHandlerBase):
                 "id": user.uuid, "flow": "xtls-rprx-vision", "email": user.email,
                 "limitIp": 1, "totalGB": gb * BYTES_PER_GB,
                 "expiryTime": expiry_ms, "enable": True,
+                "comment": email,
             }
 
         xui = self.bot.services.get('xui') if hasattr(self.bot, 'services') else None

@@ -788,27 +788,34 @@ class NotificationService:
     def _reset_demo_quota_sync(self):
         """Monthly: reset traffic counters for demo users and extend expiry.
 
-        Demo users get 5 GB every calendar month. This job zeroes both
-        bot.db and x-ui.db traffic counters, ensures the client is enabled
-        in x-ui, and pushes the expiry 30 days forward so 3x-ui does not
-        purge them as "expired". After the DB update xray is reloaded.
+        Freemium model: demo users get DEMO_TRAFFIC_GB every calendar
+        month, forever. Per user the panel client is re-enabled, its
+        expiry pushed 30 days forward (so 3x-ui does not purge it as
+        "expired") and its traffic zeroed.
+
+        Primary path is the panel HTTP API (on entry the bot has no
+        writable x-ui.db); the old direct-DB writes are kept as a
+        fallback for deployments with a local panel database. Users are
+        notified only after their refresh actually succeeded.
         """
         import sqlite3
+        import time as _time
         from datetime import datetime, timedelta
+        from bot.services.xui_service import XUIService
 
         bot_db_path = getattr(self.config, 'DB_PATH', None)
-        xui_db_path = getattr(self.config, 'XUI_DB_PATH', None)
-        if not bot_db_path or not xui_db_path:
-            logger.warning("demo quota reset: DB_PATH or XUI_DB_PATH not configured")
+        if not bot_db_path:
+            logger.warning("demo quota reset: DB_PATH not configured")
             return
 
         new_expiry_ms = int((datetime.utcnow() + timedelta(days=30)).timestamp() * 1000)
+        demo_bytes = int(getattr(self.config, 'DEMO_TRAFFIC_GB', 5) or 5) * 1024 ** 3
 
         try:
             conn = sqlite3.connect(bot_db_path)
             conn.row_factory = sqlite3.Row
             demo_users = conn.execute(
-                "SELECT chat_id, email, traffic_up, traffic_down FROM users WHERE status = 'demo' AND email IS NOT NULL"
+                "SELECT chat_id, email FROM users WHERE status = 'demo' AND email IS NOT NULL"
             ).fetchall()
             conn.close()
         except Exception as e:
@@ -819,25 +826,74 @@ class NotificationService:
             logger.info("demo quota reset: no demo users found")
             return
 
-        reset_emails = []
-        for u in demo_users:
-            email = u['email']
-            if not email:
-                continue
-            reset_emails.append(email)
+        xui = XUIService(self.config)
+        renewed = []   # [(chat_id, email)] that actually got refreshed
+        if xui.api:
+            for u in demo_users:
+                if xui.renew_client_sync(u['email'], new_expiry_ms,
+                                         total_bytes=demo_bytes):
+                    renewed.append((u['chat_id'], u['email']))
+                else:
+                    logger.warning(
+                        f"demo quota reset: API renew failed for {u['email']}"
+                    )
+            logger.info(
+                f"demo quota reset: renewed {len(renewed)}/{len(demo_users)} "
+                f"demo clients via panel API"
+            )
+        else:
+            emails = [u['email'] for u in demo_users]
+            if not self._reset_demo_quota_db_fallback(emails, new_expiry_ms):
+                return
+            renewed = [(u['chat_id'], u['email']) for u in demo_users]
+
+        if not renewed:
+            return
+
+        reset_emails = [email for _, email in renewed]
+
+        # Zero bot.db counters so dashboard reads fresh numbers.
+        try:
+            conn = sqlite3.connect(bot_db_path)
+            placeholders = ','.join('?' * len(reset_emails))
+            conn.execute(
+                f"UPDATE users SET traffic_up = 0, traffic_down = 0, "
+                f"last_traffic_update = ? WHERE email IN ({placeholders})",
+                (datetime.utcnow().isoformat(), *reset_emails),
+            )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.exception(f"demo quota reset: failed to update bot db: {e}")
+
+        for chat_id, email in renewed:
             try:
                 # Notify user quietly; failures are non-fatal.
                 self.bot.send_message(
-                    chat_id=u['chat_id'],
+                    chat_id=chat_id,
                     text="🔄 Ваш тестовый трафик 5 ГБ обновлён на новый месяц.\n"
                          "Your 5 GB demo traffic has been refreshed for the new month.",
                     parse_mode='HTML',
                 )
             except Exception as e:
                 logger.warning(f"demo quota reset: notify {email} failed: {e}")
+            _time.sleep(0.1)   # stay clear of Telegram's send rate limit
+
+    def _reset_demo_quota_db_fallback(self, reset_emails, new_expiry_ms) -> bool:
+        """Direct x-ui.db writes — only for deployments where the panel
+        database is local and writable (the bot on entry is API-only)."""
+        import sqlite3
+
+        xui_db_path = getattr(self.config, 'XUI_DB_PATH', None)
+        if not xui_db_path:
+            logger.warning("demo quota reset: XUI_DB_PATH not configured")
+            return False
 
         try:
-            xui_conn = sqlite3.connect(xui_db_path)
+            # mode=rw: never create the file — a plain connect on the
+            # entry node's sentinel path once fabricated a stub DB that
+            # silently re-enabled (broken) DB mode for a month.
+            xui_conn = sqlite3.connect(f"file:{xui_db_path}?mode=rw", uri=True)
             xui_conn.row_factory = sqlite3.Row
             c = xui_conn.cursor()
 
@@ -889,24 +945,9 @@ class NotificationService:
             )
         except Exception as e:
             logger.exception(f"demo quota reset: failed to update x-ui db: {e}")
-            return
+            return False
 
-        # 4. Zero bot.db counters so dashboard reads fresh numbers.
-        try:
-            conn = sqlite3.connect(bot_db_path)
-            conn.row_factory = sqlite3.Row
-            placeholders = ','.join('?' * len(reset_emails))
-            conn.execute(
-                f"UPDATE users SET traffic_up = 0, traffic_down = 0, "
-                f"last_traffic_update = ? WHERE email IN ({placeholders})",
-                (datetime.utcnow().isoformat(), *reset_emails),
-            )
-            conn.commit()
-            conn.close()
-        except Exception as e:
-            logger.exception(f"demo quota reset: failed to update bot db: {e}")
-
-        # 5. Reload xray so the enabled/expiry changes take effect.
+        # Reload xray so the enabled/expiry changes take effect.
         try:
             from bot.services.xui_service import XUIService
             xui = XUIService(self.config)
@@ -916,6 +957,7 @@ class NotificationService:
                 logger.warning("demo quota reset: xray reload returned False")
         except Exception as e:
             logger.exception(f"demo quota reset: xray reload failed: {e}")
+        return True
 
     def _keep_xray_log_readable_sync(self):
         """Hourly: chmod 644 on Xray access.log AND error.log so the

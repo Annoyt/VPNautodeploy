@@ -30,7 +30,9 @@ class TestSettings:
         assert s.DB_PATH == '/etc/cascade-vpn/bot.db'
         assert s.XUI_DB_PATH == '/opt/3x-ui/db/x-ui.db'
         assert s.DEMO_TRAFFIC_GB == 5
-        assert s.DEMO_DAYS == 7
+        # Freemium: a fresh demo key must live until the next monthly
+        # quota-reset run, not just a 7-day trial window.
+        assert s.DEMO_DAYS == 30
     
     def test_instance_independence(self):
         """Two instances don't share mutable state"""

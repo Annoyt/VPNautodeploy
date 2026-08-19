@@ -266,21 +266,19 @@ class TestStatsCallbackRealTraffic:
         stats_handler.db.get_user.return_value = mock_user
 
         mock_traffic = {'upload': 1073741824, 'download': 536870912, 'total': 1610612736}
-        with patch('bot.services.xui_db.XUIDatabase') as mock_xui_db_cls:
-            mock_xui_db = Mock()
-            mock_xui_db.get_client_traffic.return_value = mock_traffic
-            mock_xui_db_cls.return_value = mock_xui_db
+        mock_xui = Mock()
+        mock_xui.get_client_traffic_sync.return_value = mock_traffic
+        stats_handler.bot.services = {'xui': mock_xui}
 
-            stats_handler._send_stats('12345')
+        stats_handler._send_stats('12345')
 
-            mock_xui_db_cls.assert_called_once_with('/tmp/test_xui.db')
-            mock_xui_db.get_client_traffic.assert_called_once_with('user_test@nekovo.ru')
+        mock_xui.get_client_traffic_sync.assert_called_once_with('user_test@nekovo.ru')
 
-            # Verify the bot sent a message with actual traffic data
-            stats_handler.bot.send_message.assert_called_once()
-            call_args = stats_handler.bot.send_message.call_args[1]
-            assert 'Upload' in call_args['text']
-            assert call_args.get('parse_mode') == 'HTML'
+        # Verify the bot sent a message with actual traffic data
+        stats_handler.bot.send_message.assert_called_once()
+        call_args = stats_handler.bot.send_message.call_args[1]
+        assert 'Upload' in call_args['text']
+        assert call_args.get('parse_mode') == 'HTML'
 
     def test_send_stats_no_data_available(self, stats_handler):
         """Test message when traffic data is missing."""
@@ -290,15 +288,14 @@ class TestStatsCallbackRealTraffic:
         mock_user.email = 'user_test@nekovo.ru'
         stats_handler.db.get_user.return_value = mock_user
 
-        with patch('bot.services.xui_db.XUIDatabase') as mock_xui_db_cls:
-            mock_xui_db = Mock()
-            mock_xui_db.get_client_traffic.return_value = None
-            mock_xui_db_cls.return_value = mock_xui_db
+        mock_xui = Mock()
+        mock_xui.get_client_traffic_sync.return_value = None
+        stats_handler.bot.services = {'xui': mock_xui}
 
-            stats_handler._send_stats('12345')
+        stats_handler._send_stats('12345')
 
-            call_args = stats_handler.bot.send_message.call_args[1]
-            assert 'Could not retrieve traffic' in call_args['text']
+        call_args = stats_handler.bot.send_message.call_args[1]
+        assert 'Could not retrieve traffic' in call_args['text']
 
     def test_send_stats_user_without_email(self, stats_handler):
         """Test message when user has no email."""

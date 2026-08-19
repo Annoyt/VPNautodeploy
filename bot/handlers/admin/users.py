@@ -251,15 +251,15 @@ class AdminUsersMixin(AdminHandlerBase):
             user.limit_ip = limit
             self.db.save_user(user)
             
-            # Update in X-UI if possible
+            # Update in X-UI if possible. In-place update — NOT
+            # add_client: re-adding an existing email deletes + re-adds
+            # the client, wiping its accounted traffic.
             if user.email:
                 try:
                     xui = self.bot.services.get('xui')
                     if xui:
-                        client = xui.get_client_sync(user.email)
-                        if client:
-                            client['limitIp'] = limit
-                            xui.add_client_sync(client, client.get('inbound_id', 1))
+                        xui.sync_client_settings_sync(
+                            user.email, {'limitIp': limit})
                 except Exception as e:
                     logger.warning(f"Could not update limit in X-UI: {e}")
         
@@ -289,16 +289,18 @@ class AdminUsersMixin(AdminHandlerBase):
             user.quota_gb += 100
             self.db.save_user(user)
         
-        # Update in X-UI
+        # Update in X-UI. Current quota comes from the accounting row
+        # (client_traffics.total) — the settings JSON can lag behind it.
+        # In-place update, NOT add_client (del+re-add wipes traffic).
         if target.email:
             try:
                 xui = self.bot.services.get('xui')
                 if xui:
-                    client = xui.get_client_sync(target.email)
-                    if client:
-                        current_total = client.get('totalGB', 0)
-                        client['totalGB'] = current_total + (100 * BYTES_PER_GB)
-                        xui.add_client_sync(client, client.get('inbound_id', 1))
+                    traffic = xui.get_client_traffic_sync(target.email) or {}
+                    current_total = int(traffic.get('total') or 0)
+                    xui.sync_client_settings_sync(
+                        target.email,
+                        {'totalGB': current_total + (100 * BYTES_PER_GB)})
             except Exception as e:
                 logger.warning(f"Could not update quota in X-UI: {e}")
         
@@ -329,13 +331,35 @@ class AdminUsersMixin(AdminHandlerBase):
         
         # Create/update subscription
         from datetime import datetime, timedelta
-        end_date = (datetime.now() + timedelta(days=30)).isoformat()
+        end_dt = datetime.now() + timedelta(days=30)
+        end_date = end_dt.isoformat()
         self.db.create_subscription(
             target.chat_id,
             plan_type='monthly',
             end_date=end_date
         )
-        
+
+        # users.subscription_expiry is what the hy2 auth gate and /sub
+        # check — without it the payment approval never actually
+        # extends access.
+        user = self.db.get_user(target.chat_id)
+        if user:
+            user.subscription_expiry = end_date
+            self.db.save_user(user)
+
+        # Mirror into the panel: re-enable + fresh expiry, so the
+        # depletion job doesn't keep the client cut off.
+        if target.email:
+            try:
+                xui = self.bot.services.get('xui')
+                if xui:
+                    xui.sync_client_settings_sync(
+                        target.email,
+                        {'expiryTime': int(end_dt.timestamp() * 1000),
+                         'enable': True})
+            except Exception as e:
+                logger.warning(f"approve_payment: x-ui sync failed: {e}")
+
         notifier = NotificationService(self.bot, self.db, self.config)
         lang = target.lang or 'ru'
         notifier.notify_payment_approved(target.chat_id, lang)

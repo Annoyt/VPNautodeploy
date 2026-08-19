@@ -209,13 +209,16 @@ class Settings:
             os.getenv('ALERT_TG_MIN_SEVERITY', 'critical') or 'critical'
         ).strip().lower()
 
-        # Demo limits
+        # Demo limits. Freemium: the demo allowance renews monthly (the
+        # demo_quota_reset job pushes expiry +30d on the 1st), so a fresh
+        # key must live at least until the next run — 7 days would strand
+        # mid-month signups until the next reset.
         try:
             self.DEMO_TRAFFIC_GB: int = int(os.getenv('DEMO_TRAFFIC_GB', '5'))
-            self.DEMO_DAYS: int = int(os.getenv('DEMO_DAYS', '7'))
+            self.DEMO_DAYS: int = int(os.getenv('DEMO_DAYS', '30'))
         except ValueError:
             self.DEMO_TRAFFIC_GB = 5
-            self.DEMO_DAYS = 7
+            self.DEMO_DAYS = 30
             
         # Rejection settings
         try:

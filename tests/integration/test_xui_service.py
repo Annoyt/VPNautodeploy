@@ -112,8 +112,10 @@ class TestXUIService:
         with patch.object(service_with_api.api, 'get_client_traffic', return_value=mock_traffic):
             result = await service_with_api.get_client_traffic('test@example.com')
         
-        # Service transforms 'up'->'upload', 'down'->'download' for consistency with DB format
-        expected = {'upload': 5000, 'download': 6000, 'total': 11000}
+        # Service transforms 'up'->'upload', 'down'->'download' for consistency
+        # with DB format, and passes panel-side state through for the hy2 gate.
+        expected = {'upload': 5000, 'download': 6000, 'total': 11000,
+                    'enable': True, 'expiry_time': 0}
         assert result == expected
     
     @pytest.mark.asyncio

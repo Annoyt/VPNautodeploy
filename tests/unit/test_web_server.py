@@ -256,3 +256,137 @@ class TestValidateInitData:
         """Test initData with invalid hash returns None."""
         result = server._validate_init_data("user=test&hash=invalid_hash")
         assert result is None
+
+
+class TestHy2AuthQuotaGate:
+    """Panel-side quota gate in /api/hy2/auth.
+
+    The bot.db status check said 'allow'; the gate must flip that to
+    deny when the panel reports the client disabled or over quota, and
+    must fail open when the panel has nothing to say.
+    """
+
+    def _make_server(self, traffic):
+        from unittest.mock import AsyncMock
+
+        config = Mock(spec=Settings)
+        config.BOT_TOKEN = "test_token"
+        config.is_admin = Mock(return_value=False)
+        config.ENTRY_NODE_IP = ''
+        config.EXIT_NODE_IP = ''
+
+        db = MagicMock(spec=Database)
+        conn = MagicMock()
+        conn.execute.return_value.fetchone.return_value = (
+            123, 'user_x_123@nekovo.ru', 'paid', None,
+        )
+        db._connect.return_value.__enter__.return_value = conn
+
+        xui = Mock()
+        xui.get_client_traffic = AsyncMock(return_value=traffic)
+        return WebAppServer(config, db, xui_service=xui)
+
+    async def _auth(self, server):
+        from unittest.mock import AsyncMock
+        request = Mock()
+        request.json = AsyncMock(return_value={'auth': 'some-uuid', 'addr': ''})
+        response = await server.handle_hy2_auth(request)
+        return json.loads(response.text)
+
+    @pytest.mark.asyncio
+    async def test_allow_under_quota(self):
+        server = self._make_server(
+            {'upload': 1, 'download': 2, 'total': 100, 'enable': True}
+        )
+        data = await self._auth(server)
+        assert data['ok'] is True
+
+    @pytest.mark.asyncio
+    async def test_deny_when_panel_disabled(self):
+        server = self._make_server(
+            {'upload': 1, 'download': 2, 'total': 100, 'enable': False}
+        )
+        data = await self._auth(server)
+        assert data['ok'] is False
+
+    @pytest.mark.asyncio
+    async def test_deny_when_over_quota(self):
+        server = self._make_server(
+            {'upload': 60, 'download': 41, 'total': 100, 'enable': True}
+        )
+        data = await self._auth(server)
+        assert data['ok'] is False
+
+    @pytest.mark.asyncio
+    async def test_unlimited_total_zero_allows(self):
+        server = self._make_server(
+            {'upload': 500, 'download': 500, 'total': 0, 'enable': True}
+        )
+        data = await self._auth(server)
+        assert data['ok'] is True
+
+    @pytest.mark.asyncio
+    async def test_fail_open_when_panel_has_no_record(self):
+        server = self._make_server(None)
+        data = await self._auth(server)
+        assert data['ok'] is True
+
+    @pytest.mark.asyncio
+    async def test_fail_open_when_panel_lookup_raises(self):
+        from unittest.mock import AsyncMock
+        server = self._make_server({})
+        server.xui.get_client_traffic = AsyncMock(
+            side_effect=Exception("panel down")
+        )
+        data = await self._auth(server)
+        assert data['ok'] is True
+
+
+class TestHy2AuthPaidTier:
+    """Hy2 is paid-tier: the auth callback must reject demo UUIDs even
+    when the user is otherwise active and under quota."""
+
+    def _make_server(self, status):
+        from unittest.mock import AsyncMock
+
+        config = Mock(spec=Settings)
+        config.BOT_TOKEN = "test_token"
+        config.is_admin = Mock(return_value=False)
+        config.ENTRY_NODE_IP = ''
+        config.EXIT_NODE_IP = ''
+
+        db = MagicMock(spec=Database)
+        conn = MagicMock()
+        conn.execute.return_value.fetchone.return_value = (
+            123, 'user_x_123@nekovo.ru', status, None,
+        )
+        db._connect.return_value.__enter__.return_value = conn
+
+        xui = Mock()
+        xui.get_client_traffic = AsyncMock(return_value={
+            'upload': 0, 'download': 0, 'total': 100, 'enable': True,
+        })
+        return WebAppServer(config, db, xui_service=xui)
+
+    async def _auth(self, server):
+        from unittest.mock import AsyncMock
+        request = Mock()
+        request.json = AsyncMock(return_value={'auth': 'some-uuid', 'addr': ''})
+        response = await server.handle_hy2_auth(request)
+        return json.loads(response.text)
+
+    @pytest.mark.asyncio
+    async def test_paid_allowed(self):
+        data = await self._auth(self._make_server('paid'))
+        assert data['ok'] is True
+
+    @pytest.mark.asyncio
+    async def test_support_topic_allowed(self):
+        # Mirrors PAID_USER_STATUSES in the subscription builder.
+        data = await self._auth(self._make_server('support_topic'))
+        assert data['ok'] is True
+
+    @pytest.mark.asyncio
+    async def test_demo_denied(self):
+        data = await self._auth(self._make_server('demo'))
+        assert data['ok'] is False

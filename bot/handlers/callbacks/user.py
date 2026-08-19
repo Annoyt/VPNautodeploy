@@ -412,7 +412,8 @@ class GetKeyHandler(BaseCallbackHandler):
             chat_id=chat_id,
             username=user.username,
             traffic_gb=self.config.DEMO_TRAFFIC_GB,
-            expiry_days=self.config.DEMO_DAYS
+            expiry_days=self.config.DEMO_DAYS,
+            comment=getattr(user, 'contact_email', None) or ''
         )
 
         user.uuid = client['id']
@@ -1296,7 +1297,6 @@ class StatsRequestHandler(BaseCallbackHandler):
     
     def _send_stats(self, chat_id: str) -> None:
         """Send stats to user."""
-        from bot.services.xui_db import XUIDatabase
         from bot.utils.helpers import format_bytes
 
         if self._is_admin(chat_id):
@@ -1313,12 +1313,26 @@ class StatsRequestHandler(BaseCallbackHandler):
             return
 
         try:
-            xui_db = XUIDatabase(self.config.XUI_DB_PATH)
-            traffic = xui_db.get_client_traffic(user.email)
+            # Through XUIService, not a raw XUIDatabase: on the entry
+            # node there is no local x-ui.db (API-only mode), and a raw
+            # connect used to fabricate an empty stub file there.
+            xui = None
+            if getattr(self.bot, 'services', None):
+                xui = self.bot.services.get('xui')
+            if xui is None:
+                from bot.services.xui_service import XUIService
+                xui = XUIService(self.config)
+            traffic = xui.get_client_traffic_sync(user.email)
 
             if traffic:
-                total_limit_bytes = self.config.DEMO_TRAFFIC_GB * 1024 * 1024 * 1024
-                used_traffic_bytes = traffic['upload'] + traffic['download']
+                used_traffic_bytes = (
+                    traffic.get('upload', 0) + traffic.get('download', 0)
+                )
+                # Real per-client quota from the panel; only fall back
+                # to the demo default when the panel has none.
+                total_limit_bytes = traffic.get('total') or (
+                    self.config.DEMO_TRAFFIC_GB * 1024 * 1024 * 1024
+                )
 
                 percentage = 0
                 if total_limit_bytes > 0:
@@ -1326,8 +1340,8 @@ class StatsRequestHandler(BaseCallbackHandler):
 
                 text = (
                     f"📊 <b>Your Traffic Stats</b>\n\n"
-                    f"⬆️ Upload: {format_bytes(traffic['upload'])}\n"
-                    f"⬇️ Download: {format_bytes(traffic['download'])}\n"
+                    f"⬆️ Upload: {format_bytes(traffic.get('upload', 0))}\n"
+                    f"⬇️ Download: {format_bytes(traffic.get('download', 0))}\n"
                     f"📈 Total Used: {format_bytes(used_traffic_bytes)} / {format_bytes(total_limit_bytes)}\n"
                     f"({percentage:.2f}%)"
                 )

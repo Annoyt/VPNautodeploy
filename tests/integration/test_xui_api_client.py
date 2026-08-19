@@ -158,6 +158,79 @@ class TestXUIAPIClientClientOperations:
         assert result is True
 
     @pytest.mark.asyncio
+    async def test_update_client_posts_flat_body_with_inbound_ids(self, client):
+        """The update endpoint reads a FLAT camelCase client body plus
+        inboundIds. Nesting it under "client" fails with "client email is
+        required", and snake_case total_gb is ignored — which silently
+        resets the quota to unlimited. Both verified on the live panel."""
+        mock_response = _create_mock_response(json_data={"success": True})
+        mock_session = MagicMock()
+        mock_session.post = MagicMock(
+            return_value=_create_async_context_mock(mock_response))
+
+        with patch.object(client, '_get_session', return_value=mock_session), \
+                patch.object(client, '_ensure_auth', new=AsyncMock(return_value=True)):
+            result = await client.update_client(
+                "user_bob_42@nekovo.ru",
+                {"email": "user_bob_42@nekovo.ru", "id": "abc-123",
+                 "totalGB": 500, "comment": "bob@gmail.com"},
+                [1, 4, 5, 6],
+            )
+
+        assert result is True
+        url = mock_session.post.call_args[0][0]
+        body = mock_session.post.call_args[1]["json"]
+        assert url.endswith("/panel/api/clients/update/user_bob_42%40nekovo.ru")
+        assert "client" not in body
+        assert body["totalGB"] == 500
+        assert body["comment"] == "bob@gmail.com"
+        assert body["inboundIds"] == [1, 4, 5, 6]
+
+    @pytest.mark.asyncio
+    async def test_reset_client_traffic_posts_to_fork_route(self, client):
+        """Traffic reset goes through the fork's relational client API
+        (/panel/api/clients/resetTraffic/{email}), email URL-escaped."""
+        mock_response = _create_mock_response(json_data={"success": True})
+        mock_session = MagicMock()
+        mock_session.post = MagicMock(
+            return_value=_create_async_context_mock(mock_response))
+
+        with patch.object(client, '_get_session', return_value=mock_session), \
+                patch.object(client, '_ensure_auth', new=AsyncMock(return_value=True)):
+            result = await client.reset_client_traffic("user_bob_42@nekovo.ru")
+
+        assert result is True
+        url = mock_session.post.call_args[0][0]
+        assert url.endswith(
+            "/panel/api/clients/resetTraffic/user_bob_42%40nekovo.ru")
+
+    @pytest.mark.asyncio
+    async def test_reset_client_traffic_reports_panel_failure(self, client):
+        mock_response = _create_mock_response(
+            json_data={"success": False, "msg": "record not found"})
+        mock_session = MagicMock()
+        mock_session.post = MagicMock(
+            return_value=_create_async_context_mock(mock_response))
+
+        with patch.object(client, '_get_session', return_value=mock_session), \
+                patch.object(client, '_ensure_auth', new=AsyncMock(return_value=True)):
+            assert await client.reset_client_traffic("nope@x") is False
+
+    @pytest.mark.asyncio
+    async def test_update_client_reports_panel_failure(self, client):
+        mock_response = _create_mock_response(
+            json_data={"success": False, "msg": "record not found"})
+        mock_session = MagicMock()
+        mock_session.post = MagicMock(
+            return_value=_create_async_context_mock(mock_response))
+
+        with patch.object(client, '_get_session', return_value=mock_session), \
+                patch.object(client, '_ensure_auth', new=AsyncMock(return_value=True)):
+            result = await client.update_client("nope@x", {"email": "nope@x"}, 1)
+
+        assert result is False
+
+    @pytest.mark.asyncio
     async def test_get_client_traffic_success(self, client):
         mock_response = _create_mock_response(json_data={
             "obj": [{

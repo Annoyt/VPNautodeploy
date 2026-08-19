@@ -514,8 +514,45 @@ class WebAppServer:
                             expired = True
                     except Exception:
                         pass
-                if not expired and status in ('demo', 'paid', 'support_topic'):
+                # Hy2 is a paid-tier protocol (PROTOCOL_TIER): demo
+                # subscriptions never contain hy2 links, so the auth
+                # callback must not accept demo UUIDs either — otherwise
+                # anyone who extracts their UUID from a free key gets a
+                # direct-to-entry transport the tier gate was supposed
+                # to withhold.
+                from bot.handlers.callbacks.user import MyKeyAnswerHandler
+                if (not expired
+                        and status in MyKeyAnswerHandler.PAID_USER_STATUSES):
                     decision = 'allow'
+
+        # Panel-side quota gate. Hy2 bytes are bridged into the panel's
+        # client_traffics on the exit host (hy2-traffic-collector), so
+        # the xray+hy2 quota is one shared counter there. Deny when the
+        # panel has disabled the client or the quota is spent — without
+        # this, an over-quota user kicked out of xray could still ride
+        # hy2 forever via reconnects. Panel unreachable → keep 'allow'
+        # (availability over enforcement; the exit-side kick loop still
+        # covers connected sessions).
+        if decision == 'allow' and email_id and self.xui:
+            try:
+                t = await self.xui.get_client_traffic(email_id)
+            except Exception as e:
+                logger.warning(f"hy2_auth: panel quota lookup failed: {e}")
+                t = None
+            if t:
+                # XUIService's API path speaks upload/download, its DB
+                # fallback up/down — accept both.
+                total = t.get('total') or 0
+                used = (
+                    (t.get('upload') or t.get('up') or 0)
+                    + (t.get('download') or t.get('down') or 0)
+                )
+                if t.get('enable') is False or (total > 0 and used >= total):
+                    decision = 'deny'
+                    logger.info(
+                        f"hy2_auth: quota gate deny {chat_id_str} "
+                        f"(used {used} of {total}, enable={t.get('enable')})"
+                    )
 
         # Pin the user's last geo (country / ASN / city / lat / lon)
         # whenever we know them — drives per-region cascade tuning
@@ -3179,7 +3216,8 @@ class WebAppServer:
                 return web.json_response(
                     {'error': 'set_expire: "value" must be YYYY-MM-DD'}, status=400
                 )
-            new_expiry = (dt + timedelta(hours=23, minutes=59)).isoformat()
+            end_of_day = dt + timedelta(hours=23, minutes=59)
+            new_expiry = end_of_day.isoformat()
             user.subscription_expiry = new_expiry
             await asyncio.to_thread(self.db.save_user, user)
             try:
@@ -3191,6 +3229,28 @@ class WebAppServer:
                     )
             except Exception as e:
                 logger.warning(f"set_expire: subscriptions update failed: {e}")
+            # Mirror the date into the panel client — otherwise 3x-ui
+            # keeps the old expiryTime and disables the key while the
+            # bot still considers the user paid (bit every paid user
+            # when their July grant lapsed).
+            xui = self.bot.services.get('xui') if self.bot else None
+            if xui and user.email:
+                try:
+                    ok = await asyncio.to_thread(
+                        xui.sync_client_settings_sync,
+                        user.email,
+                        {'expiryTime': int(end_of_day.timestamp() * 1000),
+                         'enable': True},
+                    )
+                    if not ok:
+                        logger.warning(
+                            f"set_expire: x-ui update returned False "
+                            f"for {target_chat_id}"
+                        )
+                except Exception as e:
+                    logger.warning(
+                        f"set_expire: x-ui update failed for {target_chat_id}: {e}"
+                    )
 
         # Post-action side effects (notifications, revoke side-effect for ACTION_STATE_MAP entries)
         await self._execute_action_side_effects(

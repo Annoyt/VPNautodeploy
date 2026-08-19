@@ -26,7 +26,11 @@ class XUIDatabase:
         The context manager guarantees the connection is closed afterwards,
         preventing leaked file descriptors from keeping the database locked.
         """
-        conn = sqlite3.connect(self.db_path)
+        # mode=rw: fail cleanly when the file is missing instead of
+        # letting sqlite create an empty database. A stray plain
+        # connect on the entry node's sentinel path once created a
+        # stub that silently re-enabled (broken) DB mode for a month.
+        conn = sqlite3.connect(f"file:{self.db_path}?mode=rw", uri=True)
         try:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.row_factory = sqlite3.Row

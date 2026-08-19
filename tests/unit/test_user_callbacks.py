@@ -731,15 +731,14 @@ class TestStatsRequestHandler:
         handler = StatsRequestHandler(mock_bot, mock_db, mock_config)
         mock_db.get_user = Mock(return_value=sample_user)
 
-        with patch('bot.services.xui_db.XUIDatabase') as MockXUI:
-            mock_xui_db = Mock()
-            mock_xui_db.get_client_traffic.return_value = {
-                'upload': 1024**3,  # 1 GB
-                'download': 2 * 1024**3,  # 2 GB
-            }
-            MockXUI.return_value = mock_xui_db
+        mock_xui = Mock()
+        mock_xui.get_client_traffic_sync.return_value = {
+            'upload': 1024**3,  # 1 GB
+            'download': 2 * 1024**3,  # 2 GB
+        }
+        mock_bot.services = {'xui': mock_xui}
 
-            handler._send_stats(sample_user.chat_id)
+        handler._send_stats(sample_user.chat_id)
 
         mock_bot.send_message.assert_called_once()
         text = mock_bot.send_message.call_args.kwargs.get('text', '')
@@ -755,15 +754,14 @@ class TestStatsRequestHandler:
         mock_config.DEMO_TRAFFIC_GB = 10
         mock_db.get_user = Mock(return_value=sample_user)
 
-        with patch('bot.services.xui_db.XUIDatabase') as MockXUI:
-            mock_xui_db = Mock()
-            mock_xui_db.get_client_traffic.return_value = {
-                'upload': 2.5 * 1024**3,  # 2.5 GB
-                'download': 2.5 * 1024**3,  # 2.5 GB
-            }
-            MockXUI.return_value = mock_xui_db
+        mock_xui = Mock()
+        mock_xui.get_client_traffic_sync.return_value = {
+            'upload': 2.5 * 1024**3,  # 2.5 GB
+            'download': 2.5 * 1024**3,  # 2.5 GB
+        }
+        mock_bot.services = {'xui': mock_xui}
 
-            handler._send_stats(sample_user.chat_id)
+        handler._send_stats(sample_user.chat_id)
 
         text = mock_bot.send_message.call_args.kwargs.get('text', '')
         # Should be 50% of 10 GB
@@ -774,12 +772,11 @@ class TestStatsRequestHandler:
         handler = StatsRequestHandler(mock_bot, mock_db, mock_config)
         mock_db.get_user = Mock(return_value=sample_user)
 
-        with patch('bot.services.xui_db.XUIDatabase') as MockXUI:
-            mock_xui_db = Mock()
-            mock_xui_db.get_client_traffic.return_value = None
-            MockXUI.return_value = mock_xui_db
+        mock_xui = Mock()
+        mock_xui.get_client_traffic_sync.return_value = None
+        mock_bot.services = {'xui': mock_xui}
 
-            handler._send_stats(sample_user.chat_id)
+        handler._send_stats(sample_user.chat_id)
 
         mock_bot.send_message.assert_called_once()
         text = mock_bot.send_message.call_args.kwargs.get('text', '')
@@ -790,12 +787,11 @@ class TestStatsRequestHandler:
         handler = StatsRequestHandler(mock_bot, mock_db, mock_config)
         mock_db.get_user = Mock(return_value=sample_user)
 
-        with patch('bot.services.xui_db.XUIDatabase') as MockXUI:
-            mock_xui_db = Mock()
-            mock_xui_db.get_client_traffic.side_effect = Exception("DB error")
-            MockXUI.return_value = mock_xui_db
+        mock_xui = Mock()
+        mock_xui.get_client_traffic_sync.side_effect = Exception("DB error")
+        mock_bot.services = {'xui': mock_xui}
 
-            handler._send_stats(sample_user.chat_id)
+        handler._send_stats(sample_user.chat_id)
 
         mock_bot.send_message.assert_called_once()
         text = mock_bot.send_message.call_args.kwargs.get('text', '')

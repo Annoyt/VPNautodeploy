@@ -6,7 +6,6 @@ from typing import Optional
 from bot.config import UserState
 from bot.handlers.base import BaseHandler
 from bot.services.notifications import NotificationService
-from bot.services.xui_db import XUIDatabase
 from bot.utils.helpers import format_bytes
 
 logger = logging.getLogger(__name__)
@@ -38,9 +37,21 @@ class CommandHandler(BaseHandler):
         message = update.get('message')
         if not message or 'text' not in message:
             return False
-        
+
         text = message.get('text', '')
-        return text.startswith('/')
+        if not text.startswith('/'):
+            return False
+
+        chat_type = (message.get('chat') or {}).get('type', 'private')
+        if chat_type == 'private':
+            return True
+        # In groups this handler only owns /admin (dashboard opener).
+        # The rest belongs to AdminHandler (registered before us) or
+        # ForumHandler (/close inside support topics, registered after
+        # us) — claiming every slash message here used to swallow
+        # /close and bounce "Unknown command" into the General topic.
+        command = text.split()[0].split('@')[0].lower()
+        return command == '/admin'
     
     def handle(self, update: dict) -> None:
         """Route command to appropriate handler.
@@ -206,29 +217,41 @@ class CommandHandler(BaseHandler):
                 return
 
             try:
-                xui_db = XUIDatabase(self.config.XUI_DB_PATH)
-                traffic = xui_db.get_client_traffic(user.email)
+                # Through XUIService, not a raw XUIDatabase: on the entry
+                # node there is no local x-ui.db (API-only mode), and a
+                # raw connect used to fabricate an empty stub file there.
+                xui = None
+                if getattr(self.bot, 'services', None):
+                    xui = self.bot.services.get('xui')
+                if xui is None:
+                    from bot.services.xui_service import XUIService
+                    xui = XUIService(self.config)
+                traffic = xui.get_client_traffic_sync(user.email)
 
                 if traffic:
-                    total_limit_bytes = self.config.DEMO_TRAFFIC_GB * 1024 * 1024 * 1024
-                    used_traffic_bytes = traffic['upload'] + traffic['download']
-                    
-                    # Calculate percentage
+                    used_traffic_bytes = (
+                        traffic.get('upload', 0) + traffic.get('download', 0)
+                    )
+                    # Real per-client quota from the panel; only fall
+                    # back to the demo default when the panel has none.
+                    total_limit_bytes = traffic.get('total') or (
+                        self.config.DEMO_TRAFFIC_GB * 1024 * 1024 * 1024
+                    )
+
                     percentage = 0
                     if total_limit_bytes > 0:
                         percentage = (used_traffic_bytes / total_limit_bytes) * 100
-                    
-                    # Prepare message
+
                     text = (
                         f"📊 <b>Your Traffic Stats</b>\n\n"
-                        f"⬆️ Upload: {format_bytes(traffic['upload'])}\n"
-                        f"⬇️ Download: {format_bytes(traffic['download'])}\n"
+                        f"⬆️ Upload: {format_bytes(traffic.get('upload', 0))}\n"
+                        f"⬇️ Download: {format_bytes(traffic.get('download', 0))}\n"
                         f"📈 Total Used: {format_bytes(used_traffic_bytes)} / {format_bytes(total_limit_bytes)}\n"
                         f"({percentage:.2f}%)"
                     )
                 else:
                     text = "Could not retrieve traffic statistics for your account."
-                
+
                 self.bot.send_message(chat_id=chat_id, text=text, parse_mode='HTML')
 
             except Exception as e:
@@ -549,6 +572,7 @@ class CommandHandler(BaseHandler):
         # panel identifier for keyless users.
         user.contact_email = email
         self.db.save_user(user)
+        self._push_panel_comment(user)
 
         lang = user.lang or 'ru'
         if lang == 'en':

@@ -4,10 +4,12 @@ import asyncio
 import json
 import logging
 from typing import Optional, List, Dict, Any
+from urllib.parse import quote
 import aiohttp
 from dataclasses import dataclass
 
 from bot.config import TIMEOUT_XUI_API
+from bot.utils.log_redaction import redact_email
 
 logger = logging.getLogger(__name__)
 
@@ -361,6 +363,11 @@ class XUIAPIClient:
                             "up": stats.get("up", 0),
                             "down": stats.get("down", 0),
                             "total": stats.get("total", 0),
+                            # Panel-side state: the depletion job flips
+                            # enable off when quota/expiry is hit; hy2
+                            # auth gates on it.
+                            "enable": stats.get("enable", True),
+                            "expiry_time": stats.get("expiryTime", 0),
                         }
             
             return None
@@ -463,6 +470,14 @@ class XUIAPIClient:
         generated, sending ``id`` preserves it) and honours ``password``
         (the SS-2022 per-user key). Preserving both keeps the bot's
         already-generated subscription links valid.
+
+        The numeric fields are emitted in BOTH camelCase and snake_case:
+        the current panel binary binds only the camelCase tags
+        (``totalGB``/``expiryTime``/``limitIp`` — verified against its
+        json struct tags; snake_case was silently dropped, which is how
+        every client since the API-mode switch ended up with an
+        unlimited quota). Unknown keys are ignored by Go's decoder, so
+        the duplicates are harmless on any panel build.
         """
         def _int(*keys):
             for k in keys:
@@ -473,6 +488,11 @@ class XUIAPIClient:
                     except (TypeError, ValueError):
                         return 0
             return 0
+        limit_ip = _int("limitIp", "limit_ip")
+        total_gb = _int("totalGB", "total_gb")
+        expiry_time = _int("expiryTime", "expiry_time")
+        tg_id = _int("tgId", "tg_id")
+        sub_id = cfg.get("subId") or cfg.get("sub_id") or ""
         return {
             "email": cfg.get("email", ""),
             # v3.4.0 add binds the client UUID from "id", not "uuid".
@@ -480,12 +500,17 @@ class XUIAPIClient:
             "password": cfg.get("password", ""),
             "flow": cfg.get("flow", ""),
             "security": cfg.get("security", "auto"),
-            "limit_ip": _int("limitIp", "limit_ip"),
-            "total_gb": _int("totalGB", "total_gb"),
-            "expiry_time": _int("expiryTime", "expiry_time"),
+            "limitIp": limit_ip,
+            "limit_ip": limit_ip,
+            "totalGB": total_gb,
+            "total_gb": total_gb,
+            "expiryTime": expiry_time,
+            "expiry_time": expiry_time,
             "enable": bool(cfg.get("enable", True)),
-            "tg_id": _int("tgId", "tg_id"),
-            "sub_id": cfg.get("subId") or cfg.get("sub_id") or "",
+            "tgId": tg_id,
+            "tg_id": tg_id,
+            "subId": sub_id,
+            "sub_id": sub_id,
             "comment": cfg.get("comment", ""),
             "reset": _int("reset"),
         }
@@ -536,6 +561,82 @@ class XUIAPIClient:
         except Exception as e:
             self.last_add_error = str(e)
             logger.error(f"Error adding client: {e}")
+            return False
+
+    async def update_client(self, email: str, client_config: dict,
+                            inbound_ids) -> bool:
+        """Update an existing client in place, keyed by email.
+
+        Unlike ``add_client`` this endpoint reads a FLAT classic client
+        body (camelCase ``totalGB``/``expiryTime``/...), not the nested
+        ``{"client": ...}`` v3.4.0 shape — sending the nested form fails
+        with "client email is required", and sending snake_case
+        ``total_gb`` is silently ignored and resets the quota to 0
+        (unlimited). Both verified against the live panel.
+
+        ``inbound_ids`` must list EVERY inbound the client is currently
+        attached to: the panel rewrites membership from this list, so a
+        partial list silently detaches the client from the rest.
+
+        The identifier in the path is the email, not the UUID.
+        """
+        if isinstance(inbound_ids, int):
+            inbound_ids = [inbound_ids]
+        try:
+            await self._ensure_auth()
+            session = await self._get_session()
+            payload = dict(client_config)
+            payload["inboundIds"] = [int(i) for i in inbound_ids]
+            url = self._clients_url(f"/update/{quote(email, safe='')}")
+            async with session.post(url, json=payload,
+                                    headers=self._auth_headers()) as response:
+                if response.status == 200:
+                    data = await response.json(content_type=None)
+                    if data.get("success"):
+                        logger.info(
+                            f"Updated client {redact_email(email)} "
+                            f"on inbounds {payload['inboundIds']}"
+                        )
+                        return True
+                    logger.warning(
+                        f"updateClient error: {data.get('msg', 'unknown')}"
+                    )
+                    return False
+                logger.warning(f"Failed to update client: HTTP {response.status}")
+                return False
+        except Exception as e:
+            logger.error(f"Error updating client: {e}")
+            return False
+
+    async def reset_client_traffic(self, email: str) -> bool:
+        """Zero a client's up/down counters, keyed by email.
+
+        ``POST /panel/api/clients/resetTraffic/{email}`` — the fork's
+        relational client API (the classic per-inbound
+        ``resetClientTraffic`` route does not exist on it). Used by the
+        monthly demo-quota refresh.
+        """
+        try:
+            await self._ensure_auth()
+            session = await self._get_session()
+            url = self._clients_url(f"/resetTraffic/{quote(email, safe='')}")
+            async with session.post(url,
+                                    headers=self._auth_headers()) as response:
+                if response.status == 200:
+                    data = await response.json(content_type=None)
+                    if data.get("success"):
+                        logger.info(f"Reset traffic for {redact_email(email)}")
+                        return True
+                    logger.warning(
+                        f"resetTraffic error: {data.get('msg', 'unknown')}"
+                    )
+                    return False
+                logger.warning(
+                    f"Failed to reset traffic: HTTP {response.status}"
+                )
+                return False
+        except Exception as e:
+            logger.error(f"Error resetting client traffic: {e}")
             return False
 
     async def del_client_by_email(self, email: str) -> bool:

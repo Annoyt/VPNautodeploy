@@ -580,26 +580,24 @@ class TestSetLimit:
         admin_handler.db.get_user = MagicMock(return_value=sample_active_user)
 
         mock_xui = MagicMock()
-        mock_xui.get_client_sync = MagicMock(return_value={
-            'email': 'active@example.com',
-            'limitIp': 1,
-            'inbound_id': 2
-        })
         admin_handler.bot.services = {'xui': mock_xui}
 
         admin_handler.set_limit('admin_chat', ['@activeuser', '5'])
 
-        # Should update X-UI
-        mock_xui.add_client_sync.assert_called_once()
-        call_args = mock_xui.add_client_sync.call_args[0][0]
-        assert call_args['limitIp'] == 5
+        # Should update X-UI in place (add_client would del+re-add the
+        # client and wipe its accounted traffic).
+        mock_xui.sync_client_settings_sync.assert_called_once()
+        email_arg, updates = mock_xui.sync_client_settings_sync.call_args[0]
+        assert updates['limitIp'] == 5
+        mock_xui.add_client_sync.assert_not_called()
 
     def test_set_limit_xui_failure_continues(self, admin_handler, sample_active_user):
         """Test set_limit continues even if X-UI update fails."""
         admin_handler._resolve_target = MagicMock(return_value=sample_active_user)
 
         mock_xui = MagicMock()
-        mock_xui.get_client_sync = MagicMock(side_effect=Exception("X-UI error"))
+        mock_xui.sync_client_settings_sync = MagicMock(
+            side_effect=Exception("X-UI error"))
         admin_handler.bot.services = {'xui': mock_xui}
 
         # Should not crash
@@ -691,21 +689,17 @@ class TestGrant100Gb:
         admin_handler._resolve_target = MagicMock(return_value=sample_active_user)
 
         mock_xui = MagicMock()
-        mock_xui.get_client_sync = MagicMock(return_value={
-            'email': 'active@example.com',
-            'totalGB': 10 * BYTES_PER_GB,
-            'inbound_id': 1
+        mock_xui.get_client_traffic_sync = MagicMock(return_value={
+            'upload': 0, 'download': 0, 'total': 10 * BYTES_PER_GB,
         })
         admin_handler.bot.services = {'xui': mock_xui}
 
         admin_handler.grant_100gb('admin_chat', ['@activeuser'])
 
         # Should update X-UI with correct byte arithmetic
-        call_args = mock_xui.add_client_sync.call_args[0]
-        new_total = call_args[0]['totalGB']
+        _email, updates = mock_xui.sync_client_settings_sync.call_args[0]
         # 10GB + 100GB = 110GB in bytes
-        expected = 110 * BYTES_PER_GB
-        assert new_total == expected
+        assert updates['totalGB'] == 110 * BYTES_PER_GB
 
     def test_grant_100gb_xui_byte_conversion(self, admin_handler, sample_active_user):
         """Test that X-UI quota uses correct BYTES_PER_GB constant."""
@@ -713,19 +707,16 @@ class TestGrant100Gb:
         admin_handler._resolve_target = MagicMock(return_value=sample_active_user)
 
         mock_xui = MagicMock()
-        mock_xui.get_client_sync = MagicMock(return_value={
-            'email': 'active@example.com',
-            'totalGB': 0,
-            'inbound_id': 1
+        mock_xui.get_client_traffic_sync = MagicMock(return_value={
+            'upload': 0, 'download': 0, 'total': 0,
         })
         admin_handler.bot.services = {'xui': mock_xui}
 
         admin_handler.grant_100gb('admin_chat', ['@activeuser'])
 
         # 100GB in bytes = 100 * 1024^3
-        expected_bytes = 100 * BYTES_PER_GB
-        call_args = mock_xui.add_client_sync.call_args[0]
-        assert call_args[0]['totalGB'] == expected_bytes
+        _email, updates = mock_xui.sync_client_settings_sync.call_args[0]
+        assert updates['totalGB'] == 100 * BYTES_PER_GB
 
     def test_grant_100gb_without_xui(self, admin_handler, sample_active_user):
         """Test grant_100gb when X-UI service is not available."""

@@ -9,7 +9,7 @@ import asyncio
 import concurrent.futures
 import json
 import os
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 from bot.config import Settings
 from bot.services.xui_api.client import XUIAPIClient, XUIClientConfig
@@ -102,7 +102,17 @@ class XUIService:
             if os.path.exists(config.XUI_DB_PATH):
                 self.db = XUIDatabase(config.XUI_DB_PATH)
                 logger.info(f"X-UI DB configured: {config.XUI_DB_PATH}")
-                self._validate_db_path(config.XUI_DB_PATH)
+                if not self._validate_db_path(config.XUI_DB_PATH):
+                    # Not a real x-ui database (e.g. an empty SQLite stub
+                    # accidentally created by a stray connect on the
+                    # sentinel path). Keeping db set would route every
+                    # db-first method into a dead end — the exact bug
+                    # that silently broke client removal on entry.
+                    self.db = None
+                    logger.warning(
+                        f"Disabling DB mode: {config.XUI_DB_PATH} is not an "
+                        "x-ui database. Falling back to API-only mode."
+                    )
             else:
                 logger.warning(
                     f"X-UI DB not found at {config.XUI_DB_PATH}. "
@@ -110,15 +120,20 @@ class XUIService:
                     "For DB access, ensure shared volume is mounted."
                 )
     
-    def _validate_db_path(self, db_path: str):
+    def _validate_db_path(self, db_path: str) -> bool:
         """Validate that configured DB path points to a real X-UI database.
-        
+
         Prevents the silent failure where bot writes to a stale bind mount
         while the 3x-ui container reads from its Docker volume.
+
+        Returns False only when the file is definitely not an x-ui
+        database (no ``inbounds`` table) — the caller then disables DB
+        mode entirely. Softer anomalies (no VLESS inbound, mount
+        mismatch) are logged but keep DB mode on.
         """
         try:
             import sqlite3
-            conn = sqlite3.connect(db_path)
+            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
             try:
                 c = conn.cursor()
                 # Check for inbounds table and at least one VLESS inbound
@@ -129,19 +144,19 @@ class XUIService:
                         "This is likely NOT the X-UI database the container uses. "
                         "Check XUI_DB_PATH env variable."
                     )
-                    return
+                    return False
                 c.execute("SELECT 1 FROM inbounds WHERE protocol = 'vless' LIMIT 1")
                 if not c.fetchone():
                     logger.error(
                         f"CRITICAL: {db_path} has no VLESS inbound. "
                         "X-UI may be using a different database file."
                     )
-                    return
+                    return True
             finally:
                 conn.close()
         except Exception as e:
             logger.error(f"Failed to validate X-UI DB path {db_path}: {e}")
-            return
+            return True
         
         # Cross-check against Docker volume if possible (only when docker CLI is available).
         # When the bot itself runs inside a container without docker-socket access, skip silently.
@@ -166,6 +181,7 @@ class XUIService:
                         )
             except Exception:
                 pass  # Docker call failed; non-fatal.
+        return True
     
     def _init_legacy(self, db_path: Optional[str], api_config: Optional[Dict[str, Any]]):
         """Initialize from legacy parameters (backward compatibility)."""
@@ -206,7 +222,12 @@ class XUIService:
                     return {
                         'upload': result.get('up', 0),
                         'download': result.get('down', 0),
-                        'total': result.get('total', 0)
+                        'total': result.get('total', 0),
+                        # Panel-side state, used by the hy2 auth quota
+                        # gate: enable flips off when the depletion job
+                        # cuts the client.
+                        'enable': result.get('enable', True),
+                        'expiry_time': result.get('expiry_time', 0),
                     }
             except Exception as e:
                 logger.warning(f"API traffic fetch failed for {redact_email(email)}: {e}")
@@ -655,6 +676,165 @@ class XUIService:
                 return c.get('id')
         return None
 
+    @staticmethod
+    def _find_client_by_email(inbound: dict, email: str) -> Optional[dict]:
+        """Return a client's whole classic dict from an inbound's settings.
+
+        ``update_client`` rewrites every field it's given, so callers need
+        the full current record (password, quota, expiry) to change one
+        field without clobbering the rest.
+        """
+        if not inbound:
+            return None
+        raw = inbound.get('settings')
+        try:
+            settings = json.loads(raw) if isinstance(raw, str) else (raw or {})
+        except (ValueError, TypeError):
+            return None
+        for c in settings.get('clients', []):
+            if c.get('email') == email:
+                return dict(c)
+        return None
+
+    def _client_inbound_ids(self, primary: int) -> List[int]:
+        """Full inbound set a bot-provisioned client belongs to: the
+        primary Reality inbound plus the CDN/Shadowsocks mirrors."""
+        inbound_ids = [primary]
+        for extra in (
+            int(getattr(self.config, 'WS_INBOUND_ID', 0) or 0),
+            int(getattr(self.config, 'SS_INBOUND_ID', 0) or 0),
+            int(getattr(self.config, 'WS2_INBOUND_ID', 0) or 0),
+        ):
+            if extra and extra not in inbound_ids:
+                inbound_ids.append(extra)
+        return inbound_ids
+
+    def set_client_comment_sync(self, email: str, comment: str) -> bool:
+        """Store a free-text note (we use the user's real contact email)
+        on the panel client so an operator can tell who a synthetic
+        ``user_<name>_<id>@nekovo.ru`` identifier belongs to.
+
+        The identifier itself is deliberately NOT changed: panel emails
+        are globally unique, so keying clients on a user-supplied address
+        would let two users collide — and the duplicate path in
+        ``_api_add_client_async`` resolves collisions by deleting the
+        existing client, which would hand one user's key to another.
+        """
+        if not self.api:
+            logger.error("No X-UI API configured; cannot set client comment")
+            return False
+        try:
+            return bool(self._run_sync(
+                self._set_client_comment_async(email, comment)
+            ))
+        except Exception as e:
+            logger.error(f"API set_client_comment failed: {e}")
+            return False
+
+    async def _set_client_comment_async(self, email: str, comment: str) -> bool:
+        iid = await self._resolve_inbound_id_async()
+        if iid is None:
+            return False
+        inbound_ids = self._client_inbound_ids(iid)
+        # Read the live record before writing. Prefer the Shadowsocks
+        # inbound: it's the only one whose settings carry the per-user
+        # SS-2022 password, and an update that omits it would break the
+        # user's ShadowTLS link.
+        ss_id = int(getattr(self.config, 'SS_INBOUND_ID', 0) or 0)
+        lookup_order = ([ss_id] if ss_id else []) + [
+            i for i in inbound_ids if i != ss_id
+        ]
+        client = None
+        for candidate in lookup_order:
+            inbound = await self.api.get_inbound(candidate)
+            client = self._find_client_by_email(inbound, email)
+            if client:
+                break
+        if client is None:
+            logger.warning(
+                f"set_client_comment: {redact_email(email)} not found in panel"
+            )
+            return False
+        if (client.get('comment') or '') == (comment or ''):
+            return True
+        client['comment'] = comment or ''
+        return await self.api.update_client(email, client, inbound_ids)
+
+    def renew_client_sync(self, email: str, expiry_ms: int,
+                          total_bytes: Optional[int] = None) -> bool:
+        """Monthly-refresh a panel client: new expiry, re-enable, zeroed
+        traffic (and optionally a fresh quota).
+
+        This is the API-mode replacement for the old direct x-ui.db
+        writes in the demo-quota job. Same read-modify-write shape as
+        ``set_client_comment_sync``: fetch the full live record first so
+        the update doesn't clobber the SS-2022 password or the quota.
+        """
+        if not self.api:
+            logger.error("No X-UI API configured; cannot renew client")
+            return False
+        try:
+            return bool(self._run_sync(
+                self._renew_client_async(email, expiry_ms, total_bytes)
+            ))
+        except Exception as e:
+            logger.error(f"API renew_client failed: {e}")
+            return False
+
+    async def _update_client_fields_async(self, email: str,
+                                          updates: dict) -> bool:
+        """Read-modify-write arbitrary client fields via the HTTP API.
+
+        The panel's update endpoint rewrites every field it's sent, so
+        the full live record is fetched first — from the SS inbound
+        when configured, because that's the only one whose settings
+        carry the per-user SS-2022 password.
+        """
+        iid = await self._resolve_inbound_id_async()
+        if iid is None:
+            return False
+        inbound_ids = self._client_inbound_ids(iid)
+        ss_id = int(getattr(self.config, 'SS_INBOUND_ID', 0) or 0)
+        lookup_order = ([ss_id] if ss_id else []) + [
+            i for i in inbound_ids if i != ss_id
+        ]
+        client = None
+        for candidate in lookup_order:
+            inbound = await self.api.get_inbound(candidate)
+            client = self._find_client_by_email(inbound, email)
+            if client:
+                break
+        if client is None:
+            logger.warning(
+                f"update_client_fields: {redact_email(email)} not found in panel"
+            )
+            return False
+        # The inbound-settings JSON can lag behind the relational
+        # tables (SQL-backfilled quotas never reach it). update_client
+        # rewrites every field, so a missing totalGB/expiryTime here
+        # would silently wipe the real quota — recover them from the
+        # panel's accounting row before applying the updates.
+        if not client.get('totalGB') or not client.get('expiryTime'):
+            traffic = await self.api.get_client_traffic(email)
+            if traffic:
+                if not client.get('totalGB') and traffic.get('total'):
+                    client['totalGB'] = int(traffic['total'])
+                if not client.get('expiryTime') and traffic.get('expiry_time'):
+                    client['expiryTime'] = int(traffic['expiry_time'])
+        client.update(updates)
+        return await self.api.update_client(email, client, inbound_ids)
+
+    async def _renew_client_async(self, email: str, expiry_ms: int,
+                                  total_bytes: Optional[int]) -> bool:
+        updates = {'expiryTime': int(expiry_ms), 'enable': True}
+        if total_bytes is not None:
+            updates['totalGB'] = int(total_bytes)
+        if not await self._update_client_fields_async(email, updates):
+            return False
+        # Zero the counters last: resetTraffic on the fork also re-arms
+        # the depletion state, so the user reconnects immediately.
+        return await self.api.reset_client_traffic(email)
+
     async def _api_add_client_async(self, client: dict, inbound_id: int = None) -> bool:
         iid = await self._resolve_inbound_id_async(inbound_id)
         if iid is None:
@@ -665,14 +845,7 @@ class XUIService:
         # fails as a duplicate). Attach to the full protocol set so the
         # new user gets every link in their subscription: primary Reality
         # + VMess/WS + Shadowsocks + VMess/xhttp.
-        inbound_ids = [iid]
-        for extra in (
-            int(getattr(self.config, 'WS_INBOUND_ID', 0) or 0),
-            int(getattr(self.config, 'SS_INBOUND_ID', 0) or 0),
-            int(getattr(self.config, 'WS2_INBOUND_ID', 0) or 0),
-        ):
-            if extra and extra not in inbound_ids:
-                inbound_ids.append(extra)
+        inbound_ids = self._client_inbound_ids(iid)
 
         # The Shadowsocks inbound authenticates by per-user password, not
         # UUID. Derive and attach it so the SS link works; if we can't,
@@ -727,21 +900,36 @@ class XUIService:
     
     def sync_client_settings_sync(self, email: str, updates: dict) -> bool:
         """Sync client settings (sync wrapper for backward compatibility).
-        
-        Updates client settings like expiryTime, limitIp, totalGB in X-UI.
-        This modifies the client's config in the inbound settings.
-        
+
+        Updates client settings like expiryTime, limitIp, totalGB, enable
+        in X-UI. API mode (bot on entry, no local x-ui.db) goes through
+        the panel's update endpoint; the DB path rewrites the inbound
+        settings JSON directly and reloads xray.
+
         Args:
             email: Client email
-            updates: Dict of settings to update (expiryTime, limitIp, totalGB)
-            
+            updates: Dict of settings to update (expiryTime, limitIp,
+                totalGB, enable)
+
         Returns:
             True if successful
         """
+        # API first: on entry the "local" x-ui.db is a stub file (an
+        # empty SQLite created by a stray connect), so self.db being
+        # set does NOT mean the DB path can work there.
+        if self.api:
+            try:
+                if self._run_sync(
+                    self._update_client_fields_async(email, dict(updates))
+                ):
+                    return True
+            except Exception as e:
+                logger.warning(f"API sync_client_settings failed: {e}")
+
         if not self.db:
             logger.error("No X-UI database configured for sync_client_settings_sync")
             return False
-        
+
         try:
             # Get current inbound settings
             settings = self.db.get_inbound_settings()
@@ -806,7 +994,7 @@ class XUIService:
         
         try:
             import sqlite3
-            conn = sqlite3.connect(db_path)
+            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
             c = conn.cursor()
             c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='inbounds'")
             if not c.fetchone():

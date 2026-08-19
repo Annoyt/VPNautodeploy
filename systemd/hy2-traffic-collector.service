@@ -1,0 +1,21 @@
+[Unit]
+Description=Hy2 traffic bridge: hysteria stats -> 3x-ui client_traffics (+quota kick)
+Documentation=https://v2.hysteria.network/docs/advanced/Traffic-Stats/
+After=hysteria.service docker.service
+Wants=hysteria.service
+
+[Service]
+Type=simple
+# HY2_STATS_SECRET (and optional overrides) live here, root-only.
+EnvironmentFile=/etc/hy2-collector.env
+ExecStart=/usr/bin/python3 /usr/local/bin/hy2_traffic_collector.py
+Restart=always
+RestartSec=10
+
+# Small footprint; it only talks to localhost and one sqlite file.
+MemoryMax=64M
+CPUQuota=20%
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

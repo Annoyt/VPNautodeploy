@@ -87,8 +87,9 @@ class TestAdminHandlerXUISyncMethods:
         handler = AdminHandler(bot, db, config)
         return handler
     
-    def test_set_limit_uses_get_client_sync(self, admin_handler):
-        """Test set_limit uses get_client_sync and add_client_sync."""
+    def test_set_limit_uses_in_place_update(self, admin_handler):
+        """set_limit must update in place — add_client on an existing
+        email deletes + re-adds the client, wiping accounted traffic."""
         # Setup
         user = MagicMock()
         user.chat_id = '123456'
@@ -98,24 +99,20 @@ class TestAdminHandlerXUISyncMethods:
         admin_handler.db.get_user.return_value = user
         
         mock_xui = MagicMock()
-        mock_xui.get_client_sync.return_value = {
-            'email': 'test@example.com',
-            'limitIp': 1,
-            'id': 'uuid-123',
-            'inbound_id': 1
-        }
-        mock_xui.add_client_sync.return_value = True
+        mock_xui.sync_client_settings_sync.return_value = True
         admin_handler.bot.services.get.return_value = mock_xui
         
         # Execute
         admin_handler.set_limit('admin_id', ['123456', '3'])
         
         # Verify correct methods were called
-        mock_xui.get_client_sync.assert_called_once_with('test@example.com')
-        mock_xui.add_client_sync.assert_called_once()
+        mock_xui.sync_client_settings_sync.assert_called_once_with(
+            'test@example.com', {'limitIp': 3})
+        mock_xui.add_client_sync.assert_not_called()
     
-    def test_grant_100gb_uses_get_client_sync(self, admin_handler):
-        """Test grant_100gb uses get_client_sync and add_client_sync."""
+    def test_grant_100gb_uses_in_place_update(self, admin_handler):
+        """grant_100gb reads the live quota from the accounting row and
+        updates in place (add_client would wipe accounted traffic)."""
         # Setup
         user = MagicMock()
         user.chat_id = '123456'
@@ -125,21 +122,20 @@ class TestAdminHandlerXUISyncMethods:
         admin_handler.db.get_user.return_value = user
         
         mock_xui = MagicMock()
-        mock_xui.get_client_sync.return_value = {
-            'email': 'test@example.com',
-            'totalGB': 5 * 1024**3,
-            'id': 'uuid-123',
-            'inbound_id': 1
+        mock_xui.get_client_traffic_sync.return_value = {
+            'upload': 0, 'download': 0, 'total': 5 * 1024**3,
         }
-        mock_xui.add_client_sync.return_value = True
+        mock_xui.sync_client_settings_sync.return_value = True
         admin_handler.bot.services.get.return_value = mock_xui
         
         # Execute
         admin_handler.grant_100gb('admin_id', ['123456'])
         
         # Verify correct methods were called
-        mock_xui.get_client_sync.assert_called_once_with('test@example.com')
-        mock_xui.add_client_sync.assert_called_once()
+        mock_xui.get_client_traffic_sync.assert_called_once_with('test@example.com')
+        mock_xui.sync_client_settings_sync.assert_called_once_with(
+            'test@example.com', {'totalGB': 105 * 1024**3})
+        mock_xui.add_client_sync.assert_not_called()
 
 
 class TestAdminHandlerErrorHandling:

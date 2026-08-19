@@ -820,15 +820,15 @@ class TestSetQuota:
         handler.db.save_user = Mock()
 
         mock_xui = Mock()
-        mock_xui.get_client_sync = Mock(return_value={'totalGB': 10737418240, 'inbound_id': 1})
-        mock_xui.add_client_sync = Mock()
+        mock_xui.sync_client_settings_sync = Mock(return_value=True)
         handler.bot.services = {'xui': mock_xui}
 
         handler.set_quota('test_chat', ['@user', '50'])
 
-        # Should have synced to x-ui
-        mock_xui.get_client_sync.assert_called_once_with('test@example.com')
-        assert mock_xui.add_client_sync.called
+        # Should have synced to x-ui in place (never via add_client,
+        # which deletes + re-adds and wipes accounted traffic).
+        mock_xui.sync_client_settings_sync.assert_called_once_with(
+            'test@example.com', {'totalGB': 50 * 1024 ** 3})
 
     def test_set_quota_xui_sync_failure(self, handler):
         """Test /quota handles x-ui sync failure gracefully."""
@@ -842,7 +842,7 @@ class TestSetQuota:
         handler.db.save_user = Mock()
 
         mock_xui = Mock()
-        mock_xui.get_client_sync = Mock(side_effect=Exception("x-ui down"))
+        mock_xui.sync_client_settings_sync = Mock(side_effect=Exception("x-ui down"))
         handler.bot.services = {'xui': mock_xui}
 
         handler.set_quota('test_chat', ['@user', '50'])
