@@ -247,3 +247,81 @@ class TestUserNotificationHelpers:
         assert 'my_key' in callbacks
         assert 'support' in callbacks
         assert 'full' in callbacks
+
+
+class TestResetPaidQuota:
+    """Monthly paid pass: counters reset, quota/expiry untouched,
+    lapsed subscriptions skipped."""
+
+    def _make_service(self, tmp_path, rows):
+        import sqlite3
+        from unittest.mock import Mock
+        from bot.services.notifications import NotificationService
+
+        db_path = str(tmp_path / "bot.db")
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            "CREATE TABLE users (chat_id TEXT, email TEXT, status TEXT, "
+            "subscription_expiry TEXT, traffic_up REAL, traffic_down REAL, "
+            "last_traffic_update TEXT)"
+        )
+        conn.executemany(
+            "INSERT INTO users (chat_id, email, status, subscription_expiry, "
+            "traffic_up, traffic_down) VALUES (?, ?, ?, ?, 1.5, 2.5)",
+            rows,
+        )
+        conn.commit()
+        conn.close()
+
+        svc = NotificationService(Mock(), Mock(), Mock())
+        return svc, db_path
+
+    def test_resets_active_paid_and_skips_lapsed(self, tmp_path):
+        import sqlite3
+        from unittest.mock import Mock
+
+        svc, db_path = self._make_service(tmp_path, [
+            ("1", "a@x", "paid", "2099-01-01T00:00:00"),   # active
+            ("2", "b@x", "paid", "2020-01-01T00:00:00"),   # lapsed — skip
+            ("3", "c@x", "paid", None),                    # no expiry — active
+            ("4", "d@x", "demo", None),                    # not paid — ignored
+        ])
+        xui = Mock()
+        xui.sync_client_settings_sync.return_value = True
+        xui.reset_client_traffic_sync.return_value = True
+
+        svc._reset_paid_quota_sync(xui, db_path)
+
+        reset_emails = [
+            c.args[0] for c in xui.reset_client_traffic_sync.call_args_list
+        ]
+        assert reset_emails == ["a@x", "c@x"]
+        # Re-enable only — quota amount and expiry stay admin-managed.
+        for c in xui.sync_client_settings_sync.call_args_list:
+            assert c.args[1] == {"enable": True}
+
+        conn = sqlite3.connect(db_path)
+        rows = dict(conn.execute(
+            "SELECT email, traffic_up + traffic_down FROM users").fetchall())
+        assert rows["a@x"] == 0 and rows["c@x"] == 0
+        assert rows["b@x"] == 4.0   # lapsed user untouched
+        assert svc.bot.send_message.call_count == 2
+
+    def test_panel_failure_keeps_counters(self, tmp_path):
+        import sqlite3
+        from unittest.mock import Mock
+
+        svc, db_path = self._make_service(tmp_path, [
+            ("1", "a@x", "paid", None),
+        ])
+        xui = Mock()
+        xui.sync_client_settings_sync.return_value = False   # panel said no
+
+        svc._reset_paid_quota_sync(xui, db_path)
+
+        xui.reset_client_traffic_sync.assert_not_called()
+        conn = sqlite3.connect(db_path)
+        up_down = conn.execute(
+            "SELECT traffic_up + traffic_down FROM users").fetchone()[0]
+        assert up_down == 4.0   # bot.db untouched on failure
+        svc.bot.send_message.assert_not_called()

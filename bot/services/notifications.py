@@ -786,12 +786,16 @@ class NotificationService:
             logger.exception(f"support-state repair failed: {e}")
 
     def _reset_demo_quota_sync(self):
-        """Monthly: reset traffic counters for demo users and extend expiry.
+        """Monthly: reset traffic counters for demo AND paid users.
 
         Freemium model: demo users get DEMO_TRAFFIC_GB every calendar
         month, forever. Per user the panel client is re-enabled, its
         expiry pushed 30 days forward (so 3x-ui does not purge it as
         "expired") and its traffic zeroed.
+
+        Paid users get their counters zeroed too (quota is "N GB per
+        month") — but their quota amount and paid-until date stay
+        admin-managed; see ``_reset_paid_quota_sync``.
 
         Primary path is the panel HTTP API (on entry the bot has no
         writable x-ui.db); the old direct-DB writes are kept as a
@@ -807,6 +811,15 @@ class NotificationService:
         if not bot_db_path:
             logger.warning("demo quota reset: DB_PATH not configured")
             return
+
+        xui = XUIService(self.config)
+
+        # Paid pass first — it must run even when there are no demo
+        # users (the demo pass below early-returns in that case).
+        try:
+            self._reset_paid_quota_sync(xui, bot_db_path)
+        except Exception as e:
+            logger.exception(f"paid quota reset failed: {e}")
 
         new_expiry_ms = int((datetime.utcnow() + timedelta(days=30)).timestamp() * 1000)
         demo_bytes = int(getattr(self.config, 'DEMO_TRAFFIC_GB', 5) or 5) * 1024 ** 3
@@ -826,7 +839,6 @@ class NotificationService:
             logger.info("demo quota reset: no demo users found")
             return
 
-        xui = XUIService(self.config)
         renewed = []   # [(chat_id, email)] that actually got refreshed
         if xui.api:
             for u in demo_users:
@@ -877,6 +889,92 @@ class NotificationService:
                 )
             except Exception as e:
                 logger.warning(f"demo quota reset: notify {email} failed: {e}")
+            _time.sleep(0.1)   # stay clear of Telegram's send rate limit
+
+    def _reset_paid_quota_sync(self, xui, bot_db_path: str) -> None:
+        """Monthly counter reset for paid users.
+
+        Paid quota is "N GB per month": on the 1st the counters go back
+        to zero and a depletion-disabled client is re-enabled. The quota
+        amount and the paid-until date are deliberately NOT touched —
+        those are admin-managed (/quota, /expire). Users whose
+        subscription already lapsed are skipped: payment, not the
+        calendar, brings them back.
+        """
+        import sqlite3
+        import time as _time
+        from datetime import datetime
+
+        try:
+            conn = sqlite3.connect(bot_db_path)
+            conn.row_factory = sqlite3.Row
+            paid_users = conn.execute(
+                "SELECT chat_id, email, subscription_expiry FROM users "
+                "WHERE status = 'paid' AND email IS NOT NULL"
+            ).fetchall()
+            conn.close()
+        except Exception as e:
+            logger.exception(f"paid quota reset: failed to read paid users: {e}")
+            return
+
+        if not paid_users:
+            return
+
+        now = datetime.utcnow()
+        renewed = []
+        for u in paid_users:
+            expiry = u['subscription_expiry']
+            if expiry:
+                try:
+                    if datetime.fromisoformat(expiry) < now:
+                        continue   # lapsed — stays off until re-payment
+                except ValueError:
+                    pass
+            try:
+                ok = (
+                    xui.sync_client_settings_sync(u['email'], {'enable': True})
+                    and xui.reset_client_traffic_sync(u['email'])
+                )
+            except Exception as e:
+                logger.warning(f"paid quota reset: {u['email']}: {e}")
+                ok = False
+            if ok:
+                renewed.append((u['chat_id'], u['email']))
+            else:
+                logger.warning(f"paid quota reset: renew failed for {u['email']}")
+
+        logger.info(
+            f"paid quota reset: {len(renewed)}/{len(paid_users)} paid clients reset"
+        )
+        if not renewed:
+            return
+
+        emails = [email for _, email in renewed]
+        try:
+            conn = sqlite3.connect(bot_db_path)
+            placeholders = ','.join('?' * len(emails))
+            conn.execute(
+                f"UPDATE users SET traffic_up = 0, traffic_down = 0, "
+                f"last_traffic_update = ? WHERE email IN ({placeholders})",
+                (now.isoformat(), *emails),
+            )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.exception(f"paid quota reset: bot.db update failed: {e}")
+
+        for chat_id, email in renewed:
+            try:
+                # Notify quietly; email-only users (chat_id "ext_…")
+                # simply fail here and that's fine.
+                self.bot.send_message(
+                    chat_id=chat_id,
+                    text="🔄 Ваш месячный трафик обновлён.\n"
+                         "Your monthly traffic has been refreshed.",
+                    parse_mode='HTML',
+                )
+            except Exception as e:
+                logger.warning(f"paid quota reset: notify {email} failed: {e}")
             _time.sleep(0.1)   # stay clear of Telegram's send rate limit
 
     def _reset_demo_quota_db_fallback(self, reset_emails, new_expiry_ms) -> bool:

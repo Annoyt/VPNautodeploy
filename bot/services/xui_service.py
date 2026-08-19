@@ -399,6 +399,15 @@ class XUIService:
         
         return False
     
+    def reset_client_traffic_sync(self, email: str) -> bool:
+        """Sync wrapper over reset_client_traffic for scheduler jobs."""
+        try:
+            return bool(self._run_sync(self.reset_client_traffic(email)))
+        except Exception as e:
+            logger.error(f"reset_client_traffic_sync failed for "
+                         f"{redact_email(email)}: {e}")
+            return False
+
     async def get_client(self, email: str) -> Optional[Dict]:
         """Get client information.
         
