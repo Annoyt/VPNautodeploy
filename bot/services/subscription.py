@@ -670,13 +670,27 @@ class SubscriptionService:
         # deployment has none.
         udp_out = calls_tag or 'proxy'
 
+        # Where RU-domestic QUIC should land: the home connection for RU
+        # users, the RU exit for foreigners — either way the same
+        # country as the TCP path for those sites.
+        ru_quic_out = ru_exit_tag if (lang == 'en' and ru_exit_tag) else 'direct'
+
         tg_cidr = list(self._TELEGRAM_IP_CIDRS)
         rules = [
             {'protocol': 'dns', 'outbound': 'dns-out'},
             # Explicit Direct mode wins (user chose "no VPN").
             {'clash_mode': 'Direct', 'outbound': 'direct'},
-            # ALL UDP → the UDP-native transport (Hy2/Reality). This sits
-            # ABOVE clash_mode Global on purpose: when the user manually
+            # RU-domestic HTTP/3 (QUIC = UDP:443) must NOT ride the
+            # blanket UDP rule below: VK sees the session's TCP from a
+            # home IP but its QUIC probes from the exit IP and shows
+            # the "VPN detected" banner. Port-scoped to 443 so Telegram
+            # P2P call media (random high UDP ports, even to RU
+            # residential peers) still tunnels past RKN's call
+            # throttle.
+            {'rule_set': list(self._DIRECT_RULE_SET_TAGS), 'network': 'udp',
+             'port': [443], 'outbound': ru_quic_out},
+            # ALL other UDP → the UDP-native transport (Hy2/Reality). This
+            # sits ABOVE clash_mode Global on purpose: when the user manually
             # picks a server in the client (Hiddify sets Global, routing
             # everything through that one outbound), call media would
             # otherwise go down whatever they picked — and a TCP-only

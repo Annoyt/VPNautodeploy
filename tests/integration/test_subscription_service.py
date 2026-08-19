@@ -528,6 +528,7 @@ class TestSubscriptionService:
         ru_direct_idx = min(
             i for i, r in enumerate(rules)
             if r.get('outbound') == 'direct' and 'rule_set' in r
+            and r.get('network') == 'tcp'
         )
         assert tg_idx < ru_direct_idx
 
@@ -542,13 +543,18 @@ class TestSubscriptionService:
             and 'geoip-ru' in r['rule_set']
         ]
         assert ru_direct, "expected an RU-direct rule"
-        assert all(r.get('network') == 'tcp' for r in ru_direct)
+        # TCP bypass + the port-443-scoped QUIC carve-out; nothing else.
+        for r in ru_direct:
+            assert r.get('network') == 'tcp' or (
+                r.get('network') == 'udp' and r.get('port') == [443]
+            )
 
     def test_ru_udp_never_direct(self, mock_config_full, sample_user_ru):
         """No UDP rule may send RU-domestic traffic direct (would be throttled).
 
-        The RU-direct bypass is TCP-only; RU UDP (incl. P2P call media to a
-        Russian peer) must fall to the blanket UDP rule and tunnel.
+        The RU-direct bypass is TCP-only (plus the port-443 QUIC carve-out);
+        RU UDP call media to a Russian peer must still fall to the blanket
+        UDP rule and tunnel.
         """
         service = SubscriptionService(mock_config_full)
         rules = self._rules(service, sample_user_ru)
@@ -556,8 +562,11 @@ class TestSubscriptionService:
         udp_direct = [
             r for r in rules
             if r.get('network') == 'udp' and r['outbound'] == 'direct'
+            and r.get('port') != [443]
         ]
-        assert not udp_direct, "UDP must never be routed direct"
+        assert not udp_direct, (
+            "UDP (other than the RU QUIC:443 carve-out) must never go direct"
+        )
 
     def test_foreign_peer_call_udp_tunneled(self, mock_config_full, sample_user_ru):
         """P2P call to a peer ABROAD: catch-all UDP must tunnel via UDP-native.
@@ -613,7 +622,10 @@ class TestSubscriptionService:
         rules = config['route']['rules']
 
         assert 'calls' not in outbounds
-        udp_rules = [r for r in rules if r.get('network') == 'udp']
+        udp_rules = [
+            r for r in rules
+            if r.get('network') == 'udp' and r.get('port') != [443]
+        ]
         assert udp_rules, "expected UDP routing rules"
         assert all(r['outbound'] == 'proxy' for r in udp_rules)
 
@@ -981,3 +993,59 @@ class TestSubscriptionService:
         assert getattr(config, 'HY2_SNI', '') or config.HY2_HOST
         assert getattr(config, 'WS_SNI', '') or config.WS_HOST
         assert getattr(config, 'WS2_SNI', '') or config.WS2_HOST
+
+
+class TestRuQuicCarveOut(TestSubscriptionService):
+    """RU-domestic HTTP/3 must not trip VK's 'VPN detected' banner.
+
+    VK probes the same session over TCP and QUIC; if TCP arrives from
+    the home IP but QUIC from the exit IP, the banner shows. The
+    carve-out sends RU QUIC (UDP:443) direct while every other UDP
+    packet still rides the UDP-native tunnel.
+    """
+
+    def _rules(self, service, user, protocols=('reality', 'hy2')):
+        return service.build_singbox_config(user, protocols)['route']['rules']
+
+    def test_ru_quic_direct_above_blanket_udp(self, mock_config_full,
+                                              sample_user_ru):
+        service = SubscriptionService(mock_config_full)
+        rules = self._rules(service, sample_user_ru)
+
+        quic = [
+            r for r in rules
+            if r.get('network') == 'udp' and r.get('port') == [443]
+            and 'rule_set' in r
+        ]
+        assert len(quic) == 1
+        assert quic[0]['outbound'] == 'direct'
+        assert 'geoip-ru' in quic[0]['rule_set']
+
+        blanket = next(
+            r for r in rules
+            if r.get('network') == 'udp'
+            and 'rule_set' not in r and 'ip_cidr' not in r
+        )
+        assert rules.index(quic[0]) < rules.index(blanket)
+
+    def test_en_user_ru_quic_goes_to_ru_exit(self, mock_config_full,
+                                             sample_user_en):
+        """Foreign users: RU QUIC must exit from Russia like their RU TCP
+        does — same-country consistency, no banner."""
+        service = SubscriptionService(mock_config_full)
+        config = service.build_singbox_config(sample_user_en, ('reality', 'hy2'))
+        rules = config['route']['rules']
+
+        quic = [
+            r for r in rules
+            if r.get('network') == 'udp' and r.get('port') == [443]
+            and 'rule_set' in r
+        ]
+        assert len(quic) == 1
+        ru_exit_tags = [
+            o['tag'] for o in config['outbounds'] if o['tag'].endswith('ru-exit')
+        ]
+        if ru_exit_tags:
+            assert quic[0]['outbound'] == ru_exit_tags[0]
+        else:
+            assert quic[0]['outbound'] == 'direct'
