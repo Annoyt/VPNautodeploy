@@ -89,12 +89,15 @@ class TestGrantPaidAccess:
     def test_reprovisions_purged_client_with_same_uuid(self):
         """Panel purged the client after a long lapse: the in-place
         update misses, so the grant re-adds with the SAME uuid — keys
-        the user already installed must start working again."""
+        the user already installed must start working again. The add
+        only re-attaches the relational record, so a SECOND in-place
+        update must follow to refresh the stale client_traffics row
+        that actually gates xray/hy2."""
         user = _user()
         db = MagicMock()
         db.get_user.return_value = user
         xui = Mock()
-        xui.sync_client_settings_sync.return_value = False
+        xui.sync_client_settings_sync.side_effect = [False, True]
         xui.add_client_sync.return_value = True
 
         with patch('bot.services.billing.StateMachine') as SM:
@@ -107,6 +110,24 @@ class TestGrantPaidAccess:
         assert client_cfg['email'] == 'u@x'
         assert client_cfg['totalGB'] == 100 * BYTES_PER_GB
         assert client_cfg['enable'] is True
+        assert xui.sync_client_settings_sync.call_count == 2
+
+    def test_reprovision_with_stale_accounting_reports_failure(self):
+        """Re-add succeeded but the follow-up accounting refresh did
+        not: the client stays gated (client_traffics.enable=0), so the
+        grant must report panel_ok=False, not claim success."""
+        user = _user()
+        db = MagicMock()
+        db.get_user.return_value = user
+        xui = Mock()
+        xui.sync_client_settings_sync.return_value = False
+        xui.add_client_sync.return_value = True
+
+        with patch('bot.services.billing.StateMachine') as SM:
+            SM.return_value.transition.return_value = True
+            result = grant_paid_access(db, _config(), xui, '42', PAID_UNTIL)
+
+        assert result['panel_ok'] is False
 
     def test_panel_failure_reported_not_raised(self):
         user = _user(status='paid')

@@ -828,7 +828,8 @@ class NotificationService:
             conn = sqlite3.connect(bot_db_path)
             conn.row_factory = sqlite3.Row
             demo_users = conn.execute(
-                "SELECT chat_id, email FROM users WHERE status = 'demo' AND email IS NOT NULL"
+                "SELECT chat_id, email, uuid FROM users "
+                "WHERE status = 'demo' AND email IS NOT NULL"
             ).fetchall()
             conn.close()
         except Exception as e:
@@ -842,12 +843,38 @@ class NotificationService:
         renewed = []   # [(chat_id, email)] that actually got refreshed
         if xui.api:
             for u in demo_users:
-                if xui.renew_client_sync(u['email'], new_expiry_ms,
-                                         total_bytes=demo_bytes):
+                ok = xui.renew_client_sync(u['email'], new_expiry_ms,
+                                           total_bytes=demo_bytes)
+                if not ok and u['uuid']:
+                    # The panel detaches long-expired clients from every
+                    # inbound, and a detached client is invisible to the
+                    # in-place renew — re-provision with the SAME uuid so
+                    # the user's installed keys come back to life. (11
+                    # revivals silently failed this way on 2026-08-19.)
+                    readded = xui.add_client_sync({
+                        'id': u['uuid'],
+                        'email': u['email'],
+                        'flow': 'xtls-rprx-vision',
+                        'limitIp': 1,
+                        'totalGB': demo_bytes,
+                        'expiryTime': new_expiry_ms,
+                        'enable': True,
+                    })
+                    if readded:
+                        # The add only re-attaches the relational client;
+                        # the stale client_traffics row (enable=0, old
+                        # expiry) still gates xray and hy2. The second
+                        # renew now finds the client and refreshes it.
+                        ok = xui.renew_client_sync(
+                            u['email'], new_expiry_ms,
+                            total_bytes=demo_bytes,
+                        )
+                if ok:
                     renewed.append((u['chat_id'], u['email']))
                 else:
                     logger.warning(
-                        f"demo quota reset: API renew failed for {u['email']}"
+                        f"demo quota reset: renew AND re-provision failed "
+                        f"for {u['email']}"
                     )
             logger.info(
                 f"demo quota reset: renewed {len(renewed)}/{len(demo_users)} "

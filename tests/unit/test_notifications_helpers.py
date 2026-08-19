@@ -393,3 +393,95 @@ class TestQuotaThresholdAlerts:
             {'unlim@x': ('1', 'demo'), 'low@x': ('2', 'demo')},
         )
         svc.bot.send_message.assert_not_called()
+
+
+class TestDemoResetReprovisionFallback:
+    """Monthly demo pass must revive clients the panel fully detached.
+
+    The in-place renew can't see a detached client; the job then
+    re-adds it with the SAME uuid and — critically — renews again,
+    because /clients/add re-attaches the relational record but leaves
+    the stale client_traffics row (enable=0, old expiry) that gates
+    xray and hy2. 11 revivals silently failed this way on 2026-08-19.
+    """
+
+    def _make(self, tmp_path, users):
+        import sqlite3
+        from unittest.mock import Mock
+        from bot.services.notifications import NotificationService
+
+        db_path = str(tmp_path / "bot.db")
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            "CREATE TABLE users (chat_id TEXT, email TEXT, uuid TEXT, "
+            "status TEXT, subscription_expiry TEXT, traffic_up REAL, "
+            "traffic_down REAL, last_traffic_update TEXT)"
+        )
+        conn.executemany(
+            "INSERT INTO users (chat_id, email, uuid, status) "
+            "VALUES (?, ?, ?, ?)", users)
+        conn.commit()
+        conn.close()
+
+        config = Mock()
+        config.DB_PATH = db_path
+        config.DEMO_TRAFFIC_GB = 10
+        svc = NotificationService(Mock(), Mock(), config)
+        return svc, db_path
+
+    def test_detached_client_readded_and_renewed_again(self, tmp_path):
+        from unittest.mock import Mock, patch
+
+        svc, _ = self._make(tmp_path, [
+            ("1", "detached@x", "uuid-1", "demo"),
+            ("2", "healthy@x", "uuid-2", "demo"),
+        ])
+        xui = Mock()
+        xui.api = Mock()
+        # detached@x: renew fails, re-add, second renew succeeds;
+        # healthy@x: renew succeeds first try.
+        xui.renew_client_sync.side_effect = [False, True, True]
+        xui.add_client_sync.return_value = True
+
+        with patch('bot.services.xui_service.XUIService', return_value=xui):
+            svc._reset_demo_quota_sync()
+
+        client_cfg = xui.add_client_sync.call_args.args[0]
+        assert client_cfg['id'] == 'uuid-1'
+        assert client_cfg['email'] == 'detached@x'
+        assert client_cfg['enable'] is True
+        assert xui.renew_client_sync.call_count == 3
+        # Both users refreshed → both notified.
+        assert svc.bot.send_message.call_count == 2
+
+    def test_readd_failure_leaves_user_unrenewed(self, tmp_path):
+        from unittest.mock import Mock, patch
+
+        svc, _ = self._make(tmp_path, [
+            ("1", "gone@x", "uuid-1", "demo"),
+        ])
+        xui = Mock()
+        xui.api = Mock()
+        xui.renew_client_sync.return_value = False
+        xui.add_client_sync.return_value = False
+
+        with patch('bot.services.xui_service.XUIService', return_value=xui):
+            svc._reset_demo_quota_sync()
+
+        svc.bot.send_message.assert_not_called()
+
+    def test_no_uuid_skips_readd(self, tmp_path):
+        from unittest.mock import Mock, patch
+
+        svc, _ = self._make(tmp_path, [
+            ("1", "nouuid@x", None, "demo"),
+        ])
+        xui = Mock()
+        xui.api = Mock()
+        xui.renew_client_sync.return_value = False
+        xui.add_client_sync.return_value = True
+
+        with patch('bot.services.xui_service.XUIService', return_value=xui):
+            svc._reset_demo_quota_sync()
+
+        xui.add_client_sync.assert_not_called()

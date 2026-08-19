@@ -87,7 +87,7 @@ def grant_paid_access(db, config, xui, chat_id: str,
                 # The panel purges clients that stay expired long
                 # enough — re-provision with the SAME uuid so keys the
                 # user already installed start working again.
-                ok = xui.add_client_sync({
+                readded = xui.add_client_sync({
                     'id': user.uuid,
                     'flow': 'xtls-rprx-vision',
                     'email': user.email,
@@ -96,6 +96,12 @@ def grant_paid_access(db, config, xui, chat_id: str,
                     'expiryTime': expiry_ms,
                     'enable': True,
                 }, int(getattr(config, 'INBOUND_ID', 1) or 1))
+                if readded:
+                    # add only re-attaches the relational client; the
+                    # stale client_traffics row (enable=0, old expiry)
+                    # still gates xray/hy2 until an in-place update
+                    # touches it — retry now that the client is visible.
+                    ok = xui.sync_client_settings_sync(user.email, updates)
             result['panel_ok'] = bool(ok)
         except Exception as e:
             result['panel_ok'] = False
