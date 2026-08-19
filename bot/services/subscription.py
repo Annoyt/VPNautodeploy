@@ -117,7 +117,6 @@ class SubscriptionService:
             'reality': vpn.generate_vless_link,
             'hy2': vpn.generate_hy2_link,
             'ws': vpn.generate_vless_ws_link,
-            'xhttp': vpn.generate_vmess_xhttp_link,
             'stls': vpn.generate_stls_link,
         }
         links: List[str] = []
@@ -183,7 +182,6 @@ class SubscriptionService:
         builders = {
             'reality': self._xray_reality,
             'ws': self._xray_ws,
-            'xhttp': self._xray_xhttp,
         }
         for proto in enabled_protocols:
             builder = builders.get(proto)

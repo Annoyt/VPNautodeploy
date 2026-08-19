@@ -614,7 +614,6 @@ class MyKeyAnswerHandler(BaseCallbackHandler):
     PROTOCOL_METHOD_MAP = {
         'stls':    'generate_stls_link',
         'ws':      'generate_vless_ws_link',
-        'xhttp':   'generate_vmess_xhttp_link',
         'hy2':     'generate_hy2_link',
         'reality': 'generate_vless_link',
     }
@@ -629,7 +628,6 @@ class MyKeyAnswerHandler(BaseCallbackHandler):
     PROTOCOL_TIER = {
         'stls':    'free',
         'ws':      'free',
-        'xhttp':   'free',
         'hy2':     'paid',
         'reality': 'paid',
     }
@@ -639,7 +637,7 @@ class MyKeyAnswerHandler(BaseCallbackHandler):
     # the direct-to-entry protocols. Reality empirically banned first
     # by RKN once a new entry IP is profiled, so it stays at the
     # bottom. Admin can override via dashboard.
-    DEFAULT_CASCADE_ORDER = ('stls', 'ws', 'xhttp', 'hy2', 'reality')
+    DEFAULT_CASCADE_ORDER = ('stls', 'ws', 'hy2', 'reality')
     SETTING_KEY = 'cascade_protocol_order'
     COUNTRY_SETTING_KEY = 'cascade_by_country'
     ASN_SETTING_KEY = 'cascade_by_asn'
@@ -652,16 +650,16 @@ class MyKeyAnswerHandler(BaseCallbackHandler):
     # the best throughput. The free-tier filter still applies on top
     # of whatever ladder is picked here.
     COUNTRY_CASCADE_DEFAULTS = {
-        'RU': ('stls', 'ws', 'xhttp', 'hy2', 'reality'),
-        'BY': ('stls', 'ws', 'xhttp', 'hy2', 'reality'),
-        'IR': ('stls', 'ws', 'xhttp', 'hy2', 'reality'),
-        'CN': ('stls', 'ws', 'xhttp', 'hy2', 'reality'),
+        'RU': ('stls', 'ws', 'hy2', 'reality'),
+        'BY': ('stls', 'ws', 'hy2', 'reality'),
+        'IR': ('stls', 'ws', 'hy2', 'reality'),
+        'CN': ('stls', 'ws', 'hy2', 'reality'),
         # Direct-first for less-censored regions.
-        'KZ': ('reality', 'hy2', 'stls', 'ws', 'xhttp'),
-        'UA': ('reality', 'hy2', 'stls', 'ws', 'xhttp'),
-        'KG': ('reality', 'hy2', 'stls', 'ws', 'xhttp'),
-        'AM': ('reality', 'hy2', 'stls', 'ws', 'xhttp'),
-        'GE': ('reality', 'hy2', 'stls', 'ws', 'xhttp'),
+        'KZ': ('reality', 'hy2', 'stls', 'ws'),
+        'UA': ('reality', 'hy2', 'stls', 'ws'),
+        'KG': ('reality', 'hy2', 'stls', 'ws'),
+        'AM': ('reality', 'hy2', 'stls', 'ws'),
+        'GE': ('reality', 'hy2', 'stls', 'ws'),
     }
 
     @classmethod

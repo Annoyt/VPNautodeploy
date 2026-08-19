@@ -340,15 +340,17 @@ class TestSubscriptionService:
         proxy = {o['tag']: o for o in config['outbounds']}['proxy']
         assert proxy['outbounds'] == ['direct']
 
-    def test_xhttp_still_offered_to_xray_clients(self, mock_config_full,
-                                                 sample_user_ru):
-        """Removing xhttp from the sing-box path must not remove it from
-        the Xray JSON, whose core does implement XHTTP."""
+    def test_xhttp_fully_retired(self, mock_config_full, sample_user_ru):
+        """xhttp is buried everywhere (2026-08-19): zero clients ever
+        used it — the inbound carried 0 bytes and sing-box apps can't
+        speak it at all. A stale 'xhttp' in a stored cascade order must
+        not resurrect it in any output format."""
         service = SubscriptionService(mock_config_full)
 
-        cfg = service.build_xray_config(sample_user_ru, ('xhttp',))
+        cfg = service.build_xray_config(sample_user_ru, ('xhttp', 'ws'))
         tags = [o.get('tag') for o in cfg['outbounds']]
-        assert any((t or '').endswith('-cdn-xhttp') for t in tags)
+        assert not any((t or '').endswith('-cdn-xhttp') for t in tags)
+        assert any((t or '').endswith('-cdn-ws') for t in tags)
 
     def test_stls_chained_outbounds(self, mock_config_full, sample_user_ru):
         """Test ShadowTLS+Shadowsocks chained outbounds"""

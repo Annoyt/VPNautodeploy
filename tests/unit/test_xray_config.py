@@ -73,18 +73,17 @@ class TestXrayConfig:
         assert rea['publicKey'] == 'pbk-main'
         assert rea['shortId'] == '037a08d118bfaafd'
 
-    def test_ws_and_xhttp(self):
+    def test_ws_present_xhttp_retired(self):
         cfg = SubscriptionService(make_config()).build_xray_config(
             make_user(), ('ws', 'xhttp'),
         )
         vmess = [o for o in cfg['outbounds'] if o.get('protocol') == 'vmess']
-        assert len(vmess) == 2
-        ws = [o for o in vmess if o['tag'].endswith('-cdn-ws')][0]
+        # xhttp retired 2026-08-19 — only the httpupgrade transport left.
+        assert len(vmess) == 1
+        ws = vmess[0]
+        assert ws['tag'].endswith('-cdn-ws')
         assert ws['streamSettings']['network'] == 'httpupgrade'
         assert ws['streamSettings']['httpupgradeSettings']['path'] == '/api/v1/forecast'
-        xh = [o for o in vmess if o['tag'].endswith('-cdn-xhttp')][0]
-        assert xh['streamSettings']['network'] == 'xhttp'
-        assert xh['streamSettings']['xhttpSettings']['mode'] == 'auto'
 
     def test_hy2_and_stls_are_skipped(self):
         cfg = SubscriptionService(make_config()).build_xray_config(

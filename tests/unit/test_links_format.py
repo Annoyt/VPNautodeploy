@@ -64,9 +64,11 @@ class TestLinksFormat:
             make_user(), ('reality', 'hy2', 'ws', 'xhttp'),
         )
         links = decode(out)
-        assert len(links) == 5  # 4 protocols + DE fallback (paid)
+        # xhttp retired 2026-08-19: even if a stored cascade still names
+        # it, no link is emitted. 3 live protocols + DE fallback (paid).
+        assert len(links) == 4
         schemes = [l.split('://')[0] for l in links]
-        assert schemes == ['vless', 'hysteria2', 'vmess', 'vmess', 'vless']
+        assert schemes == ['vless', 'hysteria2', 'vmess', 'vless']
 
     def test_reality_link_params(self):
         out = SubscriptionService(make_config()).build_links(

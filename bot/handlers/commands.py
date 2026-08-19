@@ -434,7 +434,7 @@ class CommandHandler(BaseHandler):
     # entry IP / hostname, so a screenshot or chat-leak hands the
     # infra address to anyone who sees it. They live exclusively
     # inside the encrypted subscription JSON.
-    _RAW_PROTOCOLS = ('stls', 'ws', 'xhttp')
+    _RAW_PROTOCOLS = ('stls', 'ws')   # xhttp retired 2026-08-19: zero clients ever used it
 
     def handle_raw(self, update: dict, chat_id: str) -> None:
         """Handle /raw command — opt-in fallback for clients that
