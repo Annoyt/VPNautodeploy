@@ -1,0 +1,14 @@
+[Unit]
+Description=Exit xray log -> bot DPI reporter (oneshot, timer-driven)
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# DPI_REPORT_TOKEN (and optional BOT_URL override) live here, root-only.
+EnvironmentFile=/etc/exit-dpi.env
+ExecStart=/usr/bin/python3 /usr/local/bin/exit_dpi_reporter.py
+
+MemoryMax=128M
+CPUQuota=30%
+NoNewPrivileges=true

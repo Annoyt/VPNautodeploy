@@ -93,6 +93,7 @@ class WebAppServer:
         # hysteria daemon calls this on every new connection. The
         # password (= user UUID) is the auth secret.
         self.app.router.add_post('/api/hy2/auth', self.handle_hy2_auth)
+        self.app.router.add_post('/api/dpi/exit_report', self.handle_dpi_exit_report)
         # Sing-box subscription endpoint. Public — the path token is
         # the auth (HMAC of the user's UUID with BOT_TOKEN as key).
         # Returns the user's full cascade as one config the client
@@ -607,6 +608,162 @@ class WebAppServer:
             )
         logger.info(f"hy2_auth: deny from {addr}")
         return web.json_response({'ok': False})
+
+    # Exit xray tags its inbounds "inbound-<port>"; map the known ports
+    # to the protocol names the rest of the heatmap uses. Unknown tags
+    # pass through raw so a new inbound is visible before we name it.
+    _EXIT_TAG_PROTO = {
+        'inbound-443': 'reality',
+        'inbound-2053': 'cf-ws',
+        'inbound-8444': 'ss2022',
+        'inbound-2054': 'xhttp',
+    }
+    _REJECT_KIND_TAG = {
+        'reality': 'reality',
+        'ss2022': 'ss2022',
+        'ws-upgrade': 'cf-ws',
+    }
+    # Users reach the exit through the entry node's DNAT+MASQUERADE, so
+    # their source IP is always a node IP. Bucketing that under its real
+    # geo would pin every user to the entry DC — use a marker bucket
+    # instead. A reject spike here still matters: probes that follow a
+    # user's handshake come through the same front door.
+    DPI_TUNNEL_BUCKET_CC = '*TUNNEL*'
+
+    async def handle_dpi_exit_report(self, request: web.Request) -> web.Response:
+        """Ingest the exit node's 5-min xray-log summary into dpi_metrics.
+
+        Posted by scripts/exit_dpi_reporter.py (systemd timer on the
+        exit host) — the only holder of the shared X-DPI-Token. The
+        entry node's own access/error logs never carried user traffic
+        (it's a DNAT front), so this feed is what makes the xray side
+        of the DPI heatmap real: per-protocol accept counts plus
+        scanner/probe rejects with their true source IPs.
+        """
+        expected = (getattr(self.config, 'DPI_REPORT_TOKEN', '') or '').strip()
+        got = request.headers.get('X-DPI-Token', '')
+        if not expected or not hmac.compare_digest(got, expected):
+            return web.json_response({'ok': False}, status=403)
+        try:
+            payload = await request.json()
+        except Exception:
+            return web.json_response({'ok': False}, status=400)
+
+        rows = await asyncio.to_thread(self._dpi_exit_rows, payload or {})
+        if rows:
+            try:
+                with self.db._connect() as conn:
+                    conn.executemany(
+                        "INSERT INTO dpi_metrics ("
+                        "snapshot_at, country, asn, as_org, inbound_tag, "
+                        "conn_count, avg_session_sec, short_session_count, "
+                        "rst_count, handshake_fail_count, "
+                        "probe_ips_json, reason_buckets_json) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        rows,
+                    )
+            except Exception as e:
+                logger.warning(f"dpi_exit_report: insert failed: {e}")
+                return web.json_response({'ok': False}, status=500)
+        return web.json_response({'ok': True, 'rows': len(rows)})
+
+    def _dpi_exit_rows(self, payload: dict) -> list:
+        """Geo-bucket the exit report into dpi_metrics row tuples."""
+        from datetime import datetime
+        ts = datetime.utcnow().isoformat()
+        node_ips = {ip for ip in (
+            (getattr(self.config, 'ENTRY_NODE_IP', '') or '').strip(),
+            (getattr(self.config, 'EXIT_NODE_IP', '') or '').strip(),
+        ) if ip}
+        try:
+            from bot.services.geoip import lookup as geo_lookup, lookup_asn
+        except Exception:
+            geo_lookup = lookup_asn = None
+
+        def geo_key(ip: str):
+            if not ip:
+                return (None, None, '')
+            if ip in node_ips:
+                return (self.DPI_TUNNEL_BUCKET_CC, None, 'entry-forward')
+            cc = asn = None
+            org = ''
+            try:
+                if geo_lookup:
+                    g = geo_lookup(ip)
+                    if g:
+                        cc = g[0]
+                if lookup_asn:
+                    a = lookup_asn(ip)
+                    if a:
+                        asn = a[0]
+                        org = a[1] if len(a) > 1 else ''
+            except Exception:
+                pass
+            return (cc, asn, org or '')
+
+        buckets: dict = {}
+
+        def bucket(key):
+            return buckets.setdefault(
+                key, {'conns': 0, 'fails': 0, 'ips': {}, 'reasons': {}}
+            )
+
+        for entry in (payload.get('access') or []):
+            raw_tag = entry.get('tag') or ''
+            tag = self._EXIT_TAG_PROTO.get(raw_tag, raw_tag)
+            if not tag:
+                continue
+            seen = 0
+            for ip, n in (entry.get('ips') or {}).items():
+                n = int(n or 0)
+                seen += n
+                b = bucket((*geo_key(ip), tag))
+                b['conns'] += n
+                if ip and ip not in node_ips:
+                    b['ips'][ip] = b['ips'].get(ip, 0) + n
+            # Connections beyond the reporter's per-bucket top-IP cap
+            # still count — they just lose their geo.
+            extra = max(0, int(entry.get('conns') or 0) - seen)
+            if extra:
+                bucket((None, None, '', tag))['conns'] += extra
+
+        for rej in (payload.get('rejects') or []):
+            raw_kind = rej.get('kind') or ''
+            tag = self._REJECT_KIND_TAG.get(raw_kind, raw_kind)
+            if not tag:
+                continue
+            reason = (rej.get('reason') or '')[:120]
+            seen = 0
+            for ip, n in (rej.get('ips') or {}).items():
+                n = int(n or 0)
+                seen += n
+                b = bucket((*geo_key(ip), tag))
+                b['fails'] += n
+                if ip and ip not in node_ips:
+                    b['ips'][ip] = b['ips'].get(ip, 0) + n
+                if reason:
+                    b['reasons'][reason] = b['reasons'].get(reason, 0) + n
+            extra = max(0, int(rej.get('count') or 0) - seen)
+            if extra:
+                b = bucket((None, None, '', tag))
+                b['fails'] += extra
+                if reason:
+                    b['reasons'][reason] = b['reasons'].get(reason, 0) + extra
+
+        rows = []
+        for (cc, asn, org, tag), b in buckets.items():
+            top_ips = sorted(b['ips'].items(), key=lambda kv: -kv[1])[:10]
+            rows.append((
+                ts, cc, asn, org, tag,
+                int(b['conns']),
+                None,  # avg_session_sec: access.log has no session end
+                0,     # short_session_count: same
+                0,     # rst_count: host row covers it
+                int(b['fails']),
+                json.dumps(top_ips) if top_ips else None,
+                json.dumps(b['reasons']) if b['reasons'] else None,
+            ))
+        return rows
 
     def _record_sub_fetch(
         self, chat_id: str, country, asn,

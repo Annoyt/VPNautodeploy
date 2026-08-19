@@ -392,3 +392,121 @@ class TestHy2AuthPaidTier:
     async def test_demo_denied(self):
         data = await self._auth(self._make_server('demo'))
         assert data['ok'] is False
+
+
+class TestDpiExitReport:
+    """POST /api/dpi/exit_report — the exit node's xray-log feed.
+
+    Token gate must be airtight (the endpoint is on the public web
+    server), node IPs must bucket as *TUNNEL* instead of leaking the
+    entry DC's geo, and scanner IPs must land in real geo buckets so
+    the probing alerts finally have countries to talk about.
+    """
+
+    ENTRY_IP = '130.49.146.10'
+
+    def _make_server(self, token='sekret'):
+        config = Mock(spec=Settings)
+        config.BOT_TOKEN = 'test_token'
+        config.is_admin = Mock(return_value=False)
+        config.ENTRY_NODE_IP = self.ENTRY_IP
+        config.EXIT_NODE_IP = '84.75.76.109'
+        config.DPI_REPORT_TOKEN = token
+
+        db = MagicMock(spec=Database)
+        conn = MagicMock()
+        db._connect.return_value.__enter__.return_value = conn
+        server = WebAppServer(config, db, xui_service=Mock())
+        return server, conn
+
+    def _request(self, payload, token='sekret'):
+        from unittest.mock import AsyncMock
+        request = Mock()
+        request.headers = {'X-DPI-Token': token} if token is not None else {}
+        request.json = AsyncMock(return_value=payload)
+        return request
+
+    @pytest.mark.asyncio
+    async def test_missing_token_rejected(self):
+        server, conn = self._make_server()
+        resp = await server.handle_dpi_exit_report(
+            self._request({'access': []}, token=None)
+        )
+        assert resp.status == 403
+        conn.executemany.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_wrong_token_rejected(self):
+        server, conn = self._make_server()
+        resp = await server.handle_dpi_exit_report(
+            self._request({'access': []}, token='nope')
+        )
+        assert resp.status == 403
+
+    @pytest.mark.asyncio
+    async def test_unconfigured_endpoint_rejects_everything(self):
+        # Blank server-side token = endpoint off, even for blank client
+        # tokens (no compare_digest('' , '') backdoor).
+        server, conn = self._make_server(token='')
+        resp = await server.handle_dpi_exit_report(
+            self._request({'access': []}, token='')
+        )
+        assert resp.status == 403
+
+    @pytest.mark.asyncio
+    async def test_report_written_with_geo_buckets(self):
+        server, conn = self._make_server()
+        payload = {
+            'access': [
+                {'tag': 'inbound-2053', 'conns': 5, 'uniq_emails': 2,
+                 'ips': {self.ENTRY_IP: 5}},
+            ],
+            'rejects': [
+                {'kind': 'reality', 'reason': 'failed to read client hello',
+                 'count': 3, 'ips': {'45.156.128.134': 3}},
+            ],
+        }
+        with patch('bot.services.geoip.lookup',
+                   return_value=('RU', '🇷🇺')), \
+             patch('bot.services.geoip.lookup_asn',
+                   return_value=('AS197068', 'RKN probing range')):
+            resp = await server.handle_dpi_exit_report(self._request(payload))
+        assert resp.status == 200
+        rows = conn.executemany.call_args[0][1]
+        by_bucket = {(r[1], r[4]): r for r in rows}
+        # tunneled users: *TUNNEL* bucket, tag mapped to cf-ws
+        tunnel = by_bucket[('*TUNNEL*', 'cf-ws')]
+        assert tunnel[5] == 5           # conn_count
+        assert tunnel[9] == 0           # handshake_fail_count
+        # scanner rejects: real geo, probe IPs and reasons preserved
+        probing = by_bucket[('RU', 'reality')]
+        assert probing[9] == 3
+        assert json.loads(probing[10]) == [['45.156.128.134', 3]]
+        assert json.loads(probing[11]) == {'failed to read client hello': 3}
+
+    @pytest.mark.asyncio
+    async def test_counts_beyond_ip_cap_fall_into_null_bucket(self):
+        server, conn = self._make_server()
+        payload = {
+            'access': [
+                # reporter capped the ip dict: 2 attributed, 7 total
+                {'tag': 'inbound-8444', 'conns': 7,
+                 'ips': {self.ENTRY_IP: 2}},
+            ],
+            'rejects': [],
+        }
+        resp = await server.handle_dpi_exit_report(self._request(payload))
+        assert resp.status == 200
+        rows = conn.executemany.call_args[0][1]
+        by_bucket = {(r[1], r[4]): r for r in rows}
+        assert by_bucket[('*TUNNEL*', 'ss2022')][5] == 2
+        assert by_bucket[(None, 'ss2022')][5] == 5
+
+    @pytest.mark.asyncio
+    async def test_empty_report_writes_nothing(self):
+        server, conn = self._make_server()
+        resp = await server.handle_dpi_exit_report(
+            self._request({'access': [], 'rejects': []})
+        )
+        assert resp.status == 200
+        conn.executemany.assert_not_called()

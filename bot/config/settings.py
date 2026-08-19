@@ -63,6 +63,9 @@ class Settings:
         # Exit node public IP — optional; used by hy2_auth to recognise
         # our own node traffic (geo lookup must not pin users to it).
         self.EXIT_NODE_IP: str = os.getenv('EXIT_NODE_IP', '')
+        # Shared secret for POST /api/dpi/exit_report (exit_dpi_reporter
+        # on the exit host). Blank = endpoint disabled (403 for all).
+        self.DPI_REPORT_TOKEN: str = os.getenv('DPI_REPORT_TOKEN', '')
         self.REALITY_PUBLIC_KEY: str = os.getenv('REALITY_PUBLIC_KEY', '')
         self.SNI_VALUE: str = os.getenv('SNI_VALUE', '')
         self.SID_VALUE: str = os.getenv('SID_VALUE', '')

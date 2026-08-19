@@ -1942,13 +1942,6 @@ class NotificationService:
     # possible from /proc/net/netstat alone).
     DPI_GLOBAL_BUCKET_CC = '*GLOBAL*'
 
-    # Inbound tag we attribute REALITY handshake failures to. error.log
-    # REALITY rejects don't carry the inbound tag (xray writes the
-    # global engine context), so we hand-pin this to the current Reality
-    # inbound id from x-ui. Update if the operator moves Reality off
-    # 8443. Misalignment with the live inbound only mismatches the
-    # heatmap bucket — it doesn't lose data.
-    REALITY_FAIL_INBOUND_TAG = 'inbound-8443'
     # Inbound tag for the Hysteria2 sidecar. It's not in Xray's access
     # log (separate binary), so we synthesise an inbound tag and roll
     # up hy2_auth_log into the same dpi_metrics table so the dashboard
@@ -1956,88 +1949,36 @@ class NotificationService:
     HY2_INBOUND_TAG = 'hy2-8400'
 
     def _dpi_collect_sync(self):
-        """Every 5 min: roll up access.log + error.log + hy2_auth_log
-        into dpi_metrics.
+        """Every 5 min: roll up hy2_auth_log + host TCP aborts into
+        dpi_metrics.
 
         Rows written:
 
-        1. **Per-(country, ASN, inbound_tag) rows from access.log** —
-           conn_count, short_session_count, avg_session_sec. With
-           Phase B the inbound_tag is parsed out of each log line so
-           ws/xhttp/ss-2022/Reality each get their own buckets.
-        2. **Per-(country, ASN) rows from error.log** — REALITY
-           handshake-failure counts. Pinned to REALITY_FAIL_INBOUND_TAG
-           because the error log doesn't carry the inbound tag itself.
-        3. **Per-(country, ASN) rows from hy2_auth_log** — Hy2 auth
+        1. **Per-(country, ASN) rows from hy2_auth_log** — Hy2 auth
            callbacks since the previous tick, attributed to
            HY2_INBOUND_TAG. Hysteria2 runs as a separate binary so
            it doesn't show up in Xray's access.log; without this
            step every Hy2 user is invisible to the heatmap.
-        4. **One global row** (``country=*GLOBAL*``) carrying the
+        2. **One global row** (``country=*GLOBAL*``) carrying the
            kernel TCP abort delta — host-wide DPI/health pulse.
+
+        The original access.log/error.log sources were RETIRED
+        2026-08-19: the entry node is a DNAT/HAProxy front whose local
+        xray never sees user traffic, so those files produced zero
+        rows for their entire lifetime (and the panel stopped writing
+        them altogether). The xray side of the heatmap now arrives
+        from the exit host via POST /api/dpi/exit_report
+        (scripts/exit_dpi_reporter.py).
         """
         try:
             import json
             from datetime import datetime
-            from bot.services.xray_log import (
-                summarize_dpi, summarize_handshake_failures,
-                read_tcp_abort_counters,
-            )
-            from bot.services.geoip import lookup as geo_lookup, lookup_asn
-
-            # access.log → per (cc, asn, inbound_tag)
-            traffic_buckets = summarize_dpi(
-                window_seconds=self.DPI_WINDOW_SEC,
-                geoip_lookup=geo_lookup,
-                asn_lookup=lookup_asn,
-            )
-            # error.log → per (cc, asn) Reality handshake failures
-            handshake_buckets = summarize_handshake_failures(
-                window_seconds=self.DPI_WINDOW_SEC,
-                geoip_lookup=geo_lookup,
-                asn_lookup=lookup_asn,
-            )
+            from bot.services.xray_log import read_tcp_abort_counters
 
             ts = datetime.utcnow().isoformat()
             rows = []
 
-            # 1. Per-inbound access.log rows.
-            for key, tb in traffic_buckets.items():
-                cc, asn, inbound_tag = key
-                avg_conns = tb.get('avg_conns_per_ip') or 0
-                avg_session = (
-                    self.DPI_WINDOW_SEC / avg_conns if avg_conns > 0 else None
-                )
-                rows.append((
-                    ts, cc, asn, tb.get('as_org') or '',
-                    inbound_tag or '',
-                    int(tb.get('conn_count') or 0),
-                    avg_session,
-                    int(tb.get('short_session_count') or 0),
-                    0,  # rst_count: needs eBPF; left 0
-                    0,  # handshake_fail_count: filled by the next loop
-                    None, None,
-                ))
-
-            # 2. error.log Reality rejects — own bucket since the log
-            # doesn't carry the inbound tag.
-            for key, hb in handshake_buckets.items():
-                cc, asn = key
-                probe_ips = hb.get('top_ips') or []
-                reason_buckets = hb.get('reason_buckets') or {}
-                rows.append((
-                    ts, cc, asn, hb.get('as_org') or '',
-                    self.REALITY_FAIL_INBOUND_TAG,
-                    0,           # conn_count: failures don't accept
-                    None,        # avg_session n/a
-                    0,           # short_session_count n/a
-                    0,           # rst_count n/a
-                    int(hb.get('fail_count') or 0),
-                    json.dumps(probe_ips) if probe_ips else None,
-                    json.dumps(reason_buckets) if reason_buckets else None,
-                ))
-
-            # 3. Hy2 — pull successful auths from hy2_auth_log since
+            # 1. Hy2 — pull successful auths from hy2_auth_log since
             # the previous snapshot, attribute to HY2_INBOUND_TAG.
             rows.extend(self._dpi_hy2_rows(ts))
 

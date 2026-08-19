@@ -152,6 +152,9 @@ services:
       - SMTP_PASSWORD=${SMTP_PASSWORD:-}
       - SMTP_FROM=${SMTP_FROM:-}
       - SMTP_FROM_NAME=${SMTP_FROM_NAME:-NekoVPN}
+      # Shared secret for the exit node's DPI log feed
+      # (POST /api/dpi/exit_report). Empty = endpoint disabled.
+      - DPI_REPORT_TOKEN=${DPI_REPORT_TOKEN:-}
       # Host-side Xray reload sidecar — see scripts/xray_reload.py.
       # Empty URL → reload becomes a no-op (debug/dev mode).
       - XRAY_RELOAD_URL=${XRAY_RELOAD_URL:-http://host.docker.internal:7079}
