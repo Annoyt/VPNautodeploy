@@ -114,6 +114,24 @@ class TestVPNServiceEdgeCases:
         # expiry_days defaults to None, which means 0 (no expiry)
         assert client['expiryTime'] == 0
     
+    def test_create_client_config_comment_carries_contact_email(self):
+        """The real address goes in the panel note, never in the key."""
+        config = MagicMock()
+        config.DEMO_TRAFFIC_GB = 5
+        vpn = VPNService(config)
+
+        client = vpn.create_client_config('123', username='bob',
+                                          comment='bob@gmail.com')
+        assert client['comment'] == 'bob@gmail.com'
+        assert client['email'] == 'user_bob_123@nekovo.ru'
+
+    def test_create_client_config_comment_defaults_empty(self):
+        config = MagicMock()
+        config.DEMO_TRAFFIC_GB = 5
+        vpn = VPNService(config)
+
+        assert vpn.create_client_config('123')['comment'] == ''
+
     def test_create_client_config_zero_expiry(self):
         """Test create_client_config with expiry_days=0."""
         config = MagicMock()

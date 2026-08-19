@@ -729,11 +729,19 @@ class SubscriptionService:
         isn't fully configured on this deployment."""
         uuid = user.uuid
         email_prefix = (user.email or 'user').split('@')[0]
+        # NOTE: 'xhttp' is deliberately absent. The :2054 inbound runs
+        # Xray's XHTTP transport, which sing-box does not implement at
+        # all — its similarly-named "http" transport is plain HTTP/2 and
+        # cannot talk to an XHTTP server. Emitting it here produced an
+        # outbound that could never connect, and it also polluted the
+        # 'auto' urltest ranking. Confirmed in prod: the :2054 inbound
+        # carried zero sessions while ShadowTLS/Reality carried all the
+        # traffic. Xray-core clients still get xhttp through
+        # build_xray_config and the share-links list.
         builders = {
             'reality': self._build_reality,
             'hy2': self._build_hy2,
             'ws': self._build_ws,
-            'xhttp': self._build_xhttp,
             'stls': self._build_stls,
         }
         builder = builders.get(proto)
@@ -811,12 +819,33 @@ class SubscriptionService:
         # the whole range to the exit's :8400 (iptables 'hy2-hop').
         hop = getattr(cfg, 'HY2_HOP_PORTS', '') or ''
         if hop:
-            ob['server_ports'] = [hop]
-            ob['hop_interval'] = '30s'
+            # The env value follows the hysteria2-URI ``mport`` convention
+            # (comma-separated, e.g. "443,20000:40000") because
+            # ``generate_hy2_link`` emits it verbatim. sing-box instead
+            # wants a LIST of "start:end" ranges and rejects both a
+            # comma-joined string and a bare port with "bad port range" —
+            # an error that aborts the ENTIRE config, not just this
+            # outbound. Split on commas and widen single ports.
+            ports = []
+            for part in hop.split(','):
+                part = part.strip()
+                if not part:
+                    continue
+                ports.append(part if ':' in part else f'{part}:{part}')
+            if ports:
+                ob['server_ports'] = ports
+                ob['hop_interval'] = '30s'
         return ob
 
     def _build_ws(self, uuid: str, name_prefix: str) -> Optional[dict]:
-        """VMess over httpupgrade through Cloudflare. ECH enabled."""
+        """VMess over httpupgrade through Cloudflare.
+
+        ECH is deliberately OFF. Enabling it without an inline config
+        makes sing-box fetch the key from a DNS HTTPS (type 65) record
+        first; RU/KZ mobile resolvers routinely drop that record type,
+        and the handshake then fails outright instead of degrading. The
+        SNI here is the CDN hostname anyway, so hiding it buys little.
+        """
         cfg = self.config
         host = getattr(cfg, 'WS_HOST', '') or ''
         if not host:
@@ -841,40 +870,6 @@ class SubscriptionService:
                 'enabled': True,
                 'server_name': sni,
                 'utls': {'enabled': True, 'fingerprint': 'chrome'},
-                'ech': {'enabled': True, 'pq_signature_schemes_enabled': False},
-                **self._TLS_FRAGMENT,
-            },
-        }
-
-    def _build_xhttp(self, uuid: str, name_prefix: str) -> Optional[dict]:
-        """VMess over xhttp through Cloudflare. ECH enabled."""
-        cfg = self.config
-        host = getattr(cfg, 'WS2_HOST', '') or ''
-        if not host:
-            return None
-        port = int(getattr(cfg, 'WS2_PORT', 443) or 443)
-        sni = getattr(cfg, 'WS2_SNI', host) or host
-        path = getattr(cfg, 'WS2_PATH', '/api/v2/observations') or '/'
-        return {
-            'type': 'vmess',
-            'tag': f'{name_prefix}-cdn-xhttp',
-            'server': host,
-            'server_port': port,
-            'uuid': uuid,
-            'security': 'auto',
-            'alter_id': 0,
-            'transport': {
-                'type': 'http',
-                'host': [host],
-                'path': path,
-                'method': 'GET',
-            },
-            'tls': {
-                'enabled': True,
-                'server_name': sni,
-                'utls': {'enabled': True, 'fingerprint': 'chrome'},
-                'ech': {'enabled': True, 'pq_signature_schemes_enabled': False},
-                'alpn': ['h2', 'http/1.1'],
                 **self._TLS_FRAGMENT,
             },
         }

@@ -53,12 +53,38 @@ class BaseHandler(ABC):
         """
         pass
     
+    def _push_panel_comment(self, user) -> None:
+        """Mirror the user's real contact email into their X-UI client's
+        note field, so an operator looking at the panel can tell whose
+        the synthetic ``user_<name>_<id>@nekovo.ru`` identifier is.
+
+        Best-effort by design: the address is already persisted in the
+        bot DB, so a panel hiccup must never fail the user-facing
+        "email saved" flow. Users without a key yet get the note at
+        provisioning time instead (``create_client_config(comment=…)``).
+        """
+        panel_email = getattr(user, 'email', None)
+        if not panel_email:
+            return
+        try:
+            xui = None
+            if hasattr(self.bot, 'services'):
+                xui = self.bot.services.get('xui')
+            if xui is None:
+                from bot.services.xui_service import XUIService
+                xui = XUIService(self.config)
+            xui.set_client_comment_sync(
+                panel_email, getattr(user, 'contact_email', '') or ''
+            )
+        except Exception as e:
+            logger.warning(f"panel comment update skipped: {e}")
+
     def _get_chat_id(self, update: dict) -> Optional[str]:
         """Extract chat_id from update.
-        
+
         Args:
             update: Telegram update object
-            
+
         Returns:
             Chat ID as string or None
         """

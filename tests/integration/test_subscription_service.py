@@ -34,6 +34,10 @@ class TestSubscriptionService:
         config.HY2_HOST = 'hy2.example.com'
         config.HY2_PORT = 8400
         config.HY2_SNI = 'hy2.example.com'
+        # Mirror the prod shape: obfs on, and hop ports in the
+        # comma-separated hysteria2-URI form the .env actually carries.
+        config.HY2_OBFS_PASSWORD = 'obfs_pass_123'
+        config.HY2_HOP_PORTS = '443,20000:40000'
         config.WS_HOST = 'cdn.example.com'
         config.WS_PORT = 2053
         config.WS_PATH = '/api/v1/forecast'
@@ -306,23 +310,45 @@ class TestSubscriptionService:
         assert ws['uuid'] == sample_user_ru.uuid
         assert ws['transport']['type'] == 'httpupgrade'
         assert ws['transport']['path'] == '/api/v1/forecast'
-        assert ws['tls']['ech']['enabled'] is True
 
-    def test_xhttp_outbound(self, mock_config_full, sample_user_ru):
-        """Test VMess over xhttp outbound"""
+    def test_ws_outbound_has_no_ech(self, mock_config_full, sample_user_ru):
+        """ECH must stay off: without an inline config sing-box first
+        fetches the key from a DNS HTTPS (type 65) record, which RU/KZ
+        mobile resolvers drop — the handshake then fails outright."""
+        service = SubscriptionService(mock_config_full)
+
+        config = service.build_singbox_config(sample_user_ru, ('ws',))
+        ws = {o['tag']: o for o in config['outbounds']}[
+            f'{sample_user_ru.email.split("@")[0]}-cdn-ws']
+        assert 'ech' not in ws['tls']
+
+    def test_xhttp_is_not_emitted_for_singbox(self, mock_config_full,
+                                              sample_user_ru):
+        """The :2054 inbound speaks Xray's XHTTP, which sing-box cannot
+        talk to (its "http" transport is plain HTTP/2). Emitting it gave
+        every sing-box client a permanently dead outbound that also
+        skewed the 'auto' urltest ranking. Xray-core clients still get
+        xhttp via build_xray_config and the share-links list."""
         service = SubscriptionService(mock_config_full)
 
         config = service.build_singbox_config(sample_user_ru, ('xhttp',))
-        outbounds = {o['tag']: o for o in config['outbounds']}
+        tags = [o['tag'] for o in config['outbounds']]
 
-        xhttp_tag = f'{sample_user_ru.email.split("@")[0]}-cdn-xhttp'
-        assert xhttp_tag in outbounds
+        assert not any(t.endswith('-cdn-xhttp') for t in tags)
+        # Cascade with only xhttp leaves no real proxy — must still be a
+        # loadable config rather than a broken one.
+        proxy = {o['tag']: o for o in config['outbounds']}['proxy']
+        assert proxy['outbounds'] == ['direct']
 
-        xhttp = outbounds[xhttp_tag]
-        assert xhttp['type'] == 'vmess'
-        assert xhttp['transport']['type'] == 'http'
-        assert xhttp['transport']['path'] == '/api/v2/observations'
-        assert xhttp['tls']['ech']['enabled'] is True
+    def test_xhttp_still_offered_to_xray_clients(self, mock_config_full,
+                                                 sample_user_ru):
+        """Removing xhttp from the sing-box path must not remove it from
+        the Xray JSON, whose core does implement XHTTP."""
+        service = SubscriptionService(mock_config_full)
+
+        cfg = service.build_xray_config(sample_user_ru, ('xhttp',))
+        tags = [o.get('tag') for o in cfg['outbounds']]
+        assert any((t or '').endswith('-cdn-xhttp') for t in tags)
 
     def test_stls_chained_outbounds(self, mock_config_full, sample_user_ru):
         """Test ShadowTLS+Shadowsocks chained outbounds"""
@@ -367,10 +393,14 @@ class TestSubscriptionService:
         assert selector['type'] == 'selector'
         assert selector['default'] == 'auto'
 
-        # Should include auto + all protocol outbounds
-        expected_outbound_count = 1 + len(protocols)  # auto + protocols
-        assert len(selector['outbounds']) == expected_outbound_count
+        # auto + every protocol sing-box can actually speak. 'xhttp' is
+        # skipped here by design (Xray-only transport), so it must not
+        # appear in the selector — a dead entry would still get ranked
+        # by the urltest and could be picked.
+        singbox_capable = [p for p in protocols if p != 'xhttp']
+        assert len(selector['outbounds']) == 1 + len(singbox_capable)
         assert 'auto' in selector['outbounds']
+        assert not any(t.endswith('-cdn-xhttp') for t in selector['outbounds'])
 
     def test_urltest_outbound(self, mock_config_full, sample_user_ru):
         """Test urltest auto-selector outbound"""
@@ -869,6 +899,43 @@ class TestSubscriptionService:
         # Should use default 8400
         outbound = service._build_hy2(user.uuid, 'test')
         assert outbound['server_port'] == 8400
+
+    @staticmethod
+    def _hy2_config(hop_ports):
+        config = Mock()
+        config.BOT_TOKEN = 'test'
+        config.WEBAPP_URL = 'https://example.com'
+        config.HY2_HOST = 'hy2.example.com'
+        config.HY2_PORT = 8400
+        config.HY2_SNI = 'hy2.example.com'
+        config.HY2_OBFS_PASSWORD = ''
+        config.HY2_HOP_PORTS = hop_ports
+        return config
+
+    def test_hop_ports_single_port_widened_to_range(self):
+        """A bare port must become "X:X" — sing-box rejects "443" with
+        "bad port range", and that error aborts the whole config."""
+        service = SubscriptionService(self._hy2_config('443'))
+        outbound = service._build_hy2('uuid', 'test')
+        assert outbound['server_ports'] == ['443:443']
+        assert outbound['hop_interval'] == '30s'
+
+    def test_hop_ports_comma_list_split_and_widened(self):
+        """The env uses the hysteria2-URI ``mport`` convention; sing-box
+        needs it split into separate range entries."""
+        service = SubscriptionService(self._hy2_config('443,20000:40000'))
+        outbound = service._build_hy2('uuid', 'test')
+        assert outbound['server_ports'] == ['443:443', '20000:40000']
+
+    def test_hop_ports_plain_range_unchanged(self):
+        service = SubscriptionService(self._hy2_config('20000:40000'))
+        outbound = service._build_hy2('uuid', 'test')
+        assert outbound['server_ports'] == ['20000:40000']
+
+    def test_hop_ports_blank_entries_ignored(self):
+        service = SubscriptionService(self._hy2_config(' , 443 , '))
+        outbound = service._build_hy2('uuid', 'test')
+        assert outbound['server_ports'] == ['443:443']
 
     def test_default_ws_port(self):
         """Test default WS port when not specified"""

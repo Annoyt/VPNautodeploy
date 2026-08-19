@@ -108,6 +108,7 @@ class MessageHandler(BaseHandler):
         # x-ui identifier and must never be overwritten by user input.
         user.contact_email = email
         self.db.save_user(user)
+        self._push_panel_comment(user)
         msg = (f"✅ Email сохранён: {email}\n\nИспользуем его для отправки "
                "резервного ключа если VPN заблокируют."
                if lang == 'ru' else

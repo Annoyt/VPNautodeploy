@@ -537,16 +537,22 @@ class VPNService:
         chat_id: str,
         username: Optional[str] = None,
         traffic_gb: int = None,
-        expiry_days: int = None
+        expiry_days: int = None,
+        comment: Optional[str] = None
     ) -> dict:
         """Create complete X-UI client configuration.
-        
+
         Args:
             chat_id: User's Telegram chat ID
             username: Optional Telegram username
             traffic_gb: Traffic limit in GB (default from config)
             expiry_days: Expiry in days (0 = no expiry)
-            
+            comment: Free-text panel note — we pass the user's real
+                contact email so an operator can map the synthetic
+                identifier back to a person. Never used as the client
+                key: panel emails are globally unique, so a
+                user-supplied address would let two users collide.
+
         Returns:
             X-UI client configuration dict
         """
@@ -575,7 +581,8 @@ class VPNService:
             "limitIp": 1,
             "totalGB": total_bytes,
             "expiryTime": expiry_timestamp,
-            "enable": True
+            "enable": True,
+            "comment": comment or ""
         }
     
     def get_client_info(self, client_config: dict) -> dict:
