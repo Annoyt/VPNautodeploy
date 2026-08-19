@@ -813,9 +813,14 @@ class AdminOpsMixin(AdminHandlerBase):
         except Exception:
             pass
 
-    def _provision_email_user(self, email: str, gb: int, days: int) -> Optional[str]:
+    def _provision_email_user(self, email: str, gb: int, days: int,
+                              status: str = 'paid') -> Optional[str]:
         """Create-or-update the email-only user + X-UI key. Returns the
         subscription URL. Raises on X-UI failure so the caller reports it.
+
+        ``status``: 'paid' for the manual /addmail grant (default),
+        'demo' for self-serve mail-intake approvals — freemium tier,
+        renewed monthly by the quota job like every other demo user.
         """
         import asyncio
         import binascii
@@ -867,10 +872,16 @@ class AdminOpsMixin(AdminHandlerBase):
         if not asyncio.run(xui.sync_user(target_chat, client)):
             raise RuntimeError("X-UI sync failed")
 
-        user.status = UserState.PAID.value
+        user.status = (UserState.DEMO.value if status == 'demo'
+                       else UserState.PAID.value)
         user.platform = user.platform or Platform.ANDROID.value
         user.quota_gb = float(gb)
-        user.subscription_expiry = (datetime.now() + timedelta(days=days)).isoformat()
+        # Demo is freemium: no paid-until date — the monthly job keeps
+        # pushing the panel expiry forward like for every demo user.
+        user.subscription_expiry = (
+            None if status == 'demo'
+            else (datetime.now() + timedelta(days=days)).isoformat()
+        )
         user.contact_email = email
         self.db.save_user(user)
 

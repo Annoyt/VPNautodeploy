@@ -909,11 +909,11 @@ class NotificationService:
             try:
                 # Notify user quietly; failures are non-fatal.
                 demo_gb = int(getattr(self.config, 'DEMO_TRAFFIC_GB', 10) or 10)
-                self.bot.send_message(
-                    chat_id=chat_id,
-                    text=f"🔄 Ваш тестовый трафик {demo_gb} ГБ обновлён на новый месяц.\n"
-                         f"Your {demo_gb} GB demo traffic has been refreshed for the new month.",
-                    parse_mode='HTML',
+                self._deliver_user_notice(
+                    chat_id,
+                    f"🔄 Ваш тестовый трафик {demo_gb} ГБ обновлён на новый месяц.\n"
+                    f"Your {demo_gb} GB demo traffic has been refreshed for the new month.",
+                    subject='NekoVPN — трафик обновлён',
                 )
             except Exception as e:
                 logger.warning(f"demo quota reset: notify {email} failed: {e}")
@@ -993,13 +993,12 @@ class NotificationService:
 
         for chat_id, email in renewed:
             try:
-                # Notify quietly; email-only users (chat_id "ext_…")
-                # simply fail here and that's fine.
-                self.bot.send_message(
-                    chat_id=chat_id,
-                    text="🔄 Ваш месячный трафик обновлён.\n"
-                         "Your monthly traffic has been refreshed.",
-                    parse_mode='HTML',
+                # Telegram for real chats, email for ext_* users.
+                self._deliver_user_notice(
+                    chat_id,
+                    "🔄 Ваш месячный трафик обновлён.\n"
+                    "Your monthly traffic has been refreshed.",
+                    subject='NekoVPN — трафик обновлён',
                 )
             except Exception as e:
                 logger.warning(f"paid quota reset: notify {email} failed: {e}")
@@ -1084,6 +1083,45 @@ class NotificationService:
         except Exception as e:
             logger.exception(f"demo quota reset: xray reload failed: {e}")
         return True
+
+    def _deliver_user_notice(self, chat_id, text: str,
+                             subject: str = 'NekoVPN') -> None:
+        """Send a lifecycle notice over the user's actual channel:
+        Telegram for real chats, email for ext_* users — email is their
+        ONLY channel, and before this every notice to them silently
+        died in send_message (the naumchik incident: five days of
+        denied hy2 retries with no way to hear about it)."""
+        chat = str(chat_id or '')
+        if not chat.startswith('ext_'):
+            self.bot.send_message(chat_id=chat_id, text=text,
+                                  parse_mode='HTML')
+            return
+        try:
+            mailer = None
+            if getattr(self.bot, 'services', None):
+                mailer = self.bot.services.get('email')
+            if not mailer or not mailer.is_configured():
+                return
+            with self.db._connect() as conn:
+                row = conn.execute(
+                    "SELECT contact_email FROM users WHERE chat_id = ?",
+                    (chat,),
+                ).fetchone()
+            contact = row[0] if row else None
+            if contact:
+                mailer.send_notice(contact, subject, text)
+        except Exception as e:
+            logger.warning(f"user notice via email failed for {chat}: {e}")
+
+    def _mail_intake_sync(self):
+        """Poll the service mailbox for key requests (see MailIntakeService)."""
+        try:
+            from bot.services.mail_intake import MailIntakeService
+            if getattr(self, '_mail_intake', None) is None:
+                self._mail_intake = MailIntakeService(self.bot, self.db, self.config)
+            self._mail_intake.poll_once()
+        except Exception as e:
+            logger.warning(f"mail_intake job failed: {e}")
 
     def _sync_traffic_to_botdb_sync(self):
         """Every 10 min: mirror panel traffic into users.traffic_up/down
@@ -1188,8 +1226,8 @@ class NotificationService:
                 # real dedup key, the window just has to outlast it.
                 if self.db.was_notified(chat_id, kind, hours=45 * 24):
                     continue
-                self.bot.send_message(chat_id=chat_id, text=text,
-                                      parse_mode='HTML')
+                self._deliver_user_notice(chat_id, text,
+                                          subject='NekoVPN — трафик')
                 self.db.mark_notified(chat_id, kind)
             except Exception as e:
                 logger.warning(f"quota alert for {email} failed: {e}")
@@ -1622,6 +1660,15 @@ class NotificationService:
             self._reset_demo_quota_sync,
             CronTrigger(day=1, hour=0, minute=0),
             id='demo_quota_reset',
+            replace_existing=True,
+        )
+        # Every 3 min: inbound-mail key requests → cards with approve
+        # buttons in the requests topic. First run only records the
+        # baseline; the mailbox backlog is never touched.
+        self.scheduler.add_job(
+            self._mail_intake_sync,
+            IntervalTrigger(minutes=3),
+            id='mail_intake',
             replace_existing=True,
         )
         # Every 10 min: pull per-client traffic from the panel into

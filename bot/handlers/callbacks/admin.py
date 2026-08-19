@@ -709,3 +709,120 @@ class BanFromTicketHandler(BaseCallbackHandler):
         # SOLVED archive, notify user, rename topic, close).
         from bot.handlers.forum import ForumHandler
         ForumHandler(self.bot, self.db, self.config).handle_close_ticket(update, topic_id)
+
+
+class MailRequestHandler(BaseCallbackHandler):
+    """«✅ Выдать / ❌ Отклонить» on inbound-mail key requests.
+
+    The card is posted by MailIntakeService into the requests topic;
+    approval provisions a DEMO-tier key (re-sends the existing key when
+    the address already belongs to a user — the provisioning path is
+    idempotent by contact_email) and emails it back.
+    """
+
+    CALLBACK_PATTERN = 'mailreq:'
+
+    def can_handle(self, callback_data: str) -> bool:
+        return callback_data.startswith(self.CALLBACK_PATTERN)
+
+    def handle(self, update: dict, chat_id: str, user_id: str, **kwargs) -> None:
+        try:
+            self.validator.validate_admin(user_id)
+        except PermissionDeniedError:
+            self._send_permission_denied(user_id)
+            return
+
+        data = kwargs.get('data', '')
+        parts = data.split(':')
+        if len(parts) != 3 or parts[1] not in ('ok', 'no'):
+            return
+        action, req_id = parts[1], parts[2]
+
+        callback = update.get('callback_query', {})
+        cb_id = callback.get('id')
+        message = callback.get('message', {}) or {}
+        thread_id = message.get('message_thread_id')
+
+        def reply(text: str) -> None:
+            self.bot.send_message(chat_id=chat_id, text=text,
+                                  parse_mode='HTML',
+                                  message_thread_id=thread_id)
+
+        with self.db._connect() as conn:
+            row = conn.execute(
+                "SELECT from_addr, status FROM email_requests WHERE id = ?",
+                (req_id,),
+            ).fetchone()
+        if not row:
+            if cb_id:
+                self.bot.answer_callback_query(cb_id, text="Заявка не найдена")
+            return
+        addr, status = row[0], row[1]
+        if status != 'pending':
+            if cb_id:
+                self.bot.answer_callback_query(
+                    cb_id, text=f"Уже обработано: {status}")
+            return
+
+        from datetime import datetime as _dt
+        new_status = 'approved' if action == 'ok' else 'rejected'
+        with self.db._connect() as conn:
+            conn.execute(
+                "UPDATE email_requests SET status = ?, decided_by = ?, "
+                "decided_at = ? WHERE id = ? AND status = 'pending'",
+                (new_status, str(user_id), _dt.utcnow().isoformat(), req_id),
+            )
+            conn.commit()
+
+        if action == 'no':
+            if cb_id:
+                self.bot.answer_callback_query(cb_id, text="Отклонено")
+            reply(f"❌ Заявка <code>{addr}</code> отклонена.")
+            return
+
+        if cb_id:
+            self.bot.answer_callback_query(cb_id, text="Выдаю ключ…")
+
+        demo_gb = int(getattr(self.config, 'DEMO_TRAFFIC_GB', 10) or 10)
+        try:
+            from bot.handlers.admin import AdminHandler
+            admin = AdminHandler(self.bot, self.db, self.config)
+            sub_url = admin._provision_email_user(
+                addr, demo_gb, 30, status='demo')
+        except Exception as e:
+            logger.exception("mailreq: provisioning failed")
+            reply(f"❌ Не удалось создать ключ для <code>{addr}</code>: "
+                  f"{str(e)[:150]}")
+            return
+        if not sub_url:
+            reply(f"❌ Ключ для <code>{addr}</code> создан, но ссылка не "
+                  "собралась (проверь WEBAPP_URL).")
+            return
+
+        mailer = None
+        if getattr(self.bot, 'services', None):
+            mailer = self.bot.services.get('email')
+        if mailer is None or not mailer.is_configured():
+            reply(f"⚠️ Ключ для <code>{addr}</code> создан, но SMTP не "
+                  "настроен — письмо не отправлено.")
+            return
+
+        import threading
+
+        def _worker() -> None:
+            ok = mailer.send_key(addr, sub_url, lang='ru')
+            if ok:
+                reply(f"✉️ Готово: демо-ключ ({demo_gb} ГБ/мес) отправлен "
+                      f"на <code>{addr}</code>.")
+            else:
+                reply(f"⚠️ Ключ для <code>{addr}</code> создан, но письмо "
+                      "не ушло — проверь SMTP, можно повторить /addmail.")
+
+        threading.Thread(target=_worker, daemon=True,
+                         name=f"mailreq-{req_id}").start()
+
+        try:
+            self.db.log_admin_action(str(user_id), 'mailreq_approve', addr,
+                                     f"demo {demo_gb}GB")
+        except Exception:
+            pass

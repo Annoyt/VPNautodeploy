@@ -34,6 +34,7 @@ from bot.handlers.callbacks.admin import (
     CloseTicketHandler,
     BanFromTicketHandler,
     AlertAckHandler,
+    MailRequestHandler,
 )
 from bot.handlers.callbacks.ai_model import AiModelSelectHandler
 
@@ -99,6 +100,7 @@ class CallbackDispatcher:
         self.handlers.append(CloseTicketHandler(self.bot, self.db, self.config))
         self.handlers.append(BanFromTicketHandler(self.bot, self.db, self.config))
         self.handlers.append(AlertAckHandler(self.bot, self.db, self.config))
+        self.handlers.append(MailRequestHandler(self.bot, self.db, self.config))
         self.handlers.append(AiModelSelectHandler(self.bot, self.db, self.config))
 
         logger.info(f"Registered {len(self.handlers)} callback handlers")

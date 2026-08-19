@@ -208,6 +208,13 @@ class EmailService:
         subject, body = _key_email(sub_url, lang, platform)
         return self._send(to_addr, subject, body)
 
+    def send_notice(self, to_addr: str, subject: str, body: str) -> bool:
+        """Plain transactional notice (quota warnings, renewals, request
+        replies) for users whose only channel is email. Same relay path
+        as the key letter; no per-user rate limit — callers de-dupe.
+        """
+        return self._send(to_addr, subject, body)
+
     def _send(self, to_addr: str, subject: str, body: str) -> bool:
         if not self.is_configured():
             logger.warning("email: SMTP_HOST not configured, drop send")
