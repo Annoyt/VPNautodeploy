@@ -50,6 +50,8 @@ def mock_config():
 @pytest.fixture
 def admin_handler(mock_bot, mock_db, mock_config):
     handler = AdminHandler(mock_bot, mock_db, mock_config)
+    # /onlines lastOnline source: no panel rows in unit context.
+    mock_bot.services.get('xui')._run_sync = Mock(return_value=[])
     return handler
 
 
@@ -142,7 +144,7 @@ class TestShowOnlines:
                 admin_handler.db.get_all_users = Mock(return_value=[
                     User(chat_id='123', username='testuser', email='user@example.com', quota_gb=100)
                 ])
-                admin_handler.bot.services.get('xui').db.get_all_client_traffic = Mock(return_value={
+                admin_handler.bot.services.get('xui').get_all_traffic = Mock(return_value={
                     'user@example.com': {'upload': 0, 'download': 5 * 1024**3}
                 })
 
@@ -161,7 +163,7 @@ class TestShowOnlines:
                     admin_handler.db.get_all_users = Mock(return_value=[
                         User(chat_id='123', email='user@example.com')
                     ])
-                    admin_handler.bot.services.get('xui').db.get_all_client_traffic = Mock(return_value={})
+                    admin_handler.bot.services.get('xui').get_all_traffic = Mock(return_value={})
 
                     admin_handler.show_onlines('123', [])
 
@@ -183,7 +185,7 @@ class TestShowOnlines:
                     admin_handler.db.get_all_users = Mock(return_value=[
                         User(chat_id='123', email='user@example.com', limit_ip=1)
                     ])
-                    admin_handler.bot.services.get('xui').db.get_all_client_traffic = Mock(return_value={})
+                    admin_handler.bot.services.get('xui').get_all_traffic = Mock(return_value={})
 
                     admin_handler.show_onlines('123', [])
 

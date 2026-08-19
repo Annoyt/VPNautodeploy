@@ -254,6 +254,28 @@ services:
     ports:
       - "${WEB_BIND:-127.0.0.1}:8080:8080"
 
+  # Probe sidecar: one HTTP-proxy inbound per VPN protocol, each routed
+  # through the REAL outbound (reality/hy2/ws/stls) using the dedicated
+  # probe_internal panel client. HealthChecker requests its targets
+  # through these proxies, so outbound_health finally reflects the
+  # tunnels instead of the entry node's own connectivity.
+  # Config is generated, not hand-written:
+  #   docker exec vpn-bot python3 scripts/gen_probe_config.py \
+  #     > probe-proxy/config.json && docker compose up -d probe-proxy
+  # Image is PINNED (the 3x-ui:latest incident, 2026-07-19: a compose
+  # recreate silently pulled a breaking major).
+  probe-proxy:
+    image: ghcr.io/sagernet/sing-box:v1.11.15
+    container_name: probe-proxy
+    restart: unless-stopped
+    command: ["run", "-c", "/etc/sing-box/config.json"]
+    volumes:
+      - ./probe-proxy:/etc/sing-box:ro
+    networks:
+      - vpn-net
+    # No published ports: only vpn-bot talks to it, over the compose
+    # network (probe-proxy:18081..18084).
+
 volumes:
   3xui-data:
     driver: local

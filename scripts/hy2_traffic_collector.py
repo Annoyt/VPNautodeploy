@@ -101,9 +101,9 @@ def apply_deltas(pending: dict) -> dict:
                 if tx == 0 and rx == 0:
                     continue
                 cur = conn.execute(
-                    "UPDATE client_traffics SET up = up + ?, down = down + ? "
-                    "WHERE email = ?",
-                    (rx, tx, email),
+                    "UPDATE client_traffics SET up = up + ?, down = down + ?, "
+                    "last_online = ? WHERE email = ?",
+                    (rx, tx, int(time.time() * 1000), email),
                 )
                 if cur.rowcount == 0:
                     # No accounting row → cannot meter this id at all.

@@ -253,6 +253,29 @@ class AdminOpsMixin(AdminHandlerBase):
             source_errors['xui_api'] = str(e)[:100]
             logger.warning(f"/onlines: xui api failed: {e}")
 
+        # lastOnline from the panel's accounting rows. The fork's
+        # /onlines endpoint returns [] — but clientStats.lastOnline is
+        # maintained live by the panel stats job (and by the hy2 bridge
+        # for hysteria-only users), so it is the authoritative "online"
+        # signal in API mode.
+        last_online_min: dict = {}
+        try:
+            if xui and getattr(xui, 'api', None):
+                import time as _time
+                now_ms = _time.time() * 1000
+                for ib in (xui._run_sync(xui.api.get_inbounds()) or []):
+                    for cs in (ib.get('clientStats') or []):
+                        lo = cs.get('lastOnline') or 0
+                        if lo and now_ms - lo < 5 * 60 * 1000:
+                            em = cs.get('email')
+                            age = int((now_ms - lo) / 60000)
+                            if em and (em not in last_online_min
+                                       or age < last_online_min[em]):
+                                last_online_min[em] = age
+                source_status['xui_api'] = '✓'
+        except Exception as e:
+            logger.warning(f"/onlines: lastOnline fetch failed: {e}")
+
         # Try TCP stats
         try:
             rtt_by_ip = get_tcp_stats()
@@ -279,7 +302,9 @@ class AdminOpsMixin(AdminHandlerBase):
         except Exception:
             geo_lookup = None
 
-        emails = sorted(set(activity.keys()) | panel_emails)
+        emails = sorted(
+            set(activity.keys()) | panel_emails | set(last_online_min)
+        )
 
         # Check if all primary sources failed
         all_sources_failed = (
@@ -332,13 +357,8 @@ class AdminOpsMixin(AdminHandlerBase):
         # Per-email traffic from x-ui
         traffic_by_email = {}
         try:
-            xui_db = (
-                self.bot.services.get('xui').db
-                if hasattr(self.bot, 'services') and self.bot.services.get('xui')
-                else None
-            )
-            if xui_db:
-                traffic_by_email = xui_db.get_all_client_traffic() or {}
+            if xui:
+                traffic_by_email = xui.get_all_traffic() or {}
         except Exception as e:
             logger.warning(f"/onlines: traffic fetch failed: {e}")
 
@@ -356,6 +376,10 @@ class AdminOpsMixin(AdminHandlerBase):
             uname = (f"@{user.username}" if user and user.username
                      else (f"user_{user.chat_id}" if user else email[:30]))
             act = activity.get(email, {})
+            seen = last_online_min.get(email)
+            seen_str = (' (только что)' if seen == 0
+                        else f' ({seen} мин назад)' if seen is not None
+                        else '')
             ips = act.get('ips') or []
             # Build "🇷🇺 91.246… , 🇰🇿 95.55…" with flags when GeoIP
             # is available — useful to spot one-key-two-countries.
@@ -388,7 +412,7 @@ class AdminOpsMixin(AdminHandlerBase):
                 else f"{consumed:.2f} GB"
             )
             lines.append(
-                f"• {uname}{sharing_marker} "
+                f"• {uname}{sharing_marker}{seen_str} "
                 f"· 🔢 {ip_count}/{limit} IP "
                 f"· 📶 {rtt_str} "
                 f"· 📊 {traffic_str}\n"

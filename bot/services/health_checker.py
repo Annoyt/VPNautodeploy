@@ -1,12 +1,18 @@
-"""Active health checks for outbound protocols.
+"""Active health checks for outbound protocols — through the REAL tunnels.
 
 Every 15 minutes the scheduler runs ``check_all_outbounds()`` which:
 1. Picks a set of representative domains (RU services, global platforms)
-2. Makes a lightweight HTTP HEAD request to each
+2. Makes a lightweight HTTP HEAD request to each — routed through the
+   probe-proxy sidecar's per-protocol HTTP proxy (sing-box with the
+   actual reality/hy2/ws/stls outbounds; see scripts/gen_probe_config.py)
 3. Records latency + status in ``outbound_health`` table
 
-Results power the dashboard's health widget and help us distinguish
-"VPN down" from "specific service blocked".
+History note: until 2026-08-19 this probed DIRECTLY from the entry
+container and wrote one identical result under five protocol labels —
+vk/yandex/youtube showed "down" since June 21 purely because of
+entry-side DNS/RKN, while the tunnels were fine. If the sidecar is
+down, results are recorded as ``proxy_down`` — never as fake protocol
+data.
 """
 
 import asyncio
@@ -40,8 +46,19 @@ class HealthChecker:
         'anthropic.com',
     ]
 
-    # Protocol tags matching the cascade order in MyKeyAnswerHandler.
-    PROTOCOL_TAGS = ['reality', 'hy2', 'ws', 'xhttp', 'stls']
+    # Protocols the probe sidecar can speak. xhttp is deliberately
+    # absent — sing-box has no XHTTP transport (see subscription.py),
+    # so that path can only be exercised by an xray-core client.
+    PROTOCOL_TAGS = ['reality', 'hy2', 'ws', 'stls']
+
+    # HTTP-proxy inbound ports of the probe sidecar, one per protocol.
+    # Must match scripts/gen_probe_config.py.
+    PROBE_PORTS = {
+        'reality': 18081,
+        'hy2': 18082,
+        'ws': 18083,
+        'stls': 18084,
+    }
 
     # Request limits per check.
     TIMEOUT_SEC = 10
@@ -52,10 +69,18 @@ class HealthChecker:
 
         Args:
             db: Database instance for writing results.
-            config: Settings object (optional, for future proxy routing).
+            config: Settings object; PROBE_PROXY_HOST overrides the
+                sidecar hostname (default: the compose service name).
         """
         self.db = db
         self.config = config
+        self.proxy_host = (
+            getattr(config, 'PROBE_PROXY_HOST', '') or 'probe-proxy'
+        ).strip()
+
+    def _proxy_url(self, protocol: str) -> Optional[str]:
+        port = self.PROBE_PORTS.get(protocol)
+        return f'http://{self.proxy_host}:{port}' if port else None
 
     async def check_all_outbounds(self) -> Dict[str, Dict[str, str]]:
         """Run health checks for all configured outbounds against all targets.
@@ -74,9 +99,10 @@ class HealthChecker:
             connector=aiohttp.TCPConnector(limit=self.MAX_CONCURRENT),
         ) as session:
             for protocol in self.PROTOCOL_TAGS:
+                proxy = self._proxy_url(protocol)
                 protocol_results = {}
                 tasks = [
-                    self._check_one(session, domain)
+                    self._check_one(session, domain, proxy)
                     for domain in self.TARGET_DOMAINS
                 ]
                 domain_statuses = await asyncio.gather(*tasks, return_exceptions=True)
@@ -95,13 +121,21 @@ class HealthChecker:
 
         return results
 
-    async def _check_one(self, session: aiohttp.ClientSession, domain: str) -> Dict:
-        """Probe a single domain. Returns dict with status, latency_ms, error."""
+    async def _check_one(self, session: aiohttp.ClientSession, domain: str,
+                         proxy: Optional[str] = None) -> Dict:
+        """Probe a single domain through the protocol's proxy.
+
+        ``proxy_down`` means the SIDECAR was unreachable — a monitoring
+        outage, not a verdict about the tunnel or the target.
+        """
         url = f'https://{domain}'
         start = time.time()
         try:
-            # HEAD is lighter than GET; most services support it.
-            async with session.head(url, allow_redirects=True) as resp:
+            # HEAD is lighter than GET; most services support it. DNS
+            # resolution happens on the far side of the tunnel (CONNECT
+            # goes to the proxy), so entry-node DNS can't skew results.
+            async with session.head(url, allow_redirects=True,
+                                    proxy=proxy) as resp:
                 latency_ms = int((time.time() - start) * 1000)
                 if resp.status < 400:
                     return {'status': 'ok', 'latency_ms': latency_ms, 'error': None}
@@ -110,6 +144,9 @@ class HealthChecker:
                 if resp.status >= 500:
                     return {'status': 'error', 'latency_ms': latency_ms, 'error': f'HTTP {resp.status}'}
                 return {'status': 'error', 'latency_ms': latency_ms, 'error': f'HTTP {resp.status}'}
+        except aiohttp.ClientProxyConnectionError as e:
+            return {'status': 'proxy_down', 'latency_ms': None,
+                    'error': str(e)[:100]}
         except asyncio.TimeoutError:
             return {'status': 'timeout', 'latency_ms': None, 'error': 'timeout'}
         except aiohttp.ClientError as e:

@@ -742,6 +742,26 @@ class MailRequestHandler(BaseCallbackHandler):
         cb_id = callback.get('id')
         message = callback.get('message', {}) or {}
         thread_id = message.get('message_thread_id')
+        msg_id = message.get('message_id')
+        card_text = message.get('text', '')
+
+        def update_card(status_line: str) -> None:
+            """Rewrite the request card in place: status instead of
+            buttons. Separate confirmation messages just pile up in
+            the topic — the card itself is the record."""
+            if not msg_id:
+                self.bot.send_message(chat_id=chat_id, text=status_line,
+                                      parse_mode='HTML',
+                                      message_thread_id=thread_id)
+                return
+            try:
+                self.bot.edit_message_text(
+                    chat_id=chat_id, message_id=msg_id,
+                    text=f"{card_text}\n\n{status_line}",
+                    parse_mode='HTML',
+                )
+            except Exception as e:
+                logger.warning(f"mailreq: card edit failed: {e}")
 
         def reply(text: str) -> None:
             self.bot.send_message(chat_id=chat_id, text=text,
@@ -777,7 +797,7 @@ class MailRequestHandler(BaseCallbackHandler):
         if action == 'no':
             if cb_id:
                 self.bot.answer_callback_query(cb_id, text="Отклонено")
-            reply(f"❌ Заявка <code>{addr}</code> отклонена.")
+            update_card("❌ <b>Отклонена.</b>")
             return
 
         if cb_id:
@@ -791,20 +811,19 @@ class MailRequestHandler(BaseCallbackHandler):
                 addr, demo_gb, 30, status='demo')
         except Exception as e:
             logger.exception("mailreq: provisioning failed")
-            reply(f"❌ Не удалось создать ключ для <code>{addr}</code>: "
-                  f"{str(e)[:150]}")
+            update_card(f"❌ <b>Ошибка выдачи:</b> {str(e)[:150]}")
             return
         if not sub_url:
-            reply(f"❌ Ключ для <code>{addr}</code> создан, но ссылка не "
-                  "собралась (проверь WEBAPP_URL).")
+            update_card("❌ <b>Ключ создан, но ссылка не собралась</b> "
+                        "(проверь WEBAPP_URL).")
             return
 
         mailer = None
         if getattr(self.bot, 'services', None):
             mailer = self.bot.services.get('email')
         if mailer is None or not mailer.is_configured():
-            reply(f"⚠️ Ключ для <code>{addr}</code> создан, но SMTP не "
-                  "настроен — письмо не отправлено.")
+            update_card("⚠️ <b>Ключ создан, но SMTP не настроен</b> — "
+                        "письмо не отправлено.")
             return
 
         import threading
@@ -812,11 +831,11 @@ class MailRequestHandler(BaseCallbackHandler):
         def _worker() -> None:
             ok = mailer.send_key(addr, sub_url, lang='ru')
             if ok:
-                reply(f"✉️ Готово: демо-ключ ({demo_gb} ГБ/мес) отправлен "
-                      f"на <code>{addr}</code>.")
+                update_card(f"✅ <b>Выдана:</b> демо-ключ ({demo_gb} ГБ/мес) "
+                            f"отправлен письмом.")
             else:
-                reply(f"⚠️ Ключ для <code>{addr}</code> создан, но письмо "
-                      "не ушло — проверь SMTP, можно повторить /addmail.")
+                update_card("⚠️ <b>Ключ создан, но письмо не ушло</b> — "
+                            "проверь SMTP, можно повторить /addmail.")
 
         threading.Thread(target=_worker, daemon=True,
                          name=f"mailreq-{req_id}").start()
