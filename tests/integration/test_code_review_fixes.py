@@ -97,7 +97,7 @@ class TestAdminHandlerIntegration:
         
         # Setup XUI mock
         mock_xui = MagicMock()
-        mock_xui.db.get_client_traffic.return_value = {
+        mock_xui.get_client_traffic_sync.return_value = {
             'upload': 1000000,
             'download': 2000000,
             'total': 3000000
@@ -108,7 +108,7 @@ class TestAdminHandlerIntegration:
         handler.show_user('admin_id', ['123'])
         
         # Verify DB sync method was called
-        mock_xui.db.get_client_traffic.assert_called_once_with('test@example.com')
+        mock_xui.get_client_traffic_sync.assert_called_once_with('test@example.com')
 
 
 class TestMainAsyncIntegration:

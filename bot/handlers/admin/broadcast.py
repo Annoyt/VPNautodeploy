@@ -46,7 +46,7 @@ class AdminBroadcastMixin(AdminHandlerBase):
             f"• <code>/broadcast_cancel</code> — отменить"
         )
         
-        self.bot.send_message(chat_id=chat_id, text=preview, parse_mode='HTML')
+        self._send(chat_id=chat_id, text=preview, parse_mode='HTML')
 
     def broadcast_confirm(self, chat_id: str, args: list) -> None:
         """Confirm and send broadcast."""
@@ -93,6 +93,6 @@ class AdminBroadcastMixin(AdminHandlerBase):
         """Cancel pending broadcast."""
         if chat_id in self._pending_broadcasts:
             del self._pending_broadcasts[chat_id]
-            self.bot.send_message(chat_id=chat_id, text="❌ Рассылка отменена.")
+            self._send(chat_id=chat_id, text="❌ Рассылка отменена.")
         else:
-            self.bot.send_message(chat_id=chat_id, text="📭 Нет активной рассылки.")
+            self._send(chat_id=chat_id, text="📭 Нет активной рассылки.")

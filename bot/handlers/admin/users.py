@@ -26,7 +26,7 @@ class AdminUsersMixin(AdminHandlerBase):
         users = self.db.get_pending_users()
         
         if not users:
-            self.bot.send_message(chat_id=chat_id, text="📭 Нет ожидающих заявок.")
+            self._send(chat_id=chat_id, text="📭 Нет ожидающих заявок.")
             return
         
         text = f"📋 <b>Ожидают одобрения ({len(users)}):</b>\n\n"
@@ -38,17 +38,17 @@ class AdminUsersMixin(AdminHandlerBase):
             text += "\n"
         
         text += "<code>/approve @username</code> или <code>/reject @username</code>"
-        self.bot.send_message(chat_id=chat_id, text=text, parse_mode='HTML')
+        self._send(chat_id=chat_id, text=text, parse_mode='HTML')
 
     def approve_user(self, chat_id: str, args: list) -> None:
         """Approve a user."""
         if not args:
-            self.bot.send_message(chat_id=chat_id, text="❌ Укажите пользователя: /approve @username")
+            self._send(chat_id=chat_id, text="❌ Укажите пользователя: /approve @username")
             return
         
         target = self._resolve_target(args[0])
         if not target:
-            self.bot.send_message(chat_id=chat_id, text="❌ Пользователь не найден.")
+            self._send(chat_id=chat_id, text="❌ Пользователь не найден.")
             return
         
         sm = StateMachine(self.db)
@@ -64,21 +64,18 @@ class AdminUsersMixin(AdminHandlerBase):
         notifier.notify_approved(target.chat_id, lang)
         
         username = f"@{target.username}" if target.username else f"user_{target.chat_id}"
-        self.bot.send_message(
-            chat_id=chat_id, 
-            text=f"✅ {username} одобрен и активирован."
-        )
+        self._send(chat_id=chat_id, text=f"✅ {username} одобрен и активирован.")
         logger.info(f"Admin {chat_id} approved user {target.chat_id}")
 
     def reject_user(self, chat_id: str, args: list) -> None:
         """Reject a user and revoke any active key."""
         if not args:
-            self.bot.send_message(chat_id=chat_id, text="❌ Укажите пользователя: /reject @username")
+            self._send(chat_id=chat_id, text="❌ Укажите пользователя: /reject @username")
             return
 
         target = self._resolve_target(args[0])
         if not target:
-            self.bot.send_message(chat_id=chat_id, text="❌ Пользователь не найден.")
+            self._send(chat_id=chat_id, text="❌ Пользователь не найден.")
             return
 
         # Revoke active VPN key + clear uuid/email so a rejected user can't
@@ -92,21 +89,18 @@ class AdminUsersMixin(AdminHandlerBase):
         notifier.notify_rejected(target.chat_id, target.lang)
 
         username = f"@{target.username}" if target.username else f"user_{target.chat_id}"
-        self.bot.send_message(
-            chat_id=chat_id,
-            text=f"❌ {username} отклонён."
-        )
+        self._send(chat_id=chat_id, text=f"❌ {username} отклонён.")
         logger.info(f"Admin {chat_id} rejected user {target.chat_id}")
 
     def show_user(self, chat_id: str, args: list) -> None:
         """Show detailed user information."""
         if not args:
-            self.bot.send_message(chat_id=chat_id, text="❌ Укажите пользователя: /user @username")
+            self._send(chat_id=chat_id, text="❌ Укажите пользователя: /user @username")
             return
         
         target = self._resolve_target(args[0])
         if not target:
-            self.bot.send_message(chat_id=chat_id, text="❌ Пользователь не найден.")
+            self._send(chat_id=chat_id, text="❌ Пользователь не найден.")
             return
         
         # Get traffic stats if available
@@ -114,8 +108,8 @@ class AdminUsersMixin(AdminHandlerBase):
         if target.email:
             try:
                 xui = self.bot.services.get('xui')
-                if xui and hasattr(xui, 'db'):
-                    traffic = xui.db.get_client_traffic(target.email)
+                if xui:
+                    traffic = xui.get_client_traffic_sync(target.email)
             except Exception as e:
                 logger.warning(f"Could not get traffic for {target.email}: {e}")
         
@@ -140,17 +134,17 @@ class AdminUsersMixin(AdminHandlerBase):
                 f"↓ Получено: {down_gb:.2f} GB\n"
             )
         
-        self.bot.send_message(chat_id=chat_id, text=text, parse_mode='HTML')
+        self._send(chat_id=chat_id, text=text, parse_mode='HTML')
 
     def ban_user(self, chat_id: str, args: list) -> None:
         """Ban a user and revoke any active key."""
         if not args:
-            self.bot.send_message(chat_id=chat_id, text="❌ Укажите пользователя: /ban @username")
+            self._send(chat_id=chat_id, text="❌ Укажите пользователя: /ban @username")
             return
 
         target = self._resolve_target(args[0])
         if not target:
-            self.bot.send_message(chat_id=chat_id, text="❌ Пользователь не найден.")
+            self._send(chat_id=chat_id, text="❌ Пользователь не найден.")
             return
 
         # Same rationale as /reject: clear the x-ui client and the local
@@ -161,7 +155,7 @@ class AdminUsersMixin(AdminHandlerBase):
         sm.transition(target.chat_id, UserState.BANNED)
 
         username = f"@{target.username}" if target.username else f"user_{target.chat_id}"
-        self.bot.send_message(chat_id=chat_id, text=f"🚫 {username} забанен.")
+        self._send(chat_id=chat_id, text=f"🚫 {username} забанен.")
         logger.info(f"Admin {chat_id} banned user {target.chat_id}")
 
     def unban_user(self, chat_id: str, args: list) -> None:
@@ -169,12 +163,12 @@ class AdminUsersMixin(AdminHandlerBase):
         a pre-revoke-helper ban so the user must go through approval
         again rather than re-using a ghost client config."""
         if not args:
-            self.bot.send_message(chat_id=chat_id, text="❌ Укажите пользователя: /unban @username")
+            self._send(chat_id=chat_id, text="❌ Укажите пользователя: /unban @username")
             return
 
         target = self._resolve_target(args[0])
         if not target:
-            self.bot.send_message(chat_id=chat_id, text="❌ Пользователь не найден.")
+            self._send(chat_id=chat_id, text="❌ Пользователь не найден.")
             return
 
         # Strip leftover uuid/email (legacy bans before user_lifecycle
@@ -189,18 +183,18 @@ class AdminUsersMixin(AdminHandlerBase):
         sm.transition(target.chat_id, UserState.NEW)
 
         username = f"@{target.username}" if target.username else f"user_{target.chat_id}"
-        self.bot.send_message(chat_id=chat_id, text=f"✅ {username} разбанен.")
+        self._send(chat_id=chat_id, text=f"✅ {username} разбанен.")
         logger.info(f"Admin {chat_id} unbanned user {target.chat_id}")
 
     def reset_user(self, chat_id: str, args: list) -> None:
         """Reset user to initial state."""
         if not args:
-            self.bot.send_message(chat_id=chat_id, text="❌ Укажите пользователя: /reset @username")
+            self._send(chat_id=chat_id, text="❌ Укажите пользователя: /reset @username")
             return
         
         target = self._resolve_target(args[0])
         if not target:
-            self.bot.send_message(chat_id=chat_id, text="❌ Пользователь не найден.")
+            self._send(chat_id=chat_id, text="❌ Пользователь не найден.")
             return
         
         # Remove from X-UI
@@ -237,13 +231,13 @@ class AdminUsersMixin(AdminHandlerBase):
         
         target = self._resolve_target(args[0])
         if not target:
-            self.bot.send_message(chat_id=chat_id, text="❌ Пользователь не найден.")
+            self._send(chat_id=chat_id, text="❌ Пользователь не найден.")
             return
         
         try:
             limit = int(args[1])
         except ValueError:
-            self.bot.send_message(chat_id=chat_id, text="❌ N должно быть числом.")
+            self._send(chat_id=chat_id, text="❌ N должно быть числом.")
             return
         
         user = self.db.get_user(target.chat_id)
@@ -280,7 +274,7 @@ class AdminUsersMixin(AdminHandlerBase):
         
         target = self._resolve_target(args[0])
         if not target:
-            self.bot.send_message(chat_id=chat_id, text="❌ Пользователь не найден.")
+            self._send(chat_id=chat_id, text="❌ Пользователь не найден.")
             return
         
         # Update quota
@@ -322,7 +316,7 @@ class AdminUsersMixin(AdminHandlerBase):
         
         target = self._resolve_target(args[0])
         if not target:
-            self.bot.send_message(chat_id=chat_id, text="❌ Пользователь не найден.")
+            self._send(chat_id=chat_id, text="❌ Пользователь не найден.")
             return
         
         # Create the subscription row, then run the shared paid-tier
@@ -378,7 +372,7 @@ class AdminUsersMixin(AdminHandlerBase):
             title = f"Все пользователи ({len(users)})"
         
         if not users:
-            self.bot.send_message(chat_id=chat_id, text=f"📭 {title}: нет записей.")
+            self._send(chat_id=chat_id, text=f"📭 {title}: нет записей.")
             return
         
         text = f"👥 <b>{title}</b>\n\n"
@@ -399,4 +393,4 @@ class AdminUsersMixin(AdminHandlerBase):
         if len(users) > 50:
             text += f"\n... и ещё {len(users) - 50} пользователей"
         
-        self.bot.send_message(chat_id=chat_id, text=text, parse_mode='HTML')
+        self._send(chat_id=chat_id, text=text, parse_mode='HTML')

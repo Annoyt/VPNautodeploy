@@ -172,8 +172,9 @@ class CommandHandler(BaseHandler):
                     "/stats - Показать статистику\n"
                     "/mykey - Получить subscription URL (=/sub)\n"
                     "/sub - Subscription URL (один линк = весь каскад)\n"
+                    "/buy - Купить подписку (100 ГБ/мес, все протоколы)\n"
                     "/raw - Raw-ключи для legacy-клиентов (CDN-only)\n\n"
-                    "Нужна помощь? Используйте кнопку поддержки в меня."
+                    "Нужна помощь? Используйте кнопку поддержки в меню."
                 )
             else:
                 help_text = (
@@ -183,6 +184,7 @@ class CommandHandler(BaseHandler):
                     "/stats - Show your statistics\n"
                     "/mykey - Get subscription URL (=/sub)\n"
                     "/sub - Subscription URL (one link = full cascade)\n"
+                    "/buy - Buy a subscription (100 GB/mo, all protocols)\n"
                     "/raw - Raw keys for legacy clients (CDN-only)\n\n"
                     "Need help? Use the support button in the menu."
                 )

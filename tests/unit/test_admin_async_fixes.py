@@ -24,7 +24,8 @@ class TestAdminHandlerSyncCalls:
         return handler
     
     def test_show_user_uses_db_traffic_method(self, admin_handler):
-        """Test show_user uses xui.db.get_client_traffic."""
+        """show_user reads traffic via the API-aware service method
+        (xui.db is None on the entry node)."""
         # Setup
         user = MagicMock()
         user.email = 'test@example.com'
@@ -38,7 +39,7 @@ class TestAdminHandlerSyncCalls:
         admin_handler.db.get_user.return_value = user
         
         mock_xui = MagicMock()
-        mock_xui.db.get_client_traffic.return_value = {
+        mock_xui.get_client_traffic_sync.return_value = {
             'upload': 1000000,
             'download': 2000000,
             'total': 3000000
@@ -48,13 +49,14 @@ class TestAdminHandlerSyncCalls:
         # Execute
         admin_handler.show_user('admin_id', ['123456'])
         
-        # Verify db method was called
-        mock_xui.db.get_client_traffic.assert_called_once_with('test@example.com')
+        # Verify the API-aware wrapper was called
+        mock_xui.get_client_traffic_sync.assert_called_once_with('test@example.com')
     
     def test_show_overall_stats_uses_db_inbound_method(self, admin_handler):
-        """Test show_overall_stats uses xui.db.get_inbound_settings."""
+        """show_overall_stats reads inbound settings via the API-aware
+        service wrapper."""
         mock_xui = MagicMock()
-        mock_xui.db.get_inbound_settings.return_value = {
+        mock_xui.get_inbound_settings_sync.return_value = {
             'clients': [{'email': 'test@example.com'}]
         }
         admin_handler.bot.services.get.return_value = mock_xui
@@ -68,8 +70,8 @@ class TestAdminHandlerSyncCalls:
         # Execute
         admin_handler.show_overall_stats('admin_id', [])
         
-        # Verify db method was called
-        mock_xui.db.get_inbound_settings.assert_called_once()
+        # Verify the API-aware wrapper was called
+        mock_xui.get_inbound_settings_sync.assert_called_once()
 
 
 class TestAdminHandlerXUISyncMethods:
@@ -167,7 +169,7 @@ class TestAdminHandlerErrorHandling:
         admin_handler.db.get_user.return_value = user
         
         mock_xui = MagicMock()
-        mock_xui.db.get_client_traffic.side_effect = Exception("X-UI error")
+        mock_xui.get_client_traffic_sync.side_effect = Exception("X-UI error")
         admin_handler.bot.services.get.return_value = mock_xui
         
         # Should not raise

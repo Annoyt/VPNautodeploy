@@ -773,6 +773,22 @@ class TelegramClient:
             logger.error(f"Failed to delete message: {e}")
             return False
 
+    def set_my_commands(self, commands: list) -> bool:
+        """Register the bot's command menu (the "/" hint list clients
+        show). ``commands``: [{'command': 'start', 'description': ...}].
+        """
+        try:
+            result = self._request('setMyCommands',
+                                   commands=json.dumps(commands))
+            if result.get('ok'):
+                logger.info(f"Command menu set ({len(commands)} commands)")
+                return True
+            logger.error(f"setMyCommands failed: {result.get('description')}")
+            return False
+        except requests.RequestException as e:
+            logger.error(f"setMyCommands failed: {e}")
+            return False
+
     def set_chat_menu_button(
         self,
         chat_id: Optional[str] = None,

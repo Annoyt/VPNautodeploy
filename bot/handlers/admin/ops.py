@@ -84,7 +84,10 @@ class AdminOpsMixin(AdminHandlerBase):
 
         # Service checks — anything that has a sync ping endpoint
         xui = self.bot.services.get('xui') if hasattr(self.bot, 'services') else None
-        xui_ok = bool(xui and getattr(xui, 'db', None))
+        # DB mode or API mode both count as "X-UI reachable" — the old
+        # db-only check showed "missing" forever on the entry node.
+        xui_ok = bool(xui and (getattr(xui, 'db', None)
+                               or getattr(xui, 'api', None)))
         source_status['xui_db'] = '✓' if xui_ok else '✗'
 
         ai_status = '—'
@@ -130,7 +133,7 @@ class AdminOpsMixin(AdminHandlerBase):
         lines = [
             "🩺 <b>Status</b>",
             f"• Bot: <b>up</b> · Uptime <code>{uptime}</code> {source_status.get('sys', '?')}",
-            f"• X-UI DB: {'<b>ok</b>' if xui_ok else '<b>missing</b>'} {source_status.get('xui_db', '?')}",
+            f"• X-UI: {'<b>ok</b>' if xui_ok else '<b>missing</b>'} {source_status.get('xui_db', '?')}",
             f"• OpenCode: <b>{ai_status}</b> {source_status.get('ai', '?')}",
         ]
 

@@ -923,7 +923,7 @@ class TestAdminUsersEdgeCases:
         admin_handler._resolve_target = MagicMock(return_value=sample_active_user)
 
         mock_xui = MagicMock()
-        mock_xui.db.get_client_traffic = MagicMock(return_value={
+        mock_xui.get_client_traffic_sync = MagicMock(return_value={
             'upload': 2 * BYTES_PER_GB,
             'download': 5 * BYTES_PER_GB
         })
@@ -940,7 +940,7 @@ class TestAdminUsersEdgeCases:
         admin_handler._resolve_target = MagicMock(return_value=sample_active_user)
 
         mock_xui = MagicMock()
-        mock_xui.db.get_client_traffic = MagicMock(side_effect=Exception("DB error"))
+        mock_xui.get_client_traffic_sync = MagicMock(side_effect=Exception("DB error"))
         admin_handler.bot.services = {'xui': mock_xui}
 
         # Should not crash

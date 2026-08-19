@@ -19,7 +19,7 @@ ADMIN_HELP_TEXT = (
     "📊 <b>Быстрая инфо</b>\n"
     "• <code>/status</code> — health всех сервисов + CPU/RAM/Disk\n"
     "• <code>/stats</code> — статистика по юзерам / трафику\n"
-    "• <code>/onlines</code> — кто сейчас онлайн + IP + RTT + трафик\n"
+    "• <code>/onlines</code> — кто онлайн (lastOnline панели, hy2 тоже) + трафик\n"
     "• <code>/whoami</code> — твой id + проверка прав\n"
     "• <code>/topics</code> — текущие forum topic IDs\n\n"
 
@@ -31,6 +31,9 @@ ADMIN_HELP_TEXT = (
     "• <code>/find &lt;текст&gt;</code> — поиск по username / id / email / uuid\n\n"
 
     "⚡ <b>Модерация</b>\n"
+    "• демо: авто-аппрув по сигналам (username/фото/bio/premium);\n"
+    "  зависшие заявки — ежечасный дайджест с кнопками\n"
+    "• заявки с почты: карточка с кнопками Выдать (демо письмом)/Отклонить\n"
     "• <code>/approve @x</code> — одобрить\n"
     "• <code>/reject @x</code> — отклонить\n"
     "• <code>/ban @x</code> — забанить + отозвать ключ\n"
@@ -191,6 +194,16 @@ class AdminHandlerBase(BaseHandler):
             chat_id=chat_id, text=help_text, parse_mode='HTML',
             message_thread_id=self._get_thread_id(chat_id),
         )
+
+    def _send(self, chat_id: str, **kwargs) -> None:
+        """send_message with forum-topic routing baked in.
+
+        Admin replies must land in the topic the command came from —
+        27 call sites used to reply without message_thread_id and every
+        one of them dumped its answer into the forum's General topic.
+        """
+        kwargs.setdefault('message_thread_id', self._get_thread_id(chat_id))
+        self.bot.send_message(chat_id=chat_id, **kwargs)
 
     def _get_thread_id(self, chat_id: str) -> Optional[int]:
         """Get forum thread ID for admin notifications.

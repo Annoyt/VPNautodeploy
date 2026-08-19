@@ -807,3 +807,51 @@ class TestLogging:
 
         error_messages = [r.message for r in caplog.records if r.levelno >= logging.ERROR]
         assert any("Error in handler" in msg for msg in error_messages)
+
+
+class TestCommandMapIntegrity:
+    """Every routed command must have an implementation, and every
+    command advertised in help must be routed somewhere — the two
+    drifted apart silently more than once."""
+
+    def test_admin_commands_all_implemented(self):
+        from bot.handlers.admin import AdminHandler
+        from bot.handlers.admin.base import AdminHandlerBase
+        missing = [
+            (cmd, m) for cmd, m in AdminHandlerBase.ADMIN_COMMANDS.items()
+            if not callable(getattr(AdminHandler, m, None))
+        ]
+        assert not missing, f"unimplemented admin commands: {missing}"
+
+    def test_user_commands_all_implemented(self):
+        from bot.handlers.commands import CommandHandler
+        missing = [
+            (cmd, m) for cmd, m in CommandHandler.COMMANDS.items()
+            if not callable(getattr(CommandHandler, m, None))
+        ]
+        assert not missing, f"unimplemented user commands: {missing}"
+
+    def test_admin_help_mentions_only_routed_commands(self):
+        import re
+        from bot.handlers.admin.base import ADMIN_HELP_TEXT, AdminHandlerBase
+        # Routed outside ADMIN_COMMANDS: /close (ForumHandler), /buy
+        # (PaymentHandler), /ai* (AIHandler), /admin (CommandHandler).
+        external = {'/close', '/buy', '/admin', '/ai', '/ai_plan',
+                    '/ai_fast', '/ai_yolo', '/ai_skill', '/ai_model',
+                    '/ai_status', '/ai_reset'}
+        # Only <code>-wrapped mentions are command references; a bare
+        # regex also catches paths (/opt) and HTML close tags (</b>).
+        mentioned = set(re.findall(r'<code>(/[a-z_0-9]+)', ADMIN_HELP_TEXT))
+        unrouted = {
+            c for c in mentioned
+            if c not in AdminHandlerBase.ADMIN_COMMANDS and c not in external
+        }
+        assert not unrouted, f"help advertises unrouted commands: {unrouted}"
+
+    def test_bot_menu_commands_are_routed(self):
+        from bot.core.bot import Bot
+        from bot.handlers.commands import CommandHandler
+        # /buy is PaymentHandler's; the rest belong to CommandHandler.
+        for entry in Bot.USER_COMMANDS:
+            cmd = '/' + entry['command']
+            assert cmd == '/buy' or cmd in CommandHandler.COMMANDS, cmd

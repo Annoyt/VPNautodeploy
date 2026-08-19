@@ -88,9 +88,25 @@ class Bot:
         else:
             logger.warning(f"Failed to set Mini App menu button for chat {chat_id}")
 
+    # The "/" hint menu Telegram clients show. User-facing commands
+    # only — admin commands stay discoverable via /help in the forum.
+    USER_COMMANDS = [
+        {'command': 'start', 'description': 'Запуск / доступ к VPN'},
+        {'command': 'mykey', 'description': 'Мой ключ (subscription URL)'},
+        {'command': 'sub', 'description': 'Subscription URL'},
+        {'command': 'stats', 'description': 'Мой трафик и квота'},
+        {'command': 'buy', 'description': 'Купить подписку (100 ГБ/мес)'},
+        {'command': 'setemail', 'description': 'Почта для резервного ключа'},
+        {'command': 'help', 'description': 'Справка по командам'},
+    ]
+
     def start(self) -> None:
         """Start the bot."""
         logger.info("Starting bot...")
+        try:
+            self.client.set_my_commands(self.USER_COMMANDS)
+        except Exception as e:
+            logger.warning(f"set_my_commands failed: {e}")
         self._polling_service.start()
     
     def stop(self) -> None:

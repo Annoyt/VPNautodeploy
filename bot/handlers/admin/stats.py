@@ -49,15 +49,16 @@ class AdminStatsMixin(AdminHandlerBase):
         # X-UI stats if available
         try:
             xui = self.bot.services.get('xui')
-            if xui and hasattr(xui, 'db'):
-                inbounds = xui.db.get_inbound_settings()
+            if xui:
+                # API-aware: on entry there is no local x-ui.db.
+                inbounds = xui.get_inbound_settings_sync()
                 if inbounds:
                     clients = inbounds.get('clients', [])
                     text += f"\n🔌 X-UI клиентов: {len(clients)}\n"
         except Exception as e:
             logger.debug(f"Could not get X-UI stats: {e}")
         
-        self.bot.send_message(chat_id=chat_id, text=text, parse_mode='HTML')
+        self._send(chat_id=chat_id, text=text, parse_mode='HTML')
 
     def backup_db(self, chat_id: str, args: list) -> None:
         """Create database backup."""
