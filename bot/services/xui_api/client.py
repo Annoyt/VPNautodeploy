@@ -399,21 +399,28 @@ class XUIAPIClient:
                                 "total": client_stat.get("total", 0),
                             }
                 else:
-                    # Fallback: parse clients from settings JSON
+                    # Fallback: parse clients from settings JSON. Some
+                    # panel builds return settings already parsed as a
+                    # dict — json.loads on that used to abort the WHOLE
+                    # collection for every inbound.
                     import json
-                    settings_str = inbound.get("settings", "{}")
+                    settings_raw = inbound.get("settings", "{}")
                     try:
-                        settings = json.loads(settings_str)
+                        settings = (
+                            settings_raw if isinstance(settings_raw, dict)
+                            else json.loads(settings_raw or "{}")
+                        )
                         clients = settings.get("clients", [])
                         for client in clients:
                             email = client.get("email")
-                            if email:
+                            # Never shadow a real stats row with zeros.
+                            if email and email not in stats:
                                 stats[email] = {
                                     "up": 0,
                                     "down": 0,
                                     "total": 0,
                                 }
-                    except json.JSONDecodeError:
+                    except (json.JSONDecodeError, TypeError, AttributeError):
                         logger.warning(f"Failed to parse settings JSON for inbound {inbound.get('id')}")
             
             return stats

@@ -299,56 +299,20 @@ class PaymentHandler(BaseHandler):
             cur_dt = datetime.utcnow()
         base = max(cur_dt, datetime.utcnow())
         new_dt = base + timedelta(days=30 * months)
-        user.subscription_expiry = new_dt.isoformat()
-        # If we have an x-ui email already, also update the subscription
-        # row so the dashboard "subs" bucket reflects the renewal.
-        self.db.save_user(user)
-        try:
-            with self.db._connect() as conn:
-                conn.execute(
-                    "UPDATE subscriptions SET expires_at = ?, is_active = 1 "
-                    "WHERE chat_id = ? AND is_active = 1",
-                    (new_dt.isoformat(), str(chat_id)),
-                )
-        except Exception as e:
-            logger.warning(f"successful_payment: subscriptions update failed: {e}")
 
-        # Propagate the new expiry (and current quota) to X-UI so the
-        # client isn't auto-removed by 3x-ui's expiration cleanup while
-        # the subscription is still active. Re-adds the client if it was
-        # previously removed (e.g. due to an expired prior period).
-        try:
-            if user.uuid and user.email:
-                xui = self.bot.services.get('xui')
-                if xui and xui.db:
-                    expiry_ts = 0
-                    if user.subscription_expiry:
-                        try:
-                            expiry_ts = int(
-                                datetime.fromisoformat(user.subscription_expiry).timestamp() * 1000
-                            )
-                        except ValueError:
-                            pass
-                    client_config = {
-                        "id": user.uuid,
-                        "flow": "xtls-rprx-vision",
-                        "email": user.email,
-                        "limitIp": getattr(user, 'limit_ip', 1),
-                        "totalGB": int((getattr(user, 'quota_gb', 5.0) or 5.0) * BYTES_PER_GB),
-                        "expiryTime": expiry_ts,
-                        "enable": True,
-                    }
-                    if xui.add_client_sync(client_config, 1):
-                        logger.info(
-                            f"successful_payment: synced {user.email} to X-UI "
-                            f"until {user.subscription_expiry}"
-                        )
-                    else:
-                        logger.warning(
-                            f"successful_payment: X-UI sync returned False for {user.email}"
-                        )
-        except Exception as e:
-            logger.warning(f"successful_payment: X-UI sync failed: {e}")
+        # Everything the paid tier means — status flip (the hy2 auth
+        # gate and the protocol cascade key off it!), quota floor,
+        # subscriptions row, panel expiry/enable/quota — in one shared
+        # call. This path used to only bump the expiry date: the payer
+        # stayed status='demo' with a 5 GB quota.
+        from bot.services.billing import grant_paid_access
+        xui = self.bot.services.get('xui') if hasattr(self.bot, 'services') else None
+        grant = grant_paid_access(self.db, self.config, xui, chat_id, new_dt)
+        if grant.get('panel_ok') is False:
+            logger.warning(
+                f"successful_payment: panel sync failed for {chat_id} — "
+                f"key may stay disabled until an admin re-syncs"
+            )
 
         # Audit
         try:

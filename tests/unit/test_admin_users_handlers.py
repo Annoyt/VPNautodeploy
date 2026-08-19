@@ -766,11 +766,13 @@ class TestApprovePayment:
 
         assert 'Пользователь не найден' in admin_handler.bot.send_message.call_args[1]['text']
 
-    @patch('bot.handlers.admin.users.StateMachine')
+    @patch('bot.services.billing.StateMachine')
     @patch('bot.handlers.admin.users.NotificationService')
     def test_approve_payment_transitions_to_paid(self, mock_notifier, mock_sm_class, admin_handler, sample_active_user):
-        """Test approve_payment transitions user to PAID state."""
+        """Test approve_payment transitions user to PAID state (the
+        transition lives in the shared grant_paid_access now)."""
         admin_handler._resolve_target = MagicMock(return_value=sample_active_user)
+        admin_handler.db.get_user = MagicMock(return_value=sample_active_user)
 
         mock_sm = MagicMock()
         mock_sm_class.return_value = mock_sm

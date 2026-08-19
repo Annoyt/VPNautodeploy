@@ -325,12 +325,11 @@ class AdminUsersMixin(AdminHandlerBase):
             self.bot.send_message(chat_id=chat_id, text="❌ Пользователь не найден.")
             return
         
-        # Transition to paid
-        sm = StateMachine(self.db)
-        sm.transition(target.chat_id, UserState.PAID)
-        
-        # Create/update subscription
+        # Create the subscription row, then run the shared paid-tier
+        # grant: status flip, quota floor, subscription_expiry, panel
+        # expiry/enable/quota — same semantics as a Stars payment.
         from datetime import datetime, timedelta
+        from bot.services.billing import grant_paid_access
         end_dt = datetime.now() + timedelta(days=30)
         end_date = end_dt.isoformat()
         self.db.create_subscription(
@@ -339,26 +338,16 @@ class AdminUsersMixin(AdminHandlerBase):
             end_date=end_date
         )
 
-        # users.subscription_expiry is what the hy2 auth gate and /sub
-        # check — without it the payment approval never actually
-        # extends access.
-        user = self.db.get_user(target.chat_id)
-        if user:
-            user.subscription_expiry = end_date
-            self.db.save_user(user)
-
-        # Mirror into the panel: re-enable + fresh expiry, so the
-        # depletion job doesn't keep the client cut off.
-        if target.email:
-            try:
-                xui = self.bot.services.get('xui')
-                if xui:
-                    xui.sync_client_settings_sync(
-                        target.email,
-                        {'expiryTime': int(end_dt.timestamp() * 1000),
-                         'enable': True})
-            except Exception as e:
-                logger.warning(f"approve_payment: x-ui sync failed: {e}")
+        xui = self.bot.services.get('xui') if hasattr(self.bot, 'services') else None
+        grant = grant_paid_access(
+            self.db, self.config, xui, target.chat_id, end_dt,
+        )
+        if grant.get('panel_ok') is False:
+            self.bot.send_message(
+                chat_id=chat_id,
+                text=f"⚠️ x-ui sync failed for {target.chat_id} — "
+                     f"проверь клиента в панели.",
+            )
 
         notifier = NotificationService(self.bot, self.db, self.config)
         lang = target.lang or 'ru'

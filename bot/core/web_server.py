@@ -815,9 +815,7 @@ class WebAppServer:
         
         # Get traffic data
         try:
-            all_traffic = await asyncio.to_thread(
-                self.xui.db.get_all_client_traffic
-            )
+            all_traffic = await asyncio.to_thread(self.xui.get_all_traffic)
         except Exception:
             all_traffic = {}
         
@@ -925,9 +923,7 @@ class WebAppServer:
         # Traffic summary
         traffic_summary = {'total_consumed_bytes': 0, 'users_above_90_percent': 0}
         try:
-            all_traffic = await asyncio.to_thread(
-                self.xui.db.get_all_client_traffic
-            )
+            all_traffic = await asyncio.to_thread(self.xui.get_all_traffic)
             all_users = await asyncio.to_thread(self.db.get_all_users)
             
             total_bytes = 0
@@ -1259,8 +1255,8 @@ class WebAppServer:
         # ships (phases 2–5 of the failover plan) this becomes per-node.
         exit_total_bytes = 0
         try:
-            if self.xui and getattr(self.xui, 'db', None):
-                all_traffic = await asyncio.to_thread(self.xui.db.get_all_client_traffic)
+            if self.xui:
+                all_traffic = await asyncio.to_thread(self.xui.get_all_traffic)
                 for v in (all_traffic or {}).values():
                     if isinstance(v, dict):
                         exit_total_bytes += int(v.get('upload') or 0) + int(v.get('download') or 0)
@@ -1321,11 +1317,14 @@ class WebAppServer:
         if not self._validate_admin(request):
             return web.json_response({'error': 'Unauthorized'}, status=401)
 
-        if not self.xui or not getattr(self.xui, 'db', None):
-            return web.json_response({'error': 'x-ui DB not available'}, status=503)
+        # API-first: on entry there is no local x-ui.db, but the panel
+        # API serves the same inbound settings — this page was dead
+        # there behind a db-only gate.
+        if not self.xui:
+            return web.json_response({'error': 'x-ui not available'}, status=503)
 
         try:
-            settings = await asyncio.to_thread(self.xui.db.get_inbound_settings)
+            settings = await self.xui.get_inbound_settings()
         except Exception as e:
             logger.exception("xui_clients: get_inbound_settings failed")
             return web.json_response({'error': str(e)}, status=500)
@@ -1335,7 +1334,7 @@ class WebAppServer:
             xui_clients_raw = settings.get('clients') or []
 
         try:
-            all_traffic = await asyncio.to_thread(self.xui.db.get_all_client_traffic)
+            all_traffic = await asyncio.to_thread(self.xui.get_all_traffic)
         except Exception as e:
             logger.warning(f"xui_clients: traffic fetch failed: {e}")
             all_traffic = {}
@@ -3148,11 +3147,13 @@ class WebAppServer:
             xui = self.bot.services.get('xui') if self.bot else None
             if xui and user.email:
                 try:
-                    client = await asyncio.to_thread(xui.get_client_sync, user.email)
-                    if client:
-                        client['totalGB'] = int(user.quota_gb * BYTES_PER_GB)
-                        inbound_id = client.get('inbound_id', 1)
-                        await asyncio.to_thread(xui.add_client_sync, client, inbound_id)
+                    # In-place update — add_client on an existing email
+                    # deletes + re-adds the client, wiping its traffic.
+                    await asyncio.to_thread(
+                        xui.sync_client_settings_sync,
+                        user.email,
+                        {'totalGB': int(user.quota_gb * BYTES_PER_GB)},
+                    )
                 except Exception as e:
                     logger.warning(f"grant_100gb: x-ui update failed for {target_chat_id}: {e}")
         elif action == 'set_limit_ip':
@@ -3381,6 +3382,30 @@ class WebAppServer:
                     msg = f"🎁 Admin raised your quota to {user.quota_gb:.0f} GB."
                 self.bot.send_message(chat_id=chat_id, text=msg)
             elif action == 'grant_paid':
+                # The generic state map already flipped status to paid;
+                # the shared grant adds what the button alone used to
+                # skip — quota floor, subscription_expiry (+30d or the
+                # remaining term, whichever is later) and the panel
+                # expiry/enable/quota sync.
+                from datetime import datetime as _dt, timedelta as _td
+                from bot.services.billing import grant_paid_access
+                try:
+                    cur = (
+                        _dt.fromisoformat(user.subscription_expiry)
+                        if user.subscription_expiry else _dt.utcnow()
+                    )
+                except ValueError:
+                    cur = _dt.utcnow()
+                paid_until = max(cur, _dt.utcnow()) + _td(days=30)
+                xui = self.bot.services.get('xui') if self.bot else None
+                grant = await asyncio.to_thread(
+                    grant_paid_access,
+                    self.db, self.config, xui, chat_id, paid_until,
+                )
+                if grant.get('panel_ok') is False:
+                    logger.warning(
+                        f"grant_paid: panel sync failed for {chat_id}"
+                    )
                 if user.lang == 'ru':
                     msg = (
                         "⭐ Вам выдан полный доступ!\n\n"

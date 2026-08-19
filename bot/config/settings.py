@@ -216,9 +216,13 @@ class Settings:
         try:
             self.DEMO_TRAFFIC_GB: int = int(os.getenv('DEMO_TRAFFIC_GB', '5'))
             self.DEMO_DAYS: int = int(os.getenv('DEMO_DAYS', '30'))
+            # Monthly allowance a paid grant floors the quota to
+            # (grant_paid_access never lowers a higher hand-set quota).
+            self.PAID_TRAFFIC_GB: int = int(os.getenv('PAID_TRAFFIC_GB', '100'))
         except ValueError:
             self.DEMO_TRAFFIC_GB = 5
             self.DEMO_DAYS = 30
+            self.PAID_TRAFFIC_GB = 100
             
         # Rejection settings
         try:

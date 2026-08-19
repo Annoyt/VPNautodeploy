@@ -358,3 +358,39 @@ def test_stub_db_file_disables_db_mode(tmp_path):
     s = XUIService(StubCfg())
     assert s.db is None
     assert s.api is not None
+
+
+def test_get_all_traffic_api_mode(svc):
+    """Bulk traffic must work without a local x-ui.db — the dashboard
+    user list and the 10-min bot.db mirror both rely on it."""
+    svc.api.get_all_clients_stats = AsyncMock(return_value={
+        "a@x": {"up": 1, "down": 2, "total": 3},
+        "b@x": {"up": 0, "down": 0, "total": 0},
+    })
+
+    out = svc.get_all_traffic()
+
+    assert out == {
+        "a@x": {"upload": 1, "download": 2, "total": 3},
+        "b@x": {"upload": 0, "download": 0, "total": 0},
+    }
+
+
+def test_get_all_traffic_api_failure_is_empty(svc):
+    svc.api.get_all_clients_stats = AsyncMock(side_effect=Exception("down"))
+    assert svc.get_all_traffic() == {}
+
+
+def test_get_client_api_mode_reads_inbound(svc):
+    """get_client in API mode reads the classic record from the inbound
+    settings (there is no dedicated endpoint on the fork)."""
+    svc.config.SS_INBOUND_ID = 5
+    existing = {"email": "u@x", "id": "uuid1", "password": "sspw"}
+    svc.api.get_inbound = AsyncMock(return_value=_inbound_with(existing))
+
+    import asyncio
+    out = asyncio.run(svc.get_client("u@x"))
+
+    assert out == existing
+    # SS inbound first — it carries the per-user SS-2022 password.
+    assert svc.api.get_inbound.await_args_list[0][0][0] == 5

@@ -1057,6 +1057,48 @@ class NotificationService:
             logger.exception(f"demo quota reset: xray reload failed: {e}")
         return True
 
+    def _sync_traffic_to_botdb_sync(self):
+        """Every 10 min: mirror panel traffic into users.traffic_up/down.
+
+        Those columns (in GB) feed the dashboard user list and admin
+        /stats. They used to be written by the standalone
+        traffic-collector container, which is not deployed anywhere —
+        so they've been frozen since. One bulk API read, one UPDATE
+        per user with a key.
+        """
+        import sqlite3
+        from datetime import datetime
+        from bot.services.xui_service import XUIService
+
+        bot_db_path = getattr(self.config, 'DB_PATH', None)
+        if not bot_db_path:
+            return
+
+        xui = XUIService(self.config)
+        traffic = xui.get_all_traffic()
+        if not traffic:
+            return
+
+        gb = 1024 ** 3
+        now_iso = datetime.utcnow().isoformat()
+        try:
+            conn = sqlite3.connect(bot_db_path, timeout=15)
+            with conn:
+                for email, t in traffic.items():
+                    conn.execute(
+                        "UPDATE users SET traffic_up = ?, traffic_down = ?, "
+                        "last_traffic_update = ? WHERE email = ?",
+                        (
+                            round((t.get('upload') or 0) / gb, 3),
+                            round((t.get('download') or 0) / gb, 3),
+                            now_iso,
+                            email,
+                        ),
+                    )
+            conn.close()
+        except Exception as e:
+            logger.warning(f"traffic_botdb_sync failed: {e}")
+
     def _keep_xray_log_readable_sync(self):
         """Hourly: chmod 644 on Xray access.log AND error.log so the
         bot (uid 1000) can read them. Xray creates the files with mode
@@ -1485,6 +1527,16 @@ class NotificationService:
             self._reset_demo_quota_sync,
             CronTrigger(day=1, hour=0, minute=0),
             id='demo_quota_reset',
+            replace_existing=True,
+        )
+        # Every 10 min: pull per-client traffic from the panel into
+        # users.traffic_up/down (GB). Nothing else populates those
+        # columns since the standalone traffic-collector container was
+        # retired, so dashboards and admin /stats read zeros otherwise.
+        self.scheduler.add_job(
+            self._sync_traffic_to_botdb_sync,
+            IntervalTrigger(minutes=10),
+            id='traffic_botdb_sync',
             replace_existing=True,
         )
         # Every 60s: health checks → Telegram alerts. AlertManager

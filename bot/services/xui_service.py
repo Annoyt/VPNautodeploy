@@ -275,18 +275,34 @@ class XUIService:
     
     def get_all_traffic(self) -> Dict[str, Dict]:
         """Get traffic for all clients (synchronous).
-        
-        Note: This method is synchronous for backward compatibility.
-        For async operations, use get_client_traffic() in a loop.
-        
+
+        DB is used when available (one query); API mode fetches the
+        inbound list once and reads every clientStats row from it —
+        same shape either way: {email: {upload, download, total}}.
+
         Returns:
             Dict mapping email to traffic stats
         """
         # DB is faster for bulk operations
         if self.db:
             return self.db.get_all_client_traffic()
-        
-        logger.warning("Cannot get_all_traffic: DB not available (bulk ops require DB)")
+
+        if self.api:
+            try:
+                stats = self._run_sync(self.api.get_all_clients_stats())
+                return {
+                    email: {
+                        'upload': t.get('up', 0),
+                        'download': t.get('down', 0),
+                        'total': t.get('total', 0),
+                    }
+                    for email, t in (stats or {}).items()
+                }
+            except Exception as e:
+                logger.warning(f"API get_all_traffic failed: {e}")
+                return {}
+
+        logger.warning("Cannot get_all_traffic: neither DB nor API available")
         return {}
     
     def get_client_traffic_sync(self, email: str) -> Optional[Dict]:
@@ -360,19 +376,21 @@ class XUIService:
         Returns:
             True if successful
         """
-        # Try API first
-        if self.api:
+        # The fork's HTTP API has no set-counters endpoint (only
+        # resets), so this is DB-only; the hasattr guard keeps a future
+        # client implementation pluggable without touching this code.
+        if self.api and hasattr(self.api, 'update_client_traffic'):
             try:
                 success = await self.api.update_client_traffic(email, upload, download)
                 if success:
                     return True
             except Exception as e:
                 logger.warning(f"API update failed for {redact_email(email)}: {e}")
-        
+
         # Fallback to DB
         if self.db:
             return self.db.update_client_traffic(email, upload, download)
-        
+
         return False
     
     async def reset_client_traffic(self, email: str) -> bool:
@@ -417,19 +435,30 @@ class XUIService:
         Returns:
             Client dict or None
         """
-        # Try API first
+        # API path: read the full classic record out of the inbound
+        # settings (same SS-first lookup the update helpers use). The
+        # API client has no dedicated get_client endpoint.
         if self.api:
             try:
-                client = await self.api.get_client(email)
-                if client:
-                    return client
+                iid = await self._resolve_inbound_id_async()
+                if iid is not None:
+                    inbound_ids = self._client_inbound_ids(iid)
+                    ss_id = int(getattr(self.config, 'SS_INBOUND_ID', 0) or 0)
+                    lookup_order = ([ss_id] if ss_id else []) + [
+                        i for i in inbound_ids if i != ss_id
+                    ]
+                    for candidate in lookup_order:
+                        inbound = await self.api.get_inbound(candidate)
+                        client = self._find_client_by_email(inbound, email)
+                        if client:
+                            return client
             except Exception as e:
                 logger.warning(f"API get_client failed for {redact_email(email)}: {e}")
-        
+
         # Fallback to DB
         if self.db:
             return self.db.get_client_by_email(email)
-        
+
         return None
     
     async def get_online_users(self) -> list:

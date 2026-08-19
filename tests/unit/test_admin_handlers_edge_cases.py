@@ -290,7 +290,7 @@ class TestAdminUsersEdgeCases:
         admin_handler.db.create_subscription = MagicMock()
         
         with patch('bot.handlers.admin.users.NotificationService') as MockNotifier, \
-             patch('bot.handlers.admin.users.StateMachine') as MockSM:
+             patch('bot.services.billing.StateMachine') as MockSM:
             
             admin_handler.approve_payment('admin_id', ['@testuser'])
             

@@ -206,7 +206,9 @@ class TestWebAppServer:
         
         mock_db.get_all_users = Mock(return_value=[user1])
         
-        server.xui.db.get_all_client_traffic = Mock(return_value={
+        # The endpoint reads bulk traffic through the API-aware service
+        # method now, not xui.db directly (dead on the entry node).
+        server.xui.get_all_traffic = Mock(return_value={
             'user1@example.com': {'upload': 1073741824, 'download': 2147483648}  # 1GB + 2GB
         })
         

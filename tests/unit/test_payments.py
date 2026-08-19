@@ -1012,7 +1012,7 @@ class TestOnSuccessfulPayment:
         payment_handler._on_successful_payment(msg)
 
         # Should still process for the event chat (defensive)
-        payment_handler.db.save_user.assert_called_once()
+        assert payment_handler.db.save_user.called
 
     def test_updates_subscription_table(self, payment_handler, sample_user):
         """Test _on_successful_payment updates subscriptions table."""
@@ -1066,7 +1066,7 @@ class TestOnSuccessfulPayment:
         payment_handler._on_successful_payment(msg)
 
         # Should still save user
-        payment_handler.db.save_user.assert_called_once()
+        assert payment_handler.db.save_user.called
 
     def test_success_message_contains_expiry_date(self, payment_handler, sample_user):
         """Test success message shows formatted expiry date."""
@@ -1161,7 +1161,7 @@ class TestOnSuccessfulPayment:
         # Should not raise exception, should fall back to now
         payment_handler._on_successful_payment(msg)
 
-        payment_handler.db.save_user.assert_called_once()
+        assert payment_handler.db.save_user.called
 
 
 # ----- handle() Method Tests -----
@@ -1188,7 +1188,7 @@ class TestHandleRouting:
 
         payment_handler.handle(update)
 
-        payment_handler.db.save_user.assert_called_once()
+        assert payment_handler.db.save_user.called
 
     def test_routes_pre_checkout_query(self, payment_handler):
         """Test handle routes to _on_pre_checkout."""
