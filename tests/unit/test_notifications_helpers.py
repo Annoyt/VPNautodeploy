@@ -485,3 +485,82 @@ class TestDemoResetReprovisionFallback:
             svc._reset_demo_quota_sync()
 
         xui.add_client_sync.assert_not_called()
+
+
+class TestPendingDigest:
+    """Stuck pending_demo requests must resurface hourly with buttons —
+    the one-shot notify used to fail silently and requests rotted."""
+
+    def _svc(self, tmp_path, users, settings=None):
+        import sqlite3
+        from unittest.mock import Mock
+        from bot.services.notifications import NotificationService
+
+        db_path = str(tmp_path / "bot.db")
+        conn = sqlite3.connect(db_path)
+        conn.execute("CREATE TABLE users (chat_id TEXT, username TEXT, "
+                     "status TEXT, created_at TEXT)")
+        conn.executemany("INSERT INTO users VALUES (?, ?, ?, ?)", users)
+        conn.commit()
+        conn.close()
+
+        config = Mock()
+        config.DB_PATH = db_path
+        config.FORUM_ENABLED = True
+        config.FORUM_GROUP_ID = '-100777'
+        config.TOPIC_REQUESTS = 15
+        config.SUPER_ADMIN_ID = '1652899'
+        svc = NotificationService(Mock(), Mock(), config)
+        stored = dict(settings or {})
+        svc.db.get_setting = Mock(side_effect=lambda k, d=None: stored.get(k, d))
+        svc.db.set_setting = Mock(
+            side_effect=lambda k, v: stored.__setitem__(k, v))
+        return svc, stored
+
+    def test_digest_sent_with_buttons(self, tmp_path):
+        svc, stored = self._svc(tmp_path, [
+            ("111", "ivan", "pending_demo", "2026-05-17T07:26:15"),
+            ("222", None, "pending_demo", "2026-06-16T13:26:42"),
+            ("333", "x", "demo", "2026-06-01T00:00:00"),   # not pending
+        ])
+        svc._pending_digest_sync()
+
+        kwargs = svc.bot.send_message.call_args.kwargs
+        assert kwargs['chat_id'] == '-100777'
+        assert kwargs['message_thread_id'] == 15
+        assert 'Незакрытые заявки' in kwargs['text'] and '@ivan' in kwargs['text']
+        rows = kwargs['reply_markup']['inline_keyboard']
+        assert len(rows) == 2
+        assert rows[0][0]['callback_data'] == 'approve:111'
+        assert rows[0][1]['callback_data'] == 'reject:111'
+        assert stored['pending_digest_sig']
+
+    def test_unchanged_set_not_respammed_within_day(self, tmp_path):
+        import hashlib, time
+        sig = hashlib.sha256(b"111").hexdigest()[:16]
+        svc, _ = self._svc(
+            tmp_path,
+            [("111", "ivan", "pending_demo", "2026-05-17")],
+            settings={'pending_digest_sig': sig,
+                      'pending_digest_ts': str(time.time())},
+        )
+        svc._pending_digest_sync()
+        svc.bot.send_message.assert_not_called()
+
+    def test_daily_reminder_when_still_pending(self, tmp_path):
+        import hashlib, time
+        sig = hashlib.sha256(b"111").hexdigest()[:16]
+        svc, _ = self._svc(
+            tmp_path,
+            [("111", "ivan", "pending_demo", "2026-05-17")],
+            settings={'pending_digest_sig': sig,
+                      'pending_digest_ts': str(time.time() - 25 * 3600)},
+        )
+        svc._pending_digest_sync()
+        svc.bot.send_message.assert_called_once()
+
+    def test_empty_pending_clears_signature(self, tmp_path):
+        svc, stored = self._svc(tmp_path, [])
+        svc._pending_digest_sync()
+        svc.bot.send_message.assert_not_called()
+        assert stored['pending_digest_sig'] == ''

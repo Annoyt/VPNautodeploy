@@ -47,8 +47,9 @@ class DemoRequestHandler(BaseCallbackHandler):
         if not self._can_request_demo(user):
             self._notify_already_requested(chat_id)
             return
-        
-        self._process_demo_request(chat_id, user)
+
+        from_user = (update.get('callback_query') or {}).get('from') or {}
+        self._process_demo_request(chat_id, user, from_user)
     
     def _check_rate_limit(self, chat_id: str) -> bool:
         """Check and update rate limit for demo requests."""
@@ -93,7 +94,8 @@ class DemoRequestHandler(BaseCallbackHandler):
             text="⏳ You already have a pending request or active access."
         )
     
-    def _process_demo_request(self, chat_id: str, user) -> None:
+    def _process_demo_request(self, chat_id: str, user,
+                              from_user: dict = None) -> None:
         """Process the demo request with account verification.
 
         Routing rule (added 2026-06):
@@ -114,7 +116,7 @@ class DemoRequestHandler(BaseCallbackHandler):
             sm.transition(chat_id, UserState.PENDING_DEMO)
 
         # Run account verification
-        verification = verifier.verify_account(chat_id)
+        verification = verifier.verify_account(chat_id, from_user=from_user)
 
         if verification.is_realistic:
             # Auto-approve: account looks real

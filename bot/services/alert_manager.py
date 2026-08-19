@@ -593,6 +593,12 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
         for b in cur:
             if b['country'] == '*GLOBAL*':
                 continue
+            if not (b['country'] or '').strip():
+                # Unattributable sources (geoip miss) are internet
+                # scanners, not a cohort of real users — alerting on
+                # them produced daily noise and a paid Kimi run each
+                # time. Real DPI shows up under a real country/ASN.
+                continue
             if b['conn_count'] < DPI_MIN_CONNS:
                 continue
             ratio = b['short_session_count'] / b['conn_count']
@@ -618,10 +624,18 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
         for b in cur:
             if b['country'] == '*GLOBAL*':
                 continue
+            if not (b['country'] or '').strip():
+                # Geoip-less bucket = scanners; see check_dpi_short_sessions.
+                continue
             fails_h = b['hs_fail_count'] / DPI_WINDOW_H
             base = (bl.get((b['country'], b['asn'])) or {}).get('hsfail_h', 0)
             if fails_h < 5:
                 continue  # absolute floor — ignore tiny absolute counts
+            if b['conn_count'] < 1 and fails_h < 30:
+                # Handshake fails with ZERO real connections in the
+                # bucket is a scanner poking the port, not DPI squeezing
+                # users. Only a massive burst is still worth a look.
+                continue
             if base <= 0:
                 ratio = float('inf') if fails_h > 20 else 0
             else:
@@ -632,7 +646,7 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
             severity = 'critical' if ratio > 20 else 'warn'
             r_disp = '∞' if ratio == float('inf') else f"{ratio:.1f}"
             alerts.append(Alert(
-                key=key, severity=severity, min_cycles=1,
+                key=key, severity=severity, min_cycles=2,
                 title=f"Probing? {b['country']}/{b['asn']} hsfail {int(fails_h)}/h ({r_disp}× baseline)",
                 detail=(
                     f"{b['as_org']} · {b['hs_fail_count']} REALITY handshake "

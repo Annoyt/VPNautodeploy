@@ -35,17 +35,26 @@ class AccountVerificationService:
         """
         self.bot = bot
 
-    def verify_account(self, chat_id: str) -> VerificationResult:
+    def verify_account(self, chat_id: str,
+                       from_user: dict = None) -> VerificationResult:
         """Verify if account looks realistic (not a bot).
 
         Args:
             chat_id: User's chat ID
+            from_user: The Telegram ``from`` object of the triggering
+                update, when available — carries ``is_premium``, which
+                get_chat does not expose.
 
         Returns:
             VerificationResult with is_realistic flag and detected signals
         """
         signals = []
         confidence = 'low'
+
+        # Telegram Premium is a paid feature — bot farms don't buy it.
+        # Comes only with the live update, so check before any API call.
+        if from_user and from_user.get('is_premium'):
+            signals.append('premium')
 
         try:
             # Get chat info (includes username, bio, etc.)

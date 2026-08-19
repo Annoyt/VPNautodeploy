@@ -1113,6 +1113,76 @@ class NotificationService:
         except Exception as e:
             logger.warning(f"user notice via email failed for {chat}: {e}")
 
+    def _pending_digest_sync(self):
+        """Hourly: one card listing every open pending_demo request,
+        with per-user approve/reject buttons (the same approve:/reject:
+        callbacks admins already use). Re-sent only when the pending
+        set changes, or daily as a reminder while it stays non-empty.
+        """
+        import hashlib
+        import sqlite3
+        import time as _time
+        from datetime import datetime
+
+        bot_db_path = getattr(self.config, 'DB_PATH', None)
+        if not bot_db_path:
+            return
+        try:
+            conn = sqlite3.connect(bot_db_path)
+            rows = conn.execute(
+                "SELECT chat_id, username, created_at FROM users "
+                "WHERE status = 'pending_demo' ORDER BY created_at"
+            ).fetchall()
+            conn.close()
+        except Exception as e:
+            logger.warning(f"pending digest: db read failed: {e}")
+            return
+
+        if not rows:
+            self.db.set_setting('pending_digest_sig', '')
+            return
+
+        sig = hashlib.sha256(
+            ','.join(r[0] for r in rows).encode()).hexdigest()[:16]
+        last_sig = self.db.get_setting('pending_digest_sig')
+        last_ts = float(self.db.get_setting('pending_digest_ts') or 0)
+        if sig == last_sig and _time.time() - last_ts < 24 * 3600:
+            return
+
+        lines = [f"⏳ <b>Незакрытые заявки на демо: {len(rows)}</b>"]
+        keyboard_rows = []
+        for chat_id, username, created in rows[:20]:
+            uname = f"@{username}" if username else f"user_{chat_id}"
+            age = (created or '')[:10]
+            lines.append(f"• {uname} <code>{chat_id}</code> (с {age})")
+            keyboard_rows.append([
+                {'text': f'✅ {uname}'[:30],
+                 'callback_data': f'approve:{chat_id}'},
+                {'text': '❌', 'callback_data': f'reject:{chat_id}'},
+            ])
+        if len(rows) > 20:
+            lines.append(f"… и ещё {len(rows) - 20}")
+
+        try:
+            if getattr(self.config, 'FORUM_ENABLED', False) and \
+                    getattr(self.config, 'FORUM_GROUP_ID', None):
+                self.bot.send_message(
+                    chat_id=self.config.FORUM_GROUP_ID,
+                    text='\n'.join(lines), parse_mode='HTML',
+                    reply_markup={'inline_keyboard': keyboard_rows},
+                    message_thread_id=getattr(self.config, 'TOPIC_REQUESTS', None),
+                )
+            else:
+                self.bot.send_message(
+                    chat_id=str(self.config.SUPER_ADMIN_ID),
+                    text='\n'.join(lines), parse_mode='HTML',
+                    reply_markup={'inline_keyboard': keyboard_rows},
+                )
+            self.db.set_setting('pending_digest_sig', sig)
+            self.db.set_setting('pending_digest_ts', str(_time.time()))
+        except Exception as e:
+            logger.warning(f"pending digest: send failed: {e}")
+
     def _mail_intake_sync(self):
         """Poll the service mailbox for key requests (see MailIntakeService)."""
         try:
@@ -1660,6 +1730,16 @@ class NotificationService:
             self._reset_demo_quota_sync,
             CronTrigger(day=1, hour=0, minute=0),
             id='demo_quota_reset',
+            replace_existing=True,
+        )
+        # Hourly: re-surface stuck pending_demo requests in the
+        # requests topic. The per-request notify is one-shot — when it
+        # fails (bot offline, TG hiccup) the request rots silently:
+        # seven of them sat unseen from May-June 2026.
+        self.scheduler.add_job(
+            self._pending_digest_sync,
+            IntervalTrigger(hours=1),
+            id='pending_digest',
             replace_existing=True,
         )
         # Every 3 min: inbound-mail key requests → cards with approve
