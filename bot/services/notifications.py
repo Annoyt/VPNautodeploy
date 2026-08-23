@@ -22,6 +22,44 @@ from bot.config import Platform, MESSAGES
 logger = logging.getLogger(__name__)
 
 
+def build_pending_digest(rows, history=None):
+    """Render the «Незакрытые заявки на демо» digest card.
+
+    Shared between the hourly digest job and the in-place refresh that
+    runs after an admin taps an approve/reject button on the card (see
+    ForumMessageService.refresh_pending_digest): both must produce the
+    same layout or the refresh would visually "replace" the digest.
+
+    Args:
+        rows: list of (chat_id, username, created_at) tuples, pending only
+        history: optional trailing action-trace lines ("✅ … — одобрен")
+
+    Returns:
+        (text, reply_markup); reply_markup is an empty inline_keyboard
+        when nothing is pending, so an edit strips the stale buttons.
+    """
+    keyboard_rows = []
+    if rows:
+        lines = [f"⏳ <b>Незакрытые заявки на демо: {len(rows)}</b>"]
+        for chat_id, username, created in rows[:20]:
+            uname = f"@{username}" if username else f"user_{chat_id}"
+            age = (created or '')[:10]
+            lines.append(f"• {uname} <code>{chat_id}</code> (с {age})")
+            keyboard_rows.append([
+                {'text': f'✅ {uname}'[:30],
+                 'callback_data': f'approve:{chat_id}:digest'},
+                {'text': '❌', 'callback_data': f'reject:{chat_id}:digest'},
+            ])
+        if len(rows) > 20:
+            lines.append(f"… и ещё {len(rows) - 20}")
+    else:
+        lines = ["✅ <b>Незакрытых заявок нет</b>"]
+    if history:
+        lines.append('')
+        lines.extend(history)
+    return '\n'.join(lines), {'inline_keyboard': keyboard_rows}
+
+
 class NotificationService:
     """Service for sending notifications to users and admins."""
     
@@ -1145,34 +1183,22 @@ class NotificationService:
         if sig == last_sig and _time.time() - last_ts < 24 * 3600:
             return
 
-        lines = [f"⏳ <b>Незакрытые заявки на демо: {len(rows)}</b>"]
-        keyboard_rows = []
-        for chat_id, username, created in rows[:20]:
-            uname = f"@{username}" if username else f"user_{chat_id}"
-            age = (created or '')[:10]
-            lines.append(f"• {uname} <code>{chat_id}</code> (с {age})")
-            keyboard_rows.append([
-                {'text': f'✅ {uname}'[:30],
-                 'callback_data': f'approve:{chat_id}'},
-                {'text': '❌', 'callback_data': f'reject:{chat_id}'},
-            ])
-        if len(rows) > 20:
-            lines.append(f"… и ещё {len(rows) - 20}")
+        text, reply_markup = build_pending_digest(rows)
 
         try:
             if getattr(self.config, 'FORUM_ENABLED', False) and \
                     getattr(self.config, 'FORUM_GROUP_ID', None):
                 self.bot.send_message(
                     chat_id=self.config.FORUM_GROUP_ID,
-                    text='\n'.join(lines), parse_mode='HTML',
-                    reply_markup={'inline_keyboard': keyboard_rows},
+                    text=text, parse_mode='HTML',
+                    reply_markup=reply_markup,
                     message_thread_id=getattr(self.config, 'TOPIC_REQUESTS', None),
                 )
             else:
                 self.bot.send_message(
                     chat_id=str(self.config.SUPER_ADMIN_ID),
-                    text='\n'.join(lines), parse_mode='HTML',
-                    reply_markup={'inline_keyboard': keyboard_rows},
+                    text=text, parse_mode='HTML',
+                    reply_markup=reply_markup,
                 )
             self.db.set_setting('pending_digest_sig', sig)
             self.db.set_setting('pending_digest_ts', str(_time.time()))

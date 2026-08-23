@@ -41,17 +41,21 @@ class ApproveUserHandler(BaseCallbackHandler):
             self.bot.send_message(chat_id=chat_id, text="❌ Invalid callback data.")
             return
         target_id = parts[1]
-        
+        # "approve:<id>:digest" — the button lives on the hourly digest
+        # card, which must be re-rendered, not stamped (see _update_forum).
+        is_digest = len(parts) > 2 and parts[2] == 'digest'
+
         callback = update.get('callback_query', {})
         message = callback.get('message', {})
-        
-        self._approve_user(target_id, user_id, message)
+
+        self._approve_user(target_id, user_id, message, digest=is_digest)
     
     def _send_permission_denied(self, admin_id: str) -> None:
         """Send permission denied message."""
         self.bot.send_message(chat_id=admin_id, text="❌ No permission.")
     
-    def _approve_user(self, target_id: str, admin_id: str, message: dict) -> None:
+    def _approve_user(self, target_id: str, admin_id: str, message: dict,
+                      digest: bool = False) -> None:
         """Approve user and send notifications."""
         try:
             user = self.validator.validate_user_exists(target_id)
@@ -59,15 +63,21 @@ class ApproveUserHandler(BaseCallbackHandler):
             self._send_user_not_found(admin_id, message, target_id)
             return
 
+        uname = f"@{user.username}" if user.username else f"user_{user.chat_id}"
+
         # Idempotency: only act if user is still in the PENDING_DEMO state.
         # Without this gate a stale Approve button (in a DM that wasn't edited
         # back when FORUM_ENABLED=False) lets the admin re-fire the whole flow
         # repeatedly, sending duplicate notifications to the user.
         if user.status != UserState.PENDING_DEMO.value:
-            self.forum_service.update_request_message(
-                message=message, user=user, admin_id=admin_id,
-                action="APPROVED (already)", emoji="✅"
-            )
+            if digest:
+                self._refresh_digest(
+                    message, f"✅ {uname} — уже обработан ({user.status})")
+            else:
+                self.forum_service.update_request_message(
+                    message=message, user=user, admin_id=admin_id,
+                    action="APPROVED (already)", emoji="✅"
+                )
             logger.info(f"Approve ignored: user {target_id} is in state {user.status!r}, not pending_demo")
             return
 
@@ -79,8 +89,15 @@ class ApproveUserHandler(BaseCallbackHandler):
         notifier = NotificationService(self.bot, self.db, self.config)
         notifier.notify_approved(target_id, user.lang)
 
-        # Strip buttons + stamp the request message (works in PM and forum mode)
-        self._update_forum(message, user, admin_id)
+        if digest:
+            # Digest card: re-render with the remaining pending users and
+            # an action trail — stamping would wipe the list on 1st click.
+            self._refresh_digest(message, f"✅ {uname} — одобрен")
+            if self.config.FORUM_ENABLED:
+                notifier.notify_approved_admin_migration(user, admin_id)
+        else:
+            # Strip buttons + stamp the request message (works in PM and forum mode)
+            self._update_forum(message, user, admin_id)
 
         # Admin notification
         self._notify_admin(message, target_id, user.username, admin_id)
@@ -148,17 +165,20 @@ class RejectUserHandler(BaseCallbackHandler):
             self.bot.send_message(chat_id=chat_id, text="❌ Invalid callback data.")
             return
         target_id = parts[1]
-        
+        # "reject:<id>:digest" — see ApproveUserHandler.handle.
+        is_digest = len(parts) > 2 and parts[2] == 'digest'
+
         callback = update.get('callback_query', {})
         message = callback.get('message', {})
-        
-        self._reject_user(target_id, user_id, message)
+
+        self._reject_user(target_id, user_id, message, digest=is_digest)
     
     def _send_permission_denied(self, admin_id: str) -> None:
         """Send permission denied message."""
         self.bot.send_message(chat_id=admin_id, text="❌ No permission.")
     
-    def _reject_user(self, target_id: str, admin_id: str, message: dict) -> None:
+    def _reject_user(self, target_id: str, admin_id: str, message: dict,
+                     digest: bool = False) -> None:
         """Reject user and send notifications."""
         try:
             user = self.validator.validate_user_exists(target_id)
@@ -166,12 +186,18 @@ class RejectUserHandler(BaseCallbackHandler):
             self._send_user_not_found(admin_id, message, target_id)
             return
 
+        uname = f"@{user.username}" if user.username else f"user_{user.chat_id}"
+
         # Idempotency — see ApproveUserHandler._approve_user for rationale.
         if user.status != UserState.PENDING_DEMO.value:
-            self.forum_service.update_request_message(
-                message=message, user=user, admin_id=admin_id,
-                action="REJECTED (already)", emoji="❌"
-            )
+            if digest:
+                self._refresh_digest(
+                    message, f"❌ {uname} — уже обработан ({user.status})")
+            else:
+                self.forum_service.update_request_message(
+                    message=message, user=user, admin_id=admin_id,
+                    action="REJECTED (already)", emoji="❌"
+                )
             logger.info(f"Reject ignored: user {target_id} is in state {user.status!r}, not pending_demo")
             return
 
@@ -185,20 +211,24 @@ class RejectUserHandler(BaseCallbackHandler):
         # Increment reject counter
         user.reject_count = (user.reject_count or 0) + 1
         self.db.save_user(user)
-        
+
         # Default rejection reason based on missing username
         reason = "Отсутствует username в Telegram" if not user.username else "Заявка отклонена"
-        
+
         # Notify user
         notifier = NotificationService(self.bot, self.db, self.config)
         notifier.notify_rejected(target_id, reason, user.lang)
-        
+
         # Forum updates
-        self._update_forum(message, user, admin_id)
-        
+        if digest:
+            self._refresh_digest(message, f"❌ {uname} — отклонён")
+            self._send_rejected_topic_card(user, admin_id)
+        else:
+            self._update_forum(message, user, admin_id)
+
         # Admin notification
         self._notify_admin(message, target_id, user.username, admin_id)
-        
+
         logger.info(f"User {target_id} rejected by admin {admin_id} (count: {user.reject_count})")
     
     def _send_user_not_found(self, admin_id: str, message: dict, target_id: str) -> None:
@@ -221,17 +251,20 @@ class RejectUserHandler(BaseCallbackHandler):
             action="REJECTED",
             emoji="❌"
         )
-        
-        # Send to rejected topic
-        if self.config.FORUM_ENABLED:
-            keyboard = build_rejected_user_keyboard(user)
-            self.bot.send_message_to_topic(
-                chat_id=self.config.FORUM_GROUP_ID,
-                message_thread_id=self.config.TOPIC_REJECTED,
-                text=f"❌ <b>Request Rejected</b>\n\nUser: {user.chat_id} (@{user.username})\nAdmin: {admin_id}",
-                parse_mode='HTML',
-                reply_markup=keyboard
-            )
+        self._send_rejected_topic_card(user, admin_id)
+
+    def _send_rejected_topic_card(self, user, admin_id: str) -> None:
+        """Post the rejection card into TOPIC_REJECTED (forum mode only)."""
+        if not self.config.FORUM_ENABLED:
+            return
+        keyboard = build_rejected_user_keyboard(user)
+        self.bot.send_message_to_topic(
+            chat_id=self.config.FORUM_GROUP_ID,
+            message_thread_id=self.config.TOPIC_REJECTED,
+            text=f"❌ <b>Request Rejected</b>\n\nUser: {user.chat_id} (@{user.username})\nAdmin: {admin_id}",
+            parse_mode='HTML',
+            reply_markup=keyboard
+        )
     
     def _notify_admin(self, message: dict, target_id: str, username: str, admin_id: str) -> None:
         """Send rejection confirmation to admin."""

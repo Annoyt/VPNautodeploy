@@ -154,6 +154,54 @@ class ForumMessageService:
             logger.warning(f"Failed to edit request message: {e}")
             return False
     
+    # Lines the digest refresh must carry over from the previous render
+    # (the visible action trail at the bottom of the card).
+    DIGEST_HISTORY_PREFIXES = ('✅ ', '❌ ')
+
+    def refresh_pending_digest(self, message: dict, pending_rows, note: str) -> bool:
+        """Re-render the «Незакрытые заявки» digest card in place.
+
+        Used instead of update_request_message when the tapped button
+        lives on the hourly digest: stamping would wipe the whole list
+        after one click. Here the acted-on row disappears, every other
+        row keeps its buttons, and the action lands in a visible
+        history trail at the bottom.
+
+        Args:
+            message: the digest message dict (from callback_query.message)
+            pending_rows: (chat_id, username, created_at) tuples still pending
+            note: history line for this action, e.g. "✅ @user — одобрен"
+
+        Returns:
+            True if the digest was edited.
+        """
+        from bot.services.notifications import build_pending_digest
+
+        message_id = message.get('message_id')
+        if not message_id:
+            return False
+        source_chat_id = str((message.get('chat') or {}).get('id') or '')
+        if not source_chat_id:
+            return False
+
+        history = [ln for ln in (message.get('text') or '').splitlines()
+                   if ln.startswith(self.DIGEST_HISTORY_PREFIXES)]
+        history.append(note)
+
+        text, reply_markup = build_pending_digest(pending_rows, history=history)
+        try:
+            self.bot.edit_message_text(
+                chat_id=source_chat_id,
+                message_id=message_id,
+                text=text,
+                parse_mode='HTML',
+                reply_markup=reply_markup,
+            )
+            return True
+        except Exception as e:
+            logger.warning(f"Failed to refresh pending digest: {e}")
+            return False
+
     def send_admin_notification(
         self,
         chat_id: str,
@@ -195,6 +243,12 @@ class BaseCallbackHandler(BaseHandler, ABC):
         super().__init__(bot, db, config)
         self.validator = ValidationService(db, config)
         self.forum_service = ForumMessageService(bot, config)
+
+    def _refresh_digest(self, message: dict, note: str) -> bool:
+        """Re-render the pending-requests digest with current DB state."""
+        pending = self.db.get_users_by_status('pending_demo') or []
+        rows = [(u.chat_id, u.username, u.created_at) for u in pending]
+        return self.forum_service.refresh_pending_digest(message, rows, note)
     
     def _run_async(self, coro_or_factory, *args) -> None:
         """Run async coroutine or factory safely in sync context.

@@ -531,8 +531,11 @@ class TestPendingDigest:
         assert 'Незакрытые заявки' in kwargs['text'] and '@ivan' in kwargs['text']
         rows = kwargs['reply_markup']['inline_keyboard']
         assert len(rows) == 2
-        assert rows[0][0]['callback_data'] == 'approve:111'
-        assert rows[0][1]['callback_data'] == 'reject:111'
+        # ":digest" marks the button as living on the digest card, so the
+        # approve/reject callbacks re-render the list instead of stamping
+        # it (see tests/unit/test_pending_digest_refresh.py).
+        assert rows[0][0]['callback_data'] == 'approve:111:digest'
+        assert rows[0][1]['callback_data'] == 'reject:111:digest'
         assert stored['pending_digest_sig']
 
     def test_unchanged_set_not_respammed_within_day(self, tmp_path):
