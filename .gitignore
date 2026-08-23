@@ -52,3 +52,9 @@ Thumbs.db
 .archive/
 .mempalace/
 .prod-hotfixes-capture/
+
+# mutmut mutation-testing artifacts
+mutants/
+
+# Claude Code local permissions
+.claude/settings.local.json

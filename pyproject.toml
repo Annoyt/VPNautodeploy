@@ -1,0 +1,29 @@
+# Mutation testing for the support-reply flow (see
+# tests/unit/test_forum_reply_forwarding.py). Run with:
+#
+#   python3 -m mutmut run
+#   python3 -m mutmut results
+#
+# Scope is deliberately narrow: mutating the whole bot/ package would
+# mean thousands of mutants x the full unit suite. Widen only_mutate
+# when a new module gets its own killing suite.
+#
+# State as of 2026-08-23: 461 mutants — 455 killed, 0 uncovered, and
+# 6 accepted equivalent survivors:
+# - _is_forum_admin m22: '' fallback in sender_chat_id unreachable for
+#   real Telegram payloads;
+# - _resolve_directed_reply m36 (rt_text fallback has no digits either
+#   way) and m48 (body unused when label is None);
+# - handle_close_ticket m48 ('XXXX'[11:16] == ''[11:16] == ''),
+#   m140/m141 (`lang or 'ru'` is double-safety on top of
+#   texts.get(lang, texts['ru']) — outputs can never differ).
+
+[tool.mutmut]
+source_paths = ["bot"]
+only_mutate = ["bot/handlers/forum.py"]
+pytest_add_cli_args_test_selection = [
+    "tests/unit/test_forum_reply_forwarding.py",
+    "tests/unit/test_forum_close_ticket.py",
+    "tests/unit/test_forum_empty_text_fix.py",
+]
+also_copy = ["pytest.ini"]
