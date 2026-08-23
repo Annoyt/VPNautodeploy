@@ -247,7 +247,7 @@ class NotificationService:
         'hy2':     ("🛟 Hysteria2 (UDP)",
                     "UDP-протокол. Проходит там, где TCP-VPN режут. Быстрый, но UDP-порты часто фильтруются провайдерами."),
         'hy2t':    ("🚀 Hysteria2 Turbo (UDP)",
-                    "Тот же Hysteria2, но с агрессивным контролем скорости (Brutal): пробивает провайдерский шейпинг за счёт постоянной отправки на заданной скорости. Пробуй, если обычный Hysteria2 медленный."),
+                    "Протокол по умолчанию платного тарифа: Hysteria2 с агрессивным контролем скорости (Brutal), пробивает провайдерский шейпинг за счёт постоянной отправки на заданной скорости."),
         'reality': ("🔑 Reality (TCP)",
                     "Классический VLESS+Reality. Самый быстрый из всех, но первым выходит из строя если DPI начинает профайлить нашу инфру."),
     }
@@ -259,7 +259,7 @@ class NotificationService:
         'hy2':     ("🛟 Hysteria2 (UDP)",
                     "UDP protocol. Slips through where TCP VPNs get throttled. Fast, but UDP ports are often filtered."),
         'hy2t':    ("🚀 Hysteria2 Turbo (UDP)",
-                    "Same Hysteria2, but with aggressive rate control (Brutal): punches through ISP shaping by sending at a fixed rate. Try it when regular Hysteria2 feels slow."),
+                    "The paid-tier default: Hysteria2 with aggressive rate control (Brutal) that punches through ISP shaping by sending at a fixed rate."),
         'reality': ("🔑 Reality (TCP)",
                     "Classic VLESS+Reality. Fastest of the four, but the first to die once DPI starts profiling our infra."),
     }

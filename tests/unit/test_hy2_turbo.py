@@ -114,23 +114,31 @@ class TestCascade:
         assert MyKeyAnswerHandler.PROTOCOL_TIER['hy2t'] == 'paid'
         assert 'hy2t' in MyKeyAnswerHandler.DEFAULT_CASCADE_ORDER
 
-    def test_free_tier_never_sees_hy2t(self):
+    def test_plain_hy2_is_freemium_now(self):
+        """2026-08-23 operator decision: BBR hy2 goes to the 10 GB
+        freemium tier, Brutal turbo stays the paid exclusive."""
+        assert MyKeyAnswerHandler.PROTOCOL_TIER['hy2'] == 'free'
+
+    def test_free_tier_gets_hy2_but_never_hy2t(self):
         order = MyKeyAnswerHandler.get_cascade_order(
             db=None, user=SimpleNamespace(status='demo', last_asn=None,
                                           last_country=None))
+        assert 'hy2' in order
         assert 'hy2t' not in order
-        assert 'hy2' not in order
+        assert 'reality' not in order
+        # demo cohort still starts from the resilience ladder
+        assert order[0] == 'stls'
 
-    def test_paid_tier_sees_hy2t(self):
+    def test_paid_tier_defaults_to_hy2t(self):
         order = MyKeyAnswerHandler.get_cascade_order(
             db=None, user=SimpleNamespace(status='paid', last_asn=None,
                                           last_country=None))
-        assert 'hy2t' in order
+        assert order[0] == 'hy2t'
+        assert 'hy2' in order
 
-    def test_country_override_still_appends_hy2t(self):
-        """KZ ladder predates hy2t — the projection must append it."""
-        order = MyKeyAnswerHandler.get_cascade_order(
-            db=None, user=SimpleNamespace(status='paid', last_asn=None,
-                                          last_country='KZ'))
-        assert order[0] == 'reality'
-        assert 'hy2t' in order
+    def test_country_ladders_lead_with_hy2t_for_paid(self):
+        for country in ('RU', 'KZ'):
+            order = MyKeyAnswerHandler.get_cascade_order(
+                db=None, user=SimpleNamespace(status='paid', last_asn=None,
+                                              last_country=country))
+            assert order[0] == 'hy2t', country

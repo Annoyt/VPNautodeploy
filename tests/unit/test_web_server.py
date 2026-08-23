@@ -345,8 +345,10 @@ class TestHy2AuthQuotaGate:
 
 
 class TestHy2AuthPaidTier:
-    """Hy2 is paid-tier: the auth callback must reject demo UUIDs even
-    when the user is otherwise active and under quota."""
+    """Tier split between the two hysteria instances (2026-08-23):
+    the MAIN callback (/api/hy2/auth) is freemium — demo UUIDs connect;
+    the TURBO callback (/api/hy2t/auth) stays paid-only so a demo UUID
+    extracted from a free key can't unlock the Brutal instance."""
 
     def _make_server(self, status):
         from unittest.mock import AsyncMock
@@ -370,11 +372,12 @@ class TestHy2AuthPaidTier:
         })
         return WebAppServer(config, db, xui_service=xui)
 
-    async def _auth(self, server):
+    async def _auth(self, server, turbo=False):
         from unittest.mock import AsyncMock
         request = Mock()
         request.json = AsyncMock(return_value={'auth': 'some-uuid', 'addr': ''})
-        response = await server.handle_hy2_auth(request)
+        handler = server.handle_hy2t_auth if turbo else server.handle_hy2_auth
+        response = await handler(request)
         return json.loads(response.text)
 
     @pytest.mark.asyncio
@@ -389,8 +392,23 @@ class TestHy2AuthPaidTier:
         assert data['ok'] is True
 
     @pytest.mark.asyncio
-    async def test_demo_denied(self):
+    async def test_demo_allowed_on_main_instance(self):
         data = await self._auth(self._make_server('demo'))
+        assert data['ok'] is True
+
+    @pytest.mark.asyncio
+    async def test_pending_denied_on_main_instance(self):
+        data = await self._auth(self._make_server('pending_demo'))
+        assert data['ok'] is False
+
+    @pytest.mark.asyncio
+    async def test_paid_allowed_on_turbo(self):
+        data = await self._auth(self._make_server('paid'), turbo=True)
+        assert data['ok'] is True
+
+    @pytest.mark.asyncio
+    async def test_demo_denied_on_turbo(self):
+        data = await self._auth(self._make_server('demo'), turbo=True)
         assert data['ok'] is False
 
 

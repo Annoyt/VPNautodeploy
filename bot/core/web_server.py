@@ -93,6 +93,7 @@ class WebAppServer:
         # hysteria daemon calls this on every new connection. The
         # password (= user UUID) is the auth secret.
         self.app.router.add_post('/api/hy2/auth', self.handle_hy2_auth)
+        self.app.router.add_post('/api/hy2t/auth', self.handle_hy2t_auth)
         self.app.router.add_post('/api/dpi/exit_report', self.handle_dpi_exit_report)
         # Sing-box subscription endpoint. Public — the path token is
         # the auth (HMAC of the user's UUID with BOT_TOKEN as key).
@@ -427,6 +428,28 @@ class WebAppServer:
         })
 
     async def handle_hy2_auth(self, request: web.Request) -> web.Response:
+        """Auth callback for the MAIN hysteria instance (:8400).
+
+        Since 2026-08-23 the main instance is freemium: demo UUIDs
+        connect too (the shared client_traffics quota still caps them
+        at their 10 GB). The turbo instance keeps its own paid-only
+        callback — see handle_hy2t_auth.
+        """
+        return await self._hy2_auth_common(request, paid_only=False)
+
+    async def handle_hy2t_auth(self, request: web.Request) -> web.Response:
+        """Auth callback for the TURBO hysteria instance (:8402).
+
+        Turbo (Brutal CC) is the paid-tier speed exclusive, and the two
+        hysteria daemons share password=uuid — so the tier gate has to
+        live in the callback URL: config-turbo.yaml points here, and
+        this route keeps the paid-statuses check the main route dropped.
+        """
+        return await self._hy2_auth_common(request, paid_only=True)
+
+    async def _hy2_auth_common(
+        self, request: web.Request, paid_only: bool
+    ) -> web.Response:
         """Hysteria2 sidecar auth callback.
 
         Called by the hysteria daemon on every new connection. The
@@ -520,15 +543,17 @@ class WebAppServer:
                             expired = True
                     except Exception:
                         pass
-                # Hy2 is a paid-tier protocol (PROTOCOL_TIER): demo
-                # subscriptions never contain hy2 links, so the auth
-                # callback must not accept demo UUIDs either — otherwise
-                # anyone who extracts their UUID from a free key gets a
-                # direct-to-entry transport the tier gate was supposed
-                # to withhold.
+                # Tier gate. Turbo (paid_only=True) mirrors PROTOCOL_TIER:
+                # a demo UUID extracted from a free key must not unlock
+                # the Brutal instance. The main instance additionally
+                # accepts the demo cohort (freemium hy2 since 2026-08-23);
+                # everything else (new/pending/rejected/banned) still
+                # fails closed on both.
                 from bot.handlers.callbacks.user import MyKeyAnswerHandler
-                if (not expired
-                        and status in MyKeyAnswerHandler.PAID_USER_STATUSES):
+                allowed = set(MyKeyAnswerHandler.PAID_USER_STATUSES)
+                if not paid_only:
+                    allowed.add('demo')
+                if not expired and status in allowed:
                     decision = 'allow'
 
         # Panel-side quota gate. Hy2 bytes are bridged into the panel's

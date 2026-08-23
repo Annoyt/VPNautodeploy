@@ -619,27 +619,28 @@ class MyKeyAnswerHandler(BaseCallbackHandler):
         'reality': 'generate_vless_link',
     }
     # Per-protocol tier gates which user tiers see which protocols.
-    # `free` = stealth-only set the demo cohort gets — every entry
-    # hides our infra IP behind CF or a microsoft.com handshake.
-    # `paid` = adds the direct-to-entry fast paths (Hy2, Reality).
-    # Direct paths leak our entry IP to the client and to DPI on the
-    # client's network, which is acceptable for paying users who get
-    # priority IP rotation but not for the demo pool where one burnt
-    # IP would melt the whole free tier.
+    # `paid` = the premium set: Turbo Hy2 (Brutal CC — the speed
+    # exclusive) and Reality. `free` = everything else, including the
+    # plain BBR Hy2 since 2026-08-23 (operator decision: freemium gets
+    # a UDP transport, paid keeps the faster Brutal variant). Note the
+    # trade-off: hy2 is direct-to-entry, so the demo cohort now sees
+    # the entry IP — if the free pool burns it, both hy2 variants and
+    # Reality burn together. The hy2/hy2t auth split lives in
+    # web_server (/api/hy2/auth vs /api/hy2t/auth).
     PROTOCOL_TIER = {
         'stls':    'free',
         'ws':      'free',
-        'hy2':     'paid',
+        'hy2':     'free',
         'hy2t':    'paid',
         'reality': 'paid',
     }
     PAID_USER_STATUSES = frozenset({'paid', 'support_topic'})
-    # Resilience-first default ladder. Both CDN-fronted VMess variants
-    # (httpupgrade `ws` and the new `xhttp`) sit between ShadowTLS and
-    # the direct-to-entry protocols. Reality empirically banned first
-    # by RKN once a new entry IP is profiled, so it stays at the
-    # bottom. Admin can override via dashboard.
-    DEFAULT_CASCADE_ORDER = ('stls', 'ws', 'hy2', 'hy2t', 'reality')
+    # Turbo Hy2 leads: it's the paid default (fastest, Brutal CC), and
+    # the free-tier filter drops it anyway so demo users still start
+    # from the resilience ladder (stls → ws → hy2). Reality empirically
+    # banned first by RKN once a new entry IP is profiled, so it stays
+    # at the bottom. Admin can override via dashboard.
+    DEFAULT_CASCADE_ORDER = ('hy2t', 'stls', 'ws', 'hy2', 'reality')
     SETTING_KEY = 'cascade_protocol_order'
     COUNTRY_SETTING_KEY = 'cascade_by_country'
     ASN_SETTING_KEY = 'cascade_by_asn'
@@ -651,17 +652,20 @@ class MyKeyAnswerHandler(BaseCallbackHandler):
     # variant since DPI there is rarely an issue and Reality/Hy2 have
     # the best throughput. The free-tier filter still applies on top
     # of whatever ladder is picked here.
+    # hy2t leads everywhere: paid users get the Brutal instance as the
+    # default; the free-tier filter strips it so these ladders read as
+    # the old resilience-first / direct-first orders for the demo pool.
     COUNTRY_CASCADE_DEFAULTS = {
-        'RU': ('stls', 'ws', 'hy2', 'reality'),
-        'BY': ('stls', 'ws', 'hy2', 'reality'),
-        'IR': ('stls', 'ws', 'hy2', 'reality'),
-        'CN': ('stls', 'ws', 'hy2', 'reality'),
+        'RU': ('hy2t', 'stls', 'ws', 'hy2', 'reality'),
+        'BY': ('hy2t', 'stls', 'ws', 'hy2', 'reality'),
+        'IR': ('hy2t', 'stls', 'ws', 'hy2', 'reality'),
+        'CN': ('hy2t', 'stls', 'ws', 'hy2', 'reality'),
         # Direct-first for less-censored regions.
-        'KZ': ('reality', 'hy2', 'stls', 'ws'),
-        'UA': ('reality', 'hy2', 'stls', 'ws'),
-        'KG': ('reality', 'hy2', 'stls', 'ws'),
-        'AM': ('reality', 'hy2', 'stls', 'ws'),
-        'GE': ('reality', 'hy2', 'stls', 'ws'),
+        'KZ': ('hy2t', 'reality', 'hy2', 'stls', 'ws'),
+        'UA': ('hy2t', 'reality', 'hy2', 'stls', 'ws'),
+        'KG': ('hy2t', 'reality', 'hy2', 'stls', 'ws'),
+        'AM': ('hy2t', 'reality', 'hy2', 'stls', 'ws'),
+        'GE': ('hy2t', 'reality', 'hy2', 'stls', 'ws'),
     }
 
     @classmethod
