@@ -150,7 +150,7 @@ class AdminHandlerBase(BaseHandler):
         if not message or 'text' not in message:
             return False
         
-        text = message.get('text', '')
+        text = message.get('text') or ''
         if not text.startswith('/'):
             return False
         

@@ -1,11 +1,20 @@
 """Forum handler for topic messages"""
 
 import logging
+import re
 from typing import Optional
 
 from bot.handlers.base import BaseHandler
 
 logger = logging.getLogger(__name__)
+
+# Directed reply in a shared topic: "@<chat_id или username> текст".
+# Usernames are 5-32 [A-Za-z0-9_] per Telegram; numeric = chat_id.
+DIRECTED_RE = re.compile(r'^@([A-Za-z0-9_]{3,32})(?:[\s,:]+(.*))?$', re.DOTALL)
+
+# chat_id inside the bot's own posts (failure reports, ticket logs):
+# "User: @name (8111788347)" — the parenthesised id is authoritative.
+REPLY_TO_ID_RE = re.compile(r'\((\d{5,})\)')
 
 
 class ForumHandler(BaseHandler):
@@ -48,7 +57,7 @@ class ForumHandler(BaseHandler):
             return False
         
         # Must be in the configured forum group
-        chat_id = str(message.get('chat', {}).get('id', ''))
+        chat_id = str((message.get('chat') or {}).get('id'))
         if chat_id != self.config.FORUM_GROUP_ID:
             return False
             
@@ -61,15 +70,14 @@ class ForumHandler(BaseHandler):
             update: Telegram update object
         """
         message = update.get('message', {})
-        text = message.get('text', '')
+        text = message.get('text') or ''
         topic_id = message.get('message_thread_id')
-        user_id = str(message.get('from', {}).get('id', ''))
-        
+
         if not topic_id:
             return
             
         # 1. Handle /close command
-        if text and text.strip():
+        if text.strip():
             parts = text.strip().split()
             if parts and parts[0].lower() == '/close':
                 self.handle_close_ticket(update, topic_id)
@@ -79,17 +87,133 @@ class ForumHandler(BaseHandler):
         self._log_ticket_message(message, topic_id, sender_type='admin')
 
         # 3. If from admin, forward to user
-        if self._is_admin(user_id):
-            user = self._get_user_by_topic(topic_id)
-            if not user:
-                return
-            
-            # Forward text if present
-            if text:
-                self._forward_reply_to_user(user, text)
-            
-            # Note: Media forwarding could be added here if needed, 
-            # but usually admin replies with text only or uses manual forward.
+        if not self._is_forum_admin(message):
+            return
+
+        user = self._get_user_by_topic(topic_id)
+        if user:
+            delivered = self._deliver_reply(user, message, text)
+            if delivered is False:
+                # The old code dropped failures silently — that's how
+                # lost replies went unnoticed for weeks. Surface it.
+                self._notify_topic(
+                    topic_id,
+                    f"⚠️ Не доставлено пользователю <code>{user.chat_id}</code> — "
+                    f"возможно, бот заблокирован.",
+                )
+            return
+
+        # Topic without a bound user (общая «Поддержка», куда бот постит
+        # failure-репорты). Admins answer here as "@<chat_id> текст" or
+        # by swipe-replying to the bot's report — relay through the bot,
+        # since the client is not in the group and a raw @mention of a
+        # numeric id delivers nothing.
+        target, body, label = self._resolve_directed_reply(message, text)
+        if label is None:
+            return  # ordinary chatter, not addressed to anyone
+        if target is None:
+            self._notify_topic(
+                topic_id,
+                f"⚠️ Не нашёл пользователя @{label} в базе бота — ответ не доставлен.",
+            )
+            return
+        delivered = self._deliver_reply(target, message, body, caption_override=body)
+        if delivered:
+            self._notify_topic(
+                topic_id,
+                f"✅ Доставлено пользователю <code>{target.chat_id}</code> через бота.",
+            )
+        else:
+            self._notify_topic(
+                topic_id,
+                f"⚠️ Не доставлено <code>{target.chat_id}</code> — пустое сообщение, "
+                f"неподдерживаемый тип вложения или бот заблокирован.",
+            )
+
+    def _deliver_reply(self, user, message: dict, text: str,
+                       caption_override: Optional[str] = None) -> Optional[bool]:
+        """Ship an admin reply (text or media) to the user's PM.
+
+        Returns:
+            True if delivered, False if sending failed, None when the
+            message carries nothing forwardable (sticker, poll, …).
+        """
+        has_media = bool(
+            message.get('photo') or message.get('document')
+            or message.get('voice') or message.get('video')
+        )
+        if has_media:
+            # copyMessage replays the attachment (with its caption)
+            # into the user's PM — plain sendMessage would drop the
+            # screenshot the admin just pasted.
+            return self._copy_media_to_user(user, message, caption=caption_override)
+        if text:
+            return self._forward_reply_to_user(user, text)
+        return None
+
+    def _resolve_directed_reply(self, message: dict, text: str):
+        """Work out which user a shared-topic admin message addresses.
+
+        Returns:
+            (user, body, label) — ``label is None`` means the message is
+            not addressed to anyone; ``user is None`` with a label means
+            the address didn't resolve to a known bot user.
+        """
+        source = text or message.get('caption') or ''
+        m = DIRECTED_RE.match(source.strip())
+        if m:
+            handle = m.group(1)
+            body = (m.group(2) or '').strip()
+            if handle.isdigit():
+                user = self.db.get_user(handle)
+            else:
+                user = self.db.get_user_by_username(handle)
+            return user, body, handle
+
+        reply_to = message.get('reply_to_message') or {}
+        rt_text = reply_to.get('text') or reply_to.get('caption') or ''
+        ids = REPLY_TO_ID_RE.findall(rt_text) or re.findall(r'@(\d{5,})', rt_text)
+        if ids:
+            return self.db.get_user(ids[0]), source.strip(), ids[0]
+
+        return None, '', None
+
+    def _notify_topic(self, topic_id: int, text: str) -> None:
+        """Best-effort operator feedback into the topic itself."""
+        try:
+            self.bot.send_message(
+                chat_id=self.config.FORUM_GROUP_ID,
+                text=text,
+                message_thread_id=topic_id,
+                parse_mode='HTML',
+            )
+        except Exception as e:
+            logger.warning(f"topic ack failed for {topic_id}: {e}")
+
+    # Telegram's service account that fronts "Remain Anonymous" admins.
+    GROUP_ANONYMOUS_BOT_ID = '1087968824'
+
+    def _is_forum_admin(self, message: dict) -> bool:
+        """True when the message author counts as support staff.
+
+        An admin reply arrives in one of three shapes:
+        - normal: ``from.id`` is the admin's own account;
+        - anonymous ("Remain Anonymous" enabled): ``from`` is
+          GroupAnonymousBot and ``sender_chat`` is the forum group
+          itself — only chat admins can post that way, so it's proof
+          of adminship by construction;
+        - another group admin (not SUPER_ADMIN): resolved via
+          getChatMember, which BaseHandler._is_admin only does when
+          given the chat_id.
+        """
+        chat_id = str((message.get('chat') or {}).get('id') or '')
+        sender_chat_id = str((message.get('sender_chat') or {}).get('id') or '')
+        if sender_chat_id and sender_chat_id == chat_id:
+            return True
+        user_id = str((message.get('from') or {}).get('id') or '')
+        if not user_id:
+            return False
+        return self._is_admin(user_id, chat_id)
 
     def handle_close_ticket(self, update: dict, topic_id: int) -> None:
         """Compile ticket log, close topic, notify user, reset state.
@@ -275,7 +399,43 @@ class ForumHandler(BaseHandler):
             )
             
             return result is not None
-            
+
         except Exception as e:
             logger.error(f"Failed to send reply to user: {e}")
+            return False
+
+    def _copy_media_to_user(self, user, message: dict,
+                            caption: Optional[str] = None) -> bool:
+        """Replay an admin's media reply into the user's PM.
+
+        Sends the standard "Support Reply" header first, then copies the
+        original message (attachment + caption) via copyMessage.
+
+        Args:
+            user: User object
+            message: Telegram message object from the topic
+            caption: replaces the original caption when not None (used
+                to strip the "@<chat_id>" addressing prefix)
+
+        Returns:
+            True if the copy succeeded
+        """
+        extra = {}
+        if caption is not None:
+            extra['caption'] = caption
+        try:
+            self.bot.send_message(
+                chat_id=user.chat_id,
+                text="💬 <b>Support Reply:</b>",
+                parse_mode='HTML',
+            )
+            result = self.bot.copy_message(
+                chat_id=user.chat_id,
+                from_chat_id=self.config.FORUM_GROUP_ID,
+                message_id=message['message_id'],
+                **extra,
+            )
+            return result is not None
+        except Exception as e:
+            logger.error(f"Failed to copy media reply to user {user.chat_id}: {e}")
             return False
