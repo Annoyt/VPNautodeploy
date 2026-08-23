@@ -297,12 +297,55 @@ class VPNService:
         Password = the user's UUID — same secret as VLESS, validated
         by the bot's /api/hy2/auth callback. No separate password DB.
         """
+        port = int(getattr(self.config, 'HY2_PORT', 8400) or 8400)
+        hop = (getattr(self.config, 'HY2_HOP_PORTS', '') or '').strip()
+        return self._hy2_share_link(client_uuid, email, port, hop, '-hy2')
+
+    def generate_hy2t_link(
+        self,
+        client_uuid: str,
+        email: str,
+    ) -> Optional[str]:
+        """Turbo Hy2 variant (second hysteria instance on the exit).
+
+        Same host/auth/obfs as the main instance, but the server honours
+        client bandwidth hints (Brutal CC) and hops over its own fresh
+        port range. ``upmbps``/``downmbps`` are non-standard URI params:
+        clients that understand them switch to Brutal, the rest ignore
+        them harmlessly and stay on BBR (still a useful A/B against the
+        main instance thanks to the unprofiled hop range).
+
+        Returns ``None`` when HY2T_PORT is unset — turbo disabled.
+        """
+        port_raw = (getattr(self.config, 'HY2T_PORT', '') or '').strip()
+        if not port_raw:
+            return None
+        try:
+            port = int(port_raw)
+        except ValueError:
+            return None
+        hop = (getattr(self.config, 'HY2T_HOP_PORTS', '') or '').strip()
+        extra = (
+            f"upmbps={int(getattr(self.config, 'HY2T_UP_MBPS', 20) or 20)}",
+            f"downmbps={int(getattr(self.config, 'HY2T_DOWN_MBPS', 60) or 60)}",
+        )
+        return self._hy2_share_link(client_uuid, email, port, hop, '-hy2t', extra)
+
+    def _hy2_share_link(
+        self,
+        client_uuid: str,
+        email: str,
+        port: int,
+        hop: str,
+        suffix: str,
+        extra_params: tuple = (),
+    ) -> Optional[str]:
+        """Shared hysteria2:// URL builder for the main and turbo links."""
         host = getattr(self.config, 'HY2_HOST', '') or ''
         if not host:
             return None
-        port = int(getattr(self.config, 'HY2_PORT', 8400) or 8400)
         sni = getattr(self.config, 'HY2_SNI', host) or host
-        connection_name = quote(f"{email.split('@')[0]}-hy2")
+        connection_name = quote(f"{email.split('@')[0]}{suffix}")
         params = [f"sni={sni}", "insecure=0"]
         # Salamander obfs + port hopping — must mirror the hysteria
         # server config or the daemon silently drops every packet
@@ -312,11 +355,11 @@ class VPNService:
         if obfs:
             params.append('obfs=salamander')
             params.append(f'obfs-password={obfs}')
-        hop = (getattr(self.config, 'HY2_HOP_PORTS', '') or '').strip()
         if hop:
             # "20000:40000" → hy2 URL multi-port form "20000-40000"
             params.append(f'mport={hop.replace(":", "-")}')
             params.append('mportHopInt=30')
+        params.extend(extra_params)
         return (
             f"hysteria2://{client_uuid}@{host}:{port}"
             f"?{'&'.join(params)}#{connection_name}"

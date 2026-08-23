@@ -615,6 +615,7 @@ class MyKeyAnswerHandler(BaseCallbackHandler):
         'stls':    'generate_stls_link',
         'ws':      'generate_vless_ws_link',
         'hy2':     'generate_hy2_link',
+        'hy2t':    'generate_hy2t_link',
         'reality': 'generate_vless_link',
     }
     # Per-protocol tier gates which user tiers see which protocols.
@@ -629,6 +630,7 @@ class MyKeyAnswerHandler(BaseCallbackHandler):
         'stls':    'free',
         'ws':      'free',
         'hy2':     'paid',
+        'hy2t':    'paid',
         'reality': 'paid',
     }
     PAID_USER_STATUSES = frozenset({'paid', 'support_topic'})
@@ -637,7 +639,7 @@ class MyKeyAnswerHandler(BaseCallbackHandler):
     # the direct-to-entry protocols. Reality empirically banned first
     # by RKN once a new entry IP is profiled, so it stays at the
     # bottom. Admin can override via dashboard.
-    DEFAULT_CASCADE_ORDER = ('stls', 'ws', 'hy2', 'reality')
+    DEFAULT_CASCADE_ORDER = ('stls', 'ws', 'hy2', 'hy2t', 'reality')
     SETTING_KEY = 'cascade_protocol_order'
     COUNTRY_SETTING_KEY = 'cascade_by_country'
     ASN_SETTING_KEY = 'cascade_by_asn'

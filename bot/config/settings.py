@@ -87,6 +87,22 @@ class Settings:
         # single fixed HY2_PORT. Entry must DNAT the range to exit:HY2_PORT.
         self.HY2_HOP_PORTS: str = os.getenv('HY2_HOP_PORTS', '').strip()
 
+        # Turbo Hy2 — second hysteria instance on the exit with Brutal CC
+        # honoured (ignoreClientBandwidth: false, hysteria-turbo.service)
+        # and its own hop range (entry DNATs both to exit:HY2T_PORT).
+        # Empty HY2T_PORT keeps the variant out of subscriptions entirely.
+        # UP/DOWN are the client-side Brutal hints emitted into sing-box
+        # configs; keep them below the exit's real uplink or Brutal will
+        # saturate the box.
+        self.HY2T_PORT: str = os.getenv('HY2T_PORT', '').strip()
+        self.HY2T_HOP_PORTS: str = os.getenv('HY2T_HOP_PORTS', '').strip()
+        try:
+            self.HY2T_UP_MBPS: int = int(os.getenv('HY2T_UP_MBPS', '20') or '20')
+            self.HY2T_DOWN_MBPS: int = int(os.getenv('HY2T_DOWN_MBPS', '60') or '60')
+        except ValueError:
+            self.HY2T_UP_MBPS = 20
+            self.HY2T_DOWN_MBPS = 60
+
         # Reserve fallback node (DE) for paid users — a second,
         # provider-independent VLESS+Reality server appended to the
         # subscription for FALLBACK_ALLOWED_STATUSES. Users are

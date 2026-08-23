@@ -246,6 +246,8 @@ class NotificationService:
                     "Трафик идёт через серверы Cloudflare. Хорош когда блочат прямые подключения, но CF могут резать в отдельных сетях."),
         'hy2':     ("🛟 Hysteria2 (UDP)",
                     "UDP-протокол. Проходит там, где TCP-VPN режут. Быстрый, но UDP-порты часто фильтруются провайдерами."),
+        'hy2t':    ("🚀 Hysteria2 Turbo (UDP)",
+                    "Тот же Hysteria2, но с агрессивным контролем скорости (Brutal): пробивает провайдерский шейпинг за счёт постоянной отправки на заданной скорости. Пробуй, если обычный Hysteria2 медленный."),
         'reality': ("🔑 Reality (TCP)",
                     "Классический VLESS+Reality. Самый быстрый из всех, но первым выходит из строя если DPI начинает профайлить нашу инфру."),
     }
@@ -256,6 +258,8 @@ class NotificationService:
                     "Traffic routes through Cloudflare. Useful when direct connections get throttled, but CF itself is filtered in some networks."),
         'hy2':     ("🛟 Hysteria2 (UDP)",
                     "UDP protocol. Slips through where TCP VPNs get throttled. Fast, but UDP ports are often filtered."),
+        'hy2t':    ("🚀 Hysteria2 Turbo (UDP)",
+                    "Same Hysteria2, but with aggressive rate control (Brutal): punches through ISP shaping by sending at a fixed rate. Try it when regular Hysteria2 feels slow."),
         'reality': ("🔑 Reality (TCP)",
                     "Classic VLESS+Reality. Fastest of the four, but the first to die once DPI starts profiling our infra."),
     }

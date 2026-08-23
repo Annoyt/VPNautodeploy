@@ -116,6 +116,7 @@ class SubscriptionService:
         generators = {
             'reality': vpn.generate_vless_link,
             'hy2': vpn.generate_hy2_link,
+            'hy2t': vpn.generate_hy2t_link,
             'ws': vpn.generate_vless_ws_link,
             'stls': vpn.generate_stls_link,
         }
@@ -412,7 +413,7 @@ class SubscriptionService:
                 outbounds.append(ob)
                 tag = ob['tag']
             proxy_tags.append(tag)
-            if proto in ('reality', 'hy2'):
+            if proto in ('reality', 'hy2', 'hy2t'):
                 udp_call_tags.append(tag)
 
         # Reserve fallback node (DE) — paid-tier only. The client was
@@ -442,7 +443,7 @@ class SubscriptionService:
         # and silently swallows call media. Hy2 only probes healthy when the
         # tunnel really carries data, so when Hy2 is present make it the sole
         # call transport; only fall back to Reality if there's no Hy2.
-        hy2_call_tags = [t for t in udp_call_tags if t.endswith('-hy2')]
+        hy2_call_tags = [t for t in udp_call_tags if t.endswith(('-hy2', '-hy2t'))]
         if hy2_call_tags:
             udp_call_tags = hy2_call_tags
 
@@ -753,6 +754,7 @@ class SubscriptionService:
         builders = {
             'reality': self._build_reality,
             'hy2': self._build_hy2,
+            'hy2t': self._build_hy2t,
             'ws': self._build_ws,
             'stls': self._build_stls,
         }
@@ -795,15 +797,49 @@ class SubscriptionService:
         }
 
     def _build_hy2(self, uuid: str, name_prefix: str) -> Optional[dict]:
+        port = int(getattr(self.config, 'HY2_PORT', 8400) or 8400)
+        hop = getattr(self.config, 'HY2_HOP_PORTS', '') or ''
+        return self._hy2_outbound(uuid, name_prefix, '-hy2', port, hop)
+
+    def _build_hy2t(self, uuid: str, name_prefix: str) -> Optional[dict]:
+        """Turbo Hy2: second exit-side hysteria instance with Brutal CC
+        honoured. Unlike the share-link (where bandwidth params are
+        non-standard), the sing-box outbound carries real up_mbps /
+        down_mbps hints, so config-format clients get Brutal for real.
+        """
+        cfg = self.config
+        port_raw = (getattr(cfg, 'HY2T_PORT', '') or '').strip()
+        if not port_raw:
+            return None
+        try:
+            port = int(port_raw)
+        except ValueError:
+            return None
+        hop = getattr(cfg, 'HY2T_HOP_PORTS', '') or ''
+        return self._hy2_outbound(
+            uuid, name_prefix, '-hy2t', port, hop,
+            up_mbps=int(getattr(cfg, 'HY2T_UP_MBPS', 20) or 20),
+            down_mbps=int(getattr(cfg, 'HY2T_DOWN_MBPS', 60) or 60),
+        )
+
+    def _hy2_outbound(
+        self,
+        uuid: str,
+        name_prefix: str,
+        tag_suffix: str,
+        port: int,
+        hop: str,
+        up_mbps: Optional[int] = None,
+        down_mbps: Optional[int] = None,
+    ) -> Optional[dict]:
         cfg = self.config
         host = getattr(cfg, 'HY2_HOST', '') or ''
         if not host:
             return None
-        port = int(getattr(cfg, 'HY2_PORT', 8400) or 8400)
         sni = getattr(cfg, 'HY2_SNI', host) or host
         ob = {
             'type': 'hysteria2',
-            'tag': f'{name_prefix}-hy2',
+            'tag': f'{name_prefix}{tag_suffix}',
             'server': host,
             'server_port': port,
             'password': uuid,
@@ -813,6 +849,12 @@ class SubscriptionService:
                 'alpn': ['h3'],
             },
         }
+        # Brutal bandwidth hints (turbo only) — the server honours them
+        # because the turbo instance runs ignoreClientBandwidth: false.
+        if up_mbps:
+            ob['up_mbps'] = up_mbps
+        if down_mbps:
+            ob['down_mbps'] = down_mbps
         # Salamander obfuscation — makes the QUIC packets look like random
         # noise so РКН's UDP/QUIC throttle can't fingerprint them. Without
         # it plain Hy2 handshakes through but the data stream gets choked
@@ -828,8 +870,8 @@ class SubscriptionService:
         # sustained stream chokes to a timeout even WITH obfs), so a
         # single fixed port gets rate-limited to death; hopping spreads
         # the flow so no one port trips the throttle. The entry node DNATs
-        # the whole range to the exit's :8400 (iptables 'hy2-hop').
-        hop = getattr(cfg, 'HY2_HOP_PORTS', '') or ''
+        # each range to the matching exit port (iptables 'hy2-hop' /
+        # 'hy2t-hop').
         if hop:
             # The env value follows the hysteria2-URI ``mport`` convention
             # (comma-separated, e.g. "443,20000:40000") because

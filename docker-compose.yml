@@ -186,6 +186,12 @@ services:
       - HY2_OBFS_PASSWORD=${HY2_OBFS_PASSWORD:-}
       # Port-hopping range "start:end"; entry DNATs it to exit:HY2_PORT.
       - HY2_HOP_PORTS=${HY2_HOP_PORTS:-}
+      # Turbo Hy2 — second hysteria instance (Brutal CC honoured) on the
+      # exit; empty HY2T_PORT keeps the variant out of subscriptions.
+      - HY2T_PORT=${HY2T_PORT:-}
+      - HY2T_HOP_PORTS=${HY2T_HOP_PORTS:-}
+      - HY2T_UP_MBPS=${HY2T_UP_MBPS:-20}
+      - HY2T_DOWN_MBPS=${HY2T_DOWN_MBPS:-60}
       # Cloudflare-fronted VLESS+WS+TLS (Phase H) — empty WS_HOST
       # disables WS link emission and dual-write to WS inbound.
       - WS_HOST=${WS_HOST:-}
