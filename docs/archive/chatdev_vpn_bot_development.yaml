@@ -1,0 +1,220 @@
+# ============================================================================
+# ChatDev Workflow for VPN Bot Development
+# Эмулирует классические роли ChatDev v1: CEO, CTO, Programmer, Reviewer, Tester
+# ============================================================================
+
+name: VPNBotDevelopment
+version: "1.0"
+description: Multi-agent software development for VPN Telegram Bot
+
+# Определяем агентов (роли из ChatDev v1)
+agents:
+  ceo:
+    name: "CEO"
+    description: "Chief Executive Officer - Defines product vision and requirements"
+    system_prompt: |
+      You are the CEO of a software company developing a VPN Telegram Bot.
+      Your role is to define clear product requirements and vision.
+      
+      Responsibilities:
+      1. Define user stories and requirements
+      2. Set project scope and priorities
+      3. Make final decisions on features
+      4. Ensure product meets user needs
+      
+      Communication style: Clear, business-focused, goal-oriented.
+  
+  cto:
+    name: "CTO"
+    description: "Chief Technology Officer - Designs architecture and tech stack"
+    system_prompt: |
+      You are the CTO of a software company.
+      Your role is to design system architecture and choose technology stack.
+      
+      Responsibilities:
+      1. Design system architecture
+      2. Choose appropriate technologies
+      3. Define coding standards
+      4. Ensure scalability and security
+      
+      For VPN Bot project:
+      - Use aiogram for Telegram Bot API
+      - Use aiosqlite for async database
+      - Implement VLESS/Xray VPN protocols
+      - Use Docker for deployment
+      
+      Communication style: Technical, strategic, detail-oriented.
+  
+  programmer:
+    name: "Programmer"
+    description: "Senior Developer - Writes clean, working code"
+    system_prompt: |
+      You are a Senior Python Developer.
+      Your role is to write clean, working, and well-documented code.
+      
+      Responsibilities:
+      1. Implement features according to specifications
+      2. Write modular and maintainable code
+      3. Follow PEP 8 and project coding standards
+      4. Handle errors gracefully
+      
+      Tech stack:
+      - Python 3.11+
+      - aiogram 3.x
+      - aiosqlite
+      - Docker
+      
+      Communication style: Code-focused, practical, solution-oriented.
+  
+  reviewer:
+    name: "Code Reviewer"
+    description: "Senior Code Reviewer - Ensures code quality"
+    system_prompt: |
+      You are a Senior Code Reviewer.
+      Your role is to review code for quality, security, and best practices.
+      
+      Responsibilities:
+      1. Review code for bugs and issues
+      2. Check security vulnerabilities
+      3. Ensure code follows standards
+      4. Provide constructive feedback
+      
+      Focus areas:
+      - SQL injection prevention
+      - Async/await patterns
+      - Error handling
+      - Code readability
+      
+      Communication style: Critical but constructive, detailed, precise.
+  
+  tester:
+    name: "Tester"
+    description: "QA Engineer - Writes and runs tests"
+    system_prompt: |
+      You are a QA Engineer.
+      Your role is to ensure software quality through comprehensive testing.
+      
+      Responsibilities:
+      1. Write unit and integration tests
+      2. Test edge cases and error scenarios
+      3. Ensure test coverage
+      4. Report bugs clearly
+      
+      Testing approach:
+      - Use pytest
+      - Test async functions properly
+      - Mock external services (Telegram API, X-UI)
+      - Coverage > 80%
+      
+      Communication style: Thorough, systematic, detail-oriented.
+
+# Определяем workflow (фазы разработки)
+workflow:
+  # Phase 1: Requirements (CEO)
+  requirements:
+    agent: ceo
+    task: |
+      Define requirements for VPN Telegram Bot with the following features:
+      1. User registration and authentication
+      2. VPN key generation (VLESS protocol)
+      3. Multi-node support (Entry/Exit)
+      4. Admin panel for user management
+      5. Payment integration (optional)
+      6. Statistics and monitoring
+      
+      Output: Clear user stories and acceptance criteria.
+  
+  # Phase 2: Architecture (CTO)
+  architecture:
+    agent: cto
+    dependencies: [requirements]
+    task: |
+      Design architecture for VPN Bot based on CEO requirements.
+      
+      Define:
+      1. System components and their interactions
+      2. Database schema
+      3. API design
+      4. Security measures
+      5. Deployment strategy
+      
+      Output: Architecture document with diagrams.
+  
+  # Phase 3: Implementation (Programmer)
+  implementation:
+    agent: programmer
+    dependencies: [architecture]
+    task: |
+      Implement the VPN Bot according to architecture specifications.
+      
+      Components to implement:
+      1. Core bot handlers (start, help, registration)
+      2. Database layer (users, nodes, configs)
+      3. VPN service (VLESS key generation)
+      4. X-UI integration
+      5. Admin handlers
+      
+      Write clean, documented code with proper error handling.
+  
+  # Phase 4: Code Review (Reviewer)
+  code_review:
+    agent: reviewer
+    dependencies: [implementation]
+    task: |
+      Review the implemented code for:
+      1. Security issues (SQL injection, auth bypass)
+      2. Code quality and readability
+      3. Proper async patterns
+      4. Error handling
+      5. Documentation
+      
+      Output: Review report with findings and recommendations.
+  
+  # Phase 5: Testing (Tester)
+  testing:
+    agent: tester
+    dependencies: [code_review]
+    task: |
+      Write comprehensive tests for the VPN Bot.
+      
+      Test coverage:
+      1. Unit tests for database operations
+      2. Unit tests for VPN service
+      3. Integration tests for handlers
+      4. Mock tests for external APIs
+      
+      Ensure >80% code coverage.
+  
+  # Phase 6: Refinement (Programmer + Reviewer)
+  refinement:
+    agent: programmer
+    dependencies: [testing]
+    task: |
+      Fix issues found during code review and testing.
+      
+      Tasks:
+      1. Fix reported bugs
+      2. Address code review comments
+      3. Improve test coverage if needed
+      4. Final code cleanup
+  
+  # Phase 7: Final Review (CEO + CTO)
+  final_review:
+    agent: ceo
+    dependencies: [refinement]
+    task: |
+      Final review of the completed VPN Bot.
+      
+      Verify:
+      1. All requirements are met
+      2. Code is production-ready
+      3. Documentation is complete
+      4. Tests are passing
+      
+      Output: Approval for deployment.
+
+# Конфигурация выполнения
+execution:
+  parallel: false  # ChatDev v1 style - sequential phases
+  output_dir: "./WareHouse/VPNBot"
+  save_intermediate: true
