@@ -1,0 +1,6 @@
+[Unit]
+Description=Hermes API watchdog
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/hermes-api-watchdog.sh

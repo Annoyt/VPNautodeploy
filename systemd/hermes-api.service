@@ -1,0 +1,21 @@
+[Unit]
+Description=Hermes Agent API server (entry) for vpn-bot /ai
+After=network.target docker.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/hermes-work
+Environment=HERMES_HOME=/root/.hermes
+Environment=PATH=/usr/local/lib/hermes-agent/venv/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=/root/.hermes/.env
+ExecStart=/usr/local/lib/hermes-agent/venv/bin/hermes gateway run
+Restart=always
+RestartSec=5
+# Hermes is heavier than opencode; entry frees ~455M once opencode is removed.
+MemoryMax=1200M
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
