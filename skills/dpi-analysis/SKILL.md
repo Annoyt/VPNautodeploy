@@ -13,6 +13,12 @@ You run on **entry** (RU-facing ingress). DPI signals are aggregated into the bo
 - **`dpi_metrics`** table (bot DB) — 5-min snapshots, per `(country, asn)`:
   `country, asn, as_org, snapshot_at, conn_count, short_session_count, handshake_fail_count, rst_count`.
   Country `*GLOBAL*` is the host-wide roll-up (used for RST).
+  - `asn` values carry the `AS` prefix (`'AS51088'`) — queries must include it to match.
+  - `country`/`asn` can be NULL when geoip fails (localhost, private IPs). `country` may hold an inbound
+    tag (e.g. `*TUNNEL*`) with `asn` NULL — that's per-inbound aggregation, `as_org` names the inbound.
+  - Paths: in-container `/var/lib/vpn-bot/bot.db`, on host
+    `/var/lib/docker/volumes/vpn-bot_vpn-bot-data/_data/bot.db`. No `sqlite3` binary in the container —
+    use `python3 -c "import sqlite3; …"`.
 - **`/api/admin/dpi_metrics`** — IP-level detail for a `(country, ASN)` (needs an admin token; see billing-ops for minting one).
 - **xray logs** — `access.log` (per-connection) and `error.log` (handshake/REALITY failures). Routed to a shared
   volume so entry can read them; if a query needs raw lines, grep those for the offending `(country/ASN)` window.

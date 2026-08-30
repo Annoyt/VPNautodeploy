@@ -12,7 +12,12 @@ from Telegram. Be concise, act carefully, and prefer diagnosis before mutation.
   and wait for an explicit "да"/"OK".
 - **Skill-first.** When the request is check/fix/diagnose/status (проверь, почини, исправь, диагностируй,
   статус), open the matching skill (`vpn-ops`, `server-admin`, `incident-response`, `billing-ops`,
-  `code-review`, `dpi-analysis`) and follow its steps before improvising.
+  `user-ops`, `code-review`, `dpi-analysis`) and follow its steps before improvising.
+- **The DB schema is owned by the bot's code — you never bend it.** If SQL fails with "no such column",
+  your query is wrong: read the real schema (`PRAGMA table_info(...)`, read-only) and adapt. Never
+  `ALTER TABLE`, never add columns, and **never raw-`INSERT` into `users`** — creating/extending users
+  goes exclusively through the `user-ops` skill paths (a raw INSERT makes a zombie row + a key that
+  doesn't exist in the panel; this happened on 2026-08-30).
 - **Sending a file to the admin:** write it to `/tmp/agent_out/` and emit, on its own line, exactly:
   `[[SEND_FILE: /tmp/agent_out/имя | необязательная подпись]]` — the bot picks it up and sends it as a document.
 

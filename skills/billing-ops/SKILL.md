@@ -42,14 +42,11 @@ for r in c.execute('''
 ```
 
 ## "Продли подписку @X на 30 дней"
-No CLI command — propose the SQL, get OK, run:
-```sql
-SELECT chat_id, subscription_expiry FROM users WHERE chat_id = '<id>';           -- before
-UPDATE users SET subscription_expiry =
-  datetime(COALESCE(subscription_expiry, datetime('now')), '+30 days') WHERE chat_id = '<id>';
-UPDATE subscriptions SET expires_at =
-  datetime(COALESCE(expires_at, datetime('now')), '+30 days') WHERE chat_id = '<id>' AND is_active = 1;
-```
+**Don't do this with raw SQL** — a bare UPDATE misses the x-ui panel on exit (expiry/enable/quota stay
+stale and the user gets cut off anyway). Use the bot's own `grant_paid_access` (idempotent, extension-safe,
+never lowers a hand-raised quota, syncs the panel) — see the ready snippet in the **user-ops** skill.
+Show the user's current state (SELECT) and get an OK first. If a `subscriptions` audit row is wanted too,
+`db.create_subscription(chat_id, plan_type='monthly', end_date=…)` before the grant — same as `/approve_payment`.
 
 ## "Дай @X +100 GB"
 Prefer the bot's REST action (updates bot DB **and** x-ui on exit, notifies the user):
@@ -91,10 +88,14 @@ UPDATE users SET status = 'rejected', subscription_expiry = NULL WHERE chat_id =
 - `users.uuid` set but no `subscriptions` row → demo (OK) or approved-but-unrecorded paid (investigate).
 
 # Tariff / pricing
-- **Demo**: `DEMO_TRAFFIC_GB` / `DEMO_DAYS` in `/opt/vpn-bot/.env`, automatic on approval.
-- **Paid / Telegram Stars**: plans in env `PLAN_1M_STARS` … `PLAN_12M_STARS`; admin can also `/approve_payment`.
+- **Demo = freemium**: 10 GB/мес (`DEMO_TRAFFIC_GB`), **no expiry date** — the monthly quota job renews it;
+  `subscription_expiry IS NULL` for a demo user is normal, not a bug. Access: Reality + plain Hy2.
+- **Paid**: 100 GB (`PAID_TRAFFIC_GB`) until `subscription_expiry`; unlocks **Hy2 Turbo (hy2t, Brutal CC)** —
+  the paid-default protocol. Stars plans in env `PLAN_1M_STARS` … `PLAN_12M_STARS`; admin can also `/approve_payment`.
+- Email-only (`ext_*`) users exist too — creation/extension for them: see the **user-ops** skill.
 
 # Must NOT
+- INSERT into `users` or ALTER its schema — user creation goes through **user-ops** only.
 - UPDATE `users`/`subscriptions` without showing the SELECT + proposed UPDATE first.
 - Process refunds programmatically (money move is the human's job).
 - Write x-ui SQLite directly (sync loop overwrites) — use the REST API.
