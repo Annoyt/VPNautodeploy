@@ -2459,8 +2459,11 @@
     function setupModal() {
         document.getElementById('modal-cancel').addEventListener('click', hideModal);
         document.getElementById('modal-confirm').addEventListener('click', () => {
+            // Grab the callback BEFORE hideModal — it nulls modalCallback,
+            // which silently killed every confirm-gated action.
+            const cb = modalCallback;
             hideModal();
-            if (modalCallback) modalCallback();
+            if (cb) cb();
         });
         document.getElementById('modal-overlay').addEventListener('click', e => {
             if (e.target === e.currentTarget) hideModal();
