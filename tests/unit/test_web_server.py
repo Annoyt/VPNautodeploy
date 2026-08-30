@@ -272,6 +272,52 @@ class TestWebAppServer:
         assert mock_db.create_subscription.call_args[1]['plan_type'] == 'monthly'
 
     @pytest.mark.asyncio
+    async def test_user_action_reject_persists_new_status(
+        self, server, mock_db
+    ):
+        """The reject side effect saves the user row — it must save the
+        POST-transition row, not the caller's stale snapshot (which
+        silently rolled the status back to pending_demo)."""
+        user_pre = Mock(spec=User)
+        user_pre.chat_id = '42'
+        user_pre.username = 'u'
+        user_pre.status = 'pending_demo'
+        user_pre.reject_count = 0
+        user_pre.lang = 'ru'
+        user_pre.uuid = None
+        user_pre.email = None
+
+        user_post = Mock(spec=User)
+        user_post.chat_id = '42'
+        user_post.username = 'u'
+        user_post.status = 'rejected'   # what the transition wrote
+        user_post.reject_count = 0
+        user_post.lang = 'ru'
+        user_post.uuid = None
+        user_post.email = None
+
+        # 1st get_user: handler snapshot; 2nd: side-effect re-fetch;
+        # 3rd: final response fetch.
+        mock_db.get_user = Mock(side_effect=[user_pre, user_post, user_post])
+        mock_db.save_user = Mock()
+        mock_db.log_admin_action = Mock()
+        server.state_machine = Mock()
+        server.state_machine.transition = Mock(return_value=True)
+        server.notification_service = Mock()
+
+        request = self._action_request('42', 'reject')
+        with patch.object(
+            server, '_validate_admin_with_rate_limit',
+            return_value=({'id': 1652899}, None),
+        ):
+            response = await server.handle_user_action(request)
+
+        assert response.status == 200
+        saved = mock_db.save_user.call_args[0][0]
+        assert saved.status == 'rejected'
+        assert saved.reject_count == 1
+
+    @pytest.mark.asyncio
     async def test_user_action_grant_paid_invalid_transition_400(
         self, server, mock_db
     ):

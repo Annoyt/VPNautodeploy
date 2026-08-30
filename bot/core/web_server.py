@@ -3327,15 +3327,17 @@ class WebAppServer:
         elif action == 'reset':
             # `reset` bypasses transition rules (set_state) and clears uuid/email/
             # platform/reject_count. Mirrors the /reset admin command.
-            await asyncio.to_thread(
-                self.state_machine.set_state, target_chat_id, UserState.NEW
-            )
-            # Revoke any active VPN key BEFORE clearing the row (helper needs
-            # the email to talk to x-ui).
+            # Revoke FIRST (same order as the Telegram commands): the helper
+            # needs the email to talk to x-ui, and it save_user()s the full
+            # stale row — run after set_state and it would roll the new
+            # status back for keyed users.
             await asyncio.to_thread(
                 revoke_user_key, user,
                 self.bot.services.get('xui') if self.bot else None,
                 self.db,
+            )
+            await asyncio.to_thread(
+                self.state_machine.set_state, target_chat_id, UserState.NEW
             )
             # Full reset (also clears platform + reject_count)
             await asyncio.to_thread(self.db.reset_user_data, target_chat_id)
@@ -3539,6 +3541,15 @@ class WebAppServer:
             return
         
         try:
+            # Re-fetch: the caller's `user` snapshot predates the state
+            # transition, and save_user() writes the FULL row — so any
+            # save below with the stale object silently rolls the new
+            # status back (reject stayed pending_demo; ban/unban reverted
+            # for keyed users; caught 2026-08-30 by the button E2E pass).
+            fresh = await asyncio.to_thread(self.db.get_user, chat_id)
+            if fresh:
+                user = fresh
+
             if action == 'approve':
                 await asyncio.to_thread(
                     self.notification_service.notify_approved,
