@@ -537,7 +537,8 @@
         const activityMap = state.onlineByEmail || {};
 
         container.innerHTML = users.map(u => {
-            const name = u.username ? `@${esc(u.username)}` : 'no_username';
+            const name = u.username ? `@${esc(u.username)}`
+                : (u.contact_email ? `✉️ ${esc(u.contact_email)}` : 'no_username');
             const actions = getAvailableActions(u.status);
             const act = u.email ? activityMap[u.email] : null;
             const isOnline = !!(act && act.online);

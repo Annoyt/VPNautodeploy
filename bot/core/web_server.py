@@ -1033,6 +1033,9 @@ class WebAppServer:
                 # or render the limit count.
                 'email': u.email,
                 'limit_ip': u.limit_ip,
+                # For ext_* (email-only) users this is the only
+                # human-recognizable name the dashboard can show.
+                'contact_email': u.contact_email,
             })
             
         return web.json_response({'users': data})

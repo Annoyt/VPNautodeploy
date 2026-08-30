@@ -378,7 +378,14 @@ class AdminUsersMixin(AdminHandlerBase):
         text = f"👥 <b>{title}</b>\n\n"
         
         for user in users[:50]:  # Limit to 50 users
-            username = f"@{user.username}" if user.username else f"ID:{user.chat_id[:8]}"
+            # Email-only (ext_*) users have no Telegram username — the
+            # contact address is the only thing an admin can recognize.
+            if user.username:
+                username = f"@{user.username}"
+            elif user.contact_email:
+                username = f"✉️ {user.contact_email}"
+            else:
+                username = f"ID:{(user.chat_id or '?')[:8]}"
             status_emoji = {
                 'demo': '🎁',
                 'paid': '💎',

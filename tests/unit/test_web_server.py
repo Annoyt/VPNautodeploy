@@ -203,7 +203,8 @@ class TestWebAppServer:
         user1.created_at = '2024-01-01T00:00:00'
         user1.previous_state = None
         user1.limit_ip = 1
-        
+        user1.contact_email = None
+
         mock_db.get_all_users = Mock(return_value=[user1])
         
         # The endpoint reads bulk traffic through the API-aware service

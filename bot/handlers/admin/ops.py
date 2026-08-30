@@ -452,15 +452,17 @@ class AdminOpsMixin(AdminHandlerBase):
         try:
             with self.db._connect() as conn:
                 rows = conn.execute(
-                    "SELECT chat_id, username, status, email, uuid, quota_gb "
+                    "SELECT chat_id, username, status, email, uuid, quota_gb, "
+                    "       contact_email "
                     "FROM users "
                     "WHERE chat_id LIKE ? COLLATE NOCASE "
                     "   OR username LIKE ? COLLATE NOCASE "
                     "   OR email LIKE ? COLLATE NOCASE "
                     "   OR uuid LIKE ? COLLATE NOCASE "
+                    "   OR contact_email LIKE ? COLLATE NOCASE "
                     "ORDER BY (status='paid') DESC, (status='demo') DESC, chat_id "
                     "LIMIT 20",
-                    (like, like, like, like),
+                    (like, like, like, like, like),
                 ).fetchall()
         except Exception as e:
             logger.exception(f"find_user query failed: {e}")
@@ -477,8 +479,11 @@ class AdminOpsMixin(AdminHandlerBase):
 
         lines = [f"🔍 <b>Найдено {len(rows)} (топ 20)</b>"]
         for r in rows:
-            cid, uname, status, email, uuid, quota = r
-            uname_part = f"@{uname}" if uname else "—"
+            cid, uname, status, email, uuid, quota, contact = r
+            # ext_* users have no username; the contact address is the
+            # only human-recognizable identifier.
+            uname_part = (f"@{uname}" if uname
+                          else (f"✉️ {contact}" if contact else "—"))
             email_short = email or "—"
             uuid_short = (uuid[:8] + "…") if uuid else "—"
             lines.append(
