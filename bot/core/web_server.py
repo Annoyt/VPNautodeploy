@@ -35,14 +35,16 @@ ACTION_STATE_MAP = {
     # `revoke` is like `ban` but also implies the user already had a key —
     # the side-effect handler will additionally call revoke_user_key.
     'revoke': UserState.BANNED,
-    # Promote demo/support user to paid. Unlocks the full protocol cascade
-    # (hy2/reality) and the DE fallback node on the user's next /sub refresh.
-    'grant_paid': UserState.PAID,
 }
 
 # Actions that don't translate to a simple state transition. They're handled
 # in dedicated branches in handle_user_action.
-SPECIAL_ACTIONS = {'reset', 'grant_100gb', 'set_limit_ip', 'set_quota', 'set_expire'}
+# `grant_paid` lives here (not in ACTION_STATE_MAP) because it's a billing
+# mutation, not just a status flip — and billing must not ride in the
+# notification side-effect path, which is skipped entirely when
+# NotificationService is unavailable.
+SPECIAL_ACTIONS = {'reset', 'grant_100gb', 'grant_paid', 'set_limit_ip',
+                   'set_quota', 'set_expire'}
 
 # Bytes-per-GB constant used by /grant_100gb. Keep in sync with bot.config.constants.
 BYTES_PER_GB = 1024 ** 3
@@ -3337,6 +3339,42 @@ class WebAppServer:
             )
             # Full reset (also clears platform + reject_count)
             await asyncio.to_thread(self.db.reset_user_data, target_chat_id)
+        elif action == 'grant_paid':
+            # Full paid grant, same semantics as /approve_payment and a
+            # Stars payment: validity-checked transition, subscriptions
+            # audit row, then the shared grant (status/quota floor/
+            # subscription_expiry + panel expiry/enable/quota sync).
+            from datetime import datetime, timedelta
+
+            from bot.services.billing import grant_paid_access
+            success = await asyncio.to_thread(
+                self.state_machine.transition, target_chat_id, UserState.PAID
+            )
+            if not success:
+                return web.json_response({
+                    'error': f'Invalid transition: {user.status} → paid'
+                }, status=400)
+            try:
+                cur = (
+                    datetime.fromisoformat(user.subscription_expiry)
+                    if user.subscription_expiry else datetime.now()
+                )
+            except ValueError:
+                cur = datetime.now()
+            paid_until = max(cur, datetime.now()) + timedelta(days=30)
+            await asyncio.to_thread(
+                self.db.create_subscription, target_chat_id,
+                plan_type='monthly', end_date=paid_until.isoformat(),
+            )
+            xui = self.bot.services.get('xui') if self.bot else None
+            grant = await asyncio.to_thread(
+                grant_paid_access,
+                self.db, self.config, xui, target_chat_id, paid_until,
+            )
+            if grant.get('panel_ok') is False:
+                logger.warning(
+                    f"grant_paid: panel sync failed for {target_chat_id}"
+                )
         elif action == 'grant_100gb':
             # No state transition — just bump quota and propagate to x-ui.
             current = (user.quota_gb or 5.0)
@@ -3580,45 +3618,28 @@ class WebAppServer:
                     msg = f"🎁 Admin raised your quota to {user.quota_gb:.0f} GB."
                 self.bot.send_message(chat_id=chat_id, text=msg)
             elif action == 'grant_paid':
-                # The generic state map already flipped status to paid;
-                # the shared grant adds what the button alone used to
-                # skip — quota floor, subscription_expiry (+30d or the
-                # remaining term, whichever is later) and the panel
-                # expiry/enable/quota sync.
-                from datetime import datetime as _dt, timedelta as _td
-                from bot.services.billing import grant_paid_access
-                try:
-                    cur = (
-                        _dt.fromisoformat(user.subscription_expiry)
-                        if user.subscription_expiry else _dt.utcnow()
-                    )
-                except ValueError:
-                    cur = _dt.utcnow()
-                paid_until = max(cur, _dt.utcnow()) + _td(days=30)
-                xui = self.bot.services.get('xui') if self.bot else None
-                grant = await asyncio.to_thread(
-                    grant_paid_access,
-                    self.db, self.config, xui, chat_id, paid_until,
-                )
-                if grant.get('panel_ok') is False:
-                    logger.warning(
-                        f"grant_paid: panel sync failed for {chat_id}"
-                    )
+                # Billing already happened in handle_user_action — here
+                # only the notice. Routed via _deliver_user_notice so
+                # ext_* (email-only) users get it by mail instead of a
+                # send_message that throws on a non-Telegram chat_id.
                 if user.lang == 'ru':
                     msg = (
                         "⭐ Вам выдан полный доступ!\n\n"
-                        "Теперь доступны все протоколы (включая Hysteria2) и "
-                        "резервный сервер в Германии. Обновите подписку в "
-                        "приложении, чтобы изменения подтянулись."
+                        "Теперь доступны все протоколы (включая Hysteria2 "
+                        "Turbo) и резервный сервер в Германии. Обновите "
+                        "подписку в приложении, чтобы изменения подтянулись."
                     )
                 else:
                     msg = (
                         "⭐ You've been upgraded to full access!\n\n"
-                        "All protocols (including Hysteria2) and the DE "
-                        "backup server are now available. Refresh your "
+                        "All protocols (including Hysteria2 Turbo) and the "
+                        "DE backup server are now available. Refresh your "
                         "subscription in the app to pick up the changes."
                     )
-                self.bot.send_message(chat_id=chat_id, text=msg)
+                await asyncio.to_thread(
+                    self.notification_service._deliver_user_notice,
+                    chat_id, msg, 'NekoVPN — полный доступ',
+                )
         except Exception as e:
             logger.error(
                 f"Failed to send notification for {action} "
