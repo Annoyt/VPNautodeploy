@@ -1,6 +1,12 @@
 # VPN Bot — Project Documentation
 
-**Single Source of Truth. Last updated:** 2026-04-17
+> ⚠️ **ИСТОРИЧЕСКИЙ ДОКУМЕНТ (апрель 2026).** Топология с тех пор перевёрнута:
+> бот живёт на **entry** (не на exit), деплой — rsync через
+> `scripts/deploy_to_entry.sh` (не git-checkout), панель на exit — API-only.
+> Актуальный источник правды: **AGENTS.md** (архитектура, деплой, хроника
+> граблей) + память агента. Этот файл оставлен как история ранней эпохи.
+
+**Last updated:** 2026-04-17 (see banner)
 
 ---
 

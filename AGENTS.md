@@ -8,17 +8,15 @@
 
 Python Telegram bot for VPN service management. Supports forum-group mode (structured topics) and PM-only mode.
 
-**Current test status (2026-05-12):**
+**Current test status (2026-08-30):**
 ```bash
-PYTHONPATH=$(pwd) python3 -m pytest -q
-# Result: 1083 passed, 5 skipped, 1 flake (test_user_not_saved_on_sync_failure
-#         — passes in isolation, fails only in full-suite ordering)
+python3 -m pytest tests/ -q      # 2044 passed (unit + integration; e2e excluded via norecursedirs)
+python3 -m pytest tests/e2e -q   # 6 passed — Playwright browser smoke, SEPARATE stage
+                                 # (playwright's sync API poisons pytest-asyncio if mixed)
 ```
-
-Run with PYTHONPATH:
-```bash
-PYTHONPATH=$(pwd) pytest -q --ignore=skills/
-```
+Four test levels (unit+mutmut / real-sqlite integration / Playwright E2E /
+deploy sha-smoke) — see the 2026-08-30 insights below for what each catches.
+E2E deps: `pip install -r requirements-dev.txt && playwright install chromium`.
 
 ---
 
@@ -137,35 +135,26 @@ Files with this mark: `test_database.py`, `test_security.py`, `test_state_machin
 
 ## Deployment
 
-**Active production (as of 2026-05-12):**
-- **Exit Node**: the exit host — bot + 3X-UI in Docker (this is the live one)
-- **Entry Node**: the entry host — iptables DNAT forwarder
-- **Git remote `exit`** (`<old-blocked-host>`): currently **blocked / unreachable**, do not push there
-- **GitHub**: `https://github.com/Annoyt/VPNautodeploy.git` — `origin/main` is the source of truth
+**Active production (as of 2026-08-30; flipped since the May notes — the bot moved to ENTRY on 2026-07-19):**
+- **Entry node** (`ssh entry`) — the **vpn-bot container** lives HERE (`/opt/vpn-bot`), plus a LOCAL `3x-ui` for CF-fronted inbounds, ingress :443, dashboard API :8080, and the Hermes `/ai` agent (:4097, systemd `hermes-api.service`).
+- **Exit node** (`ssh vpn-exit`) — the real x-ui panel :2026 + xray :443 (the backend the bot manages over HTTP API), Caddy :9443 → entry :8080 (dashboard TLS), tinyproxy :8888 (bot's Telegram egress).
+- **GitHub**: `git@github.com:Annoyt/VPNautodeploy.git` — `origin/main` is the source of truth.
+- **`/opt/vpn-bot` on entry is NOT a git checkout** — it's an rsync target. `git pull/reset` there is impossible; code that isn't rsynced doesn't exist in prod (a fix once sat undeployed for 11 days while everyone debugged "a bug").
 
-**How the bot actually runs:**
-- `vpn-bot.service` systemd unit exists but is **disabled** — do not use it
-- Deploy is **Docker Compose** from `/opt/vpn-bot/` on the prod host
-- Compose project name is pinned to `vpn-bot` via `name: vpn-bot` at the top of `docker-compose.yml`. This must not change — `XUI_DB_PATH` hardcodes the resulting volume path
-- Three canonical containers:
-  - `3x-ui` (image `ghcr.io/mhsanaei/3x-ui:latest`) — internal listener on **port 2026** (not 2053, despite what older configs say), web path `/this_is_fine`
-  - `vpn-bot` (image built from `./Dockerfile`) — Python sync polling, runs as UID 1000
-  - ~~`traffic-collector`~~ — **removed** on 2026-05-12 (was unhealthy; its job moves into vpn-bot QuotaMonitor in Phase 5)
-- Three canonical Docker volumes (all under project name `vpn-bot`):
-  - `vpn-bot_3xui-data` — 3x-ui's `/etc/x-ui` AND vpn-bot's read-only ❌ — see below
-  - `vpn-bot_vpn-bot-data` — bot's `/var/lib/vpn-bot/` (bot.db lives here)
-  - `vpn-bot_vpn-bot-logs` — bot's `/var/log/vpn-bot/`
-
-**Deploy procedure (validated):**
+**Canonical deploy (2026-08-30+), from the dev machine:**
 ```bash
-# 1. Locally
-git push origin main
-
-# 2. On prod (root@<exit-host>)
-cd /opt/vpn-bot
-git fetch origin && git reset --hard origin/main   # NB: also wipes uncommitted manual hotfixes; stash first if you want them
-docker compose up -d --build
+./scripts/deploy_to_entry.sh                 # full bot/ sync
+./scripts/deploy_to_entry.sh bot/core/web_server.py   # or a subset
 ```
+It stamps the git sha into `bot/version.txt`, rsyncs ONLY `bot/` + `scripts/`
+(never compose/.env — entry keeps hand-tuned copies), runs the remote
+`deploy_entry_bot.sh` (hardcoded `--no-deps` so 3x-ui is never recreated —
+see the 2026-07-19 incident), then FAILS unless `/health` reports that
+exact sha. Commit before deploying or the stamp says `-dirty`.
+
+- Compose project name is pinned to `vpn-bot` via `name: vpn-bot` — must not change (volume names derive from it).
+- Volumes on entry: `vpn-bot_3xui-data` (local 3x-ui), `vpn-bot_vpn-bot-data` (bot.db at `/var/lib/vpn-bot/`), `vpn-bot_vpn-bot-logs`.
+- The bot talks to BOTH panels via HTTP API only; `xui.db` direct access is dead on entry (the May notes about making x-ui.db group-writable are historical).
 
 **Backups before risky operations:**
 ```bash
@@ -396,3 +385,29 @@ RU App Store purged proxy clients in waves: first Hiddify, then Happ (verified g
 **Platform re-selection**: `setplat:<p>` buttons on the key card and /sub let key holders switch device without admin help. Deliberately bypasses `PlatformSelectHandler` (its `_process_platform_selection` forces a DEMO transition) — SetPlatformHandler only updates `user.platform` and re-renders the card via the shared `build_key_delivery_message()`.
 
 **ziriki LTE case (2026-07-25)**: hy2 handshake passes on throttled mobile UDP but streams die in ~8s (`tx:0` → "timeout: no recent network activity"). Nothing server-side left to fix — QUIC needs clean UDP. UDP *apps* (calls) still work over xudp inside TCP protocols via the 'calls' selector. Also: roaming RU SIMs get home-operator DPI abroad.
+
+### 26. Architecture snapshot — 2026-08-19 (большой ремонт учёта/биллинга)
+
+(Перенесено из удалённого PROJECT_CONTEXT.md; полная хроника — в памяти агента.)
+
+**Тарифы.** Демо = freemium 10 ГБ/мес навсегда (DEMO_TRAFFIC_GB=10, DEMO_DAYS=30); paid = 100 ГБ/мес (PAID_TRAFFIC_GB, floor) до даты `users.subscription_expiry`. Единственное определение paid-тира — `bot/services/billing.py:grant_paid_access()` — через него ходят Stars-оплата, /approve_payment и дашборд. Месячный сброс счётчиков (демо+paid) — ботовская джоба 1-го числа 00:00 UTC; панельный rolling reset отключён.
+
+**Учёт трафика.** Панель exit считает все xray-протоколы в одну строку client_traffics на email (держится на api-инбаунде dokodemo 127.0.0.1:62789 в xrayTemplateConfig). Hy2 доливает systemd-мост `hy2-traffic-collector` на exit (hysteria trafficStats API), он же кикает over-quota live-сессии и бампает last_online. Бот зеркалирует цифры в users.traffic_* каждые 10 мин и шлёт предупреждения на 80%/100% квоты (ext-юзерам — письмом).
+
+**Почта.** Исходящие (ключи, уведомления) — Gmail SMTP-релей; входящие заявки на ключ — IMAP-поллер каждые 3 мин → карточка с кнопками «Выдать (демо)/Отклонить» в топик заявок; карточки самообновляются.
+
+**Мониторинг.** probe-proxy сайдкар (sing-box, конфиг генерится scripts/gen_probe_config.py) — HealthChecker ходит через реальные туннели per-protocol; /onlines читает clientStats.lastOnline; DPI-алерты гейтятся на реальные когорты и тренд (2 цикла).
+
+**Команды.** Ответы админ-команд всегда в топик источника (AdminHandlerBase._send); в группах CommandHandler заявляет только /admin; все панельные чтения в командах — через API-aware методы XUIService (xui.db на entry = None). Дрифт карт команд/справки ловят тесты TestCommandMapIntegrity.
+
+### 27. Dashboard hardening + test strategy (2026-08-30 session)
+
+A user-report ("получил ключ, но его нет в списке") unravelled into three latent dashboard bugs and a testing overhaul. PR #1 (`dashboard-hardening-e2e`) has the full story; highlights every agent should know:
+
+- **ext_* (email-only) users**: no Telegram username; their real address lives in `contact_email` (`users.email` is the synthetic panel id `user_ext_…@nekovo.ru` — never mail to it). `/users`, `/find`, and the dashboard now surface `contact_email`. Provisioning goes ONLY through `AdminHandler._provision_email_user` / `/addmail` — a raw SQL INSERT into `users` once produced a zombie `chat_id=NULL` row (agent incident; the Hermes `user-ops` skill now forbids it).
+- **Dead confirm modal**: `hideModal()` nulled `modalCallback` before the confirm handler called it — EVERY confirm-gated dashboard action (paid/ban/approve/reject/revoke/reset) silently did nothing, since the repo-root merge. Fixed in app.js; pinned by Playwright E2E.
+- **Stale-snapshot rollback**: `handle_user_action` side effects `save_user()`d a pre-transition user snapshot (full-row write) — reject rolled back to pending_demo, ban/unban reverted for keyed users. Side effects now re-fetch; the reset branch revokes BEFORE `set_state` (the order the Telegram commands always used).
+- **`grant_paid` is a real billing grant** (transition + subscriptions row + `grant_paid_access` in the main handler, not in the notification side-effect path which is skipped when NotificationService is down). The detail modal has its own ⭐ paid button (list-card buttons are invisible to mobile admins).
+- **Test strategy (4 levels)** — each catches a class the others can't: unit+mutmut (function logic) / `tests/integration/test_web_actions_integration.py` on REAL sqlite (cross-layer row semantics — mocks can't see stale-row overwrites by construction) / `tests/e2e` Playwright (dead frontend JS) / deploy sha-smoke in `deploy_to_entry.sh` (repo-vs-prod drift). Trust a new suite only after re-introducing the bug and watching it fail.
+- **Hermes `/ai`**: model switched to `minimax/minimax-m3:free` with a `fallback_providers` chain (nemotron-3-super), skills deploy via `scripts/deploy_hermes_skills.sh` (placeholder substitution; hand-rsync caused drift), watchdog defers restarts while an /ai request is in flight.
+- **Cleanup**: removed the embedded 930MB ChatDev clone (authored workflow preserved in `docs/archive/`), `.archive/`, `scratch/`, mempalace artifacts, `htmlcov`/`mutants`; `AGENT.md` and `PROJECT_CONTEXT.md` deleted (stale — their live content moved here).
