@@ -1,322 +1,179 @@
-# VPN Bot — Project Documentation
+# NekoVPN — обзор проекта
 
-> ⚠️ **ИСТОРИЧЕСКИЙ ДОКУМЕНТ (апрель 2026).** Топология с тех пор перевёрнута:
-> бот живёт на **entry** (не на exit), деплой — rsync через
-> `scripts/deploy_to_entry.sh` (не git-checkout), панель на exit — API-only.
-> Актуальный источник правды: **AGENTS.md** (архитектура, деплой, хроника
-> граблей) + память агента. Этот файл оставлен как история ранней эпохи.
-
-**Last updated:** 2026-04-17 (see banner)
+**Last updated: 2026-08-30.** Этот файл — человекочитаемый обзор «как всё
+устроено сейчас». Парный документ — **AGENTS.md** в корне: гайд для агентов,
+секция Deployment и хроника граблей (§8–27) — при конфликте прав AGENTS.md.
+Живая операционная память — в memory-файлах агентских сессий.
 
 ---
 
-## 1. Environment
+## 1. Топология
 
-| Component | Host | Role |
+Три узла. Бот живёт на **entry** (с 2026-07-19; в ранних доках было наоборот).
+
+| Узел | SSH-алиас | Что там |
 |---|---|---|
-| Exit Node | `<old-blocked-host>` | Bot + 3x-ui (XRay) + SQLite DB |
-| Entry Node | `<entry-host>` | iptables DNAT forwarder (443 → Exit) |
+| **Entry** (РФ-facing) | `entry` | контейнер `vpn-bot` (`/opt/vpn-bot`, rsync-деплой), локальный `3x-ui` для CF-fronted инбаундов, ingress :443 (форвард на exit), dashboard API :8080, Hermes-агент `/ai` :4097 |
+| **Exit** (за границей) | `vpn-exit` | боевая панель 3x-ui :2026 (форк v3.4) + xray :443, два инстанса hysteria2 (hy2 + hy2t Turbo :8402), Caddy :9443 → entry:8080 (TLS дашборда), tinyproxy :8888 (Telegram-egress бота), hy2-traffic-collector, probe-раннеры |
+| **Reserve DE** | — | запасная VLESS-Reality нода для paid (панель x-ui 2.8.11), lazy-провижн при `/sub`; хостит чужой прод — не трогать его контейнеры |
 
-**Services on Exit Node:**
-- `vpn-bot.service` — Telegram bot (`ExecStart=/opt/vpn-bot/venv/bin/python -m bot.main`)
-- `3x-ui` Docker container — XRay VLESS Reality (volume: `vpn-bot_3xui-data`)
+Путь юзера: клиент → entry :443 → exit :443 → xray → интернет.
+Путь админа: браузер → `https://<dashboard-host>:9443` (Caddy на exit) → entry :8080.
 
-**Key paths:**
-- Bot code: `/opt/vpn-bot/`
-- Bot DB: `/etc/cascade-vpn/bot.db` (env `DB_PATH`)
-- X-UI DB: `/var/lib/docker/volumes/vpn-bot_3xui-data/_data/x-ui.db` (env `XUI_DB_PATH`)
-- systemd unit: `/etc/systemd/system/vpn-bot.service`
+**`/opt/vpn-bot` на entry — НЕ git-checkout.** Это rsync-приёмник; код, который
+не задеплоен скриптом, в проде не существует.
 
----
+## 2. Протоколы и тиры
 
-## 2. Current Architecture
+- **VLESS + XTLS-Reality** (:443) — базовый TCP-протокол. SNI сейчас `www.bing.com`
+  (Microsoft-сертификат перерос 8192-байтный буфер xray — AGENTS.md §23);
+  менять SNI = три слоя разом (панель, HAProxy ACL на entry, `SNI_VALUE` в .env).
+- **Hysteria2** — freemium-тир, доступен всем (в т.ч. демо). Порт-хоппинг:
+  формат `HY2_HOP_PORTS` различается для sing-box (`server_ports` массив `"X:Y"`)
+  и URI (`mport` через запятую) — не путать.
+- **Hysteria2 Turbo (hy2t)** — второй инстанс на exit :8402 с Brutal CC,
+  **paid-дефолт**. Auth разведён: `/api/hy2/auth` (demo+paid) vs `/api/hy2t/auth`
+  (только paid).
+- **VMess + WS/httpupgrade** — CF-fronted инбаунды (через локальный 3x-ui entry).
+- Роутинг клиента: RU-направления — direct (+ QUIC:443 carve-out для VK),
+  весь UDP — через UDP-нативный селектор `calls` (звонки работают и у freemium).
 
-```
-┌─────────────┐     ┌──────────────┐     ┌─────────────────────────────┐
-│  Telegram   │────▶│  Entry Node  │────▶│        Exit Node            │
-│   User      │     │ <entry-host>│     │    <old-blocked-host>           │
-└─────────────┘     │  iptables    │     │  ┌─────────┐  ┌─────────┐  │
-                    │   DNAT 443   │     │  │ vpn-bot │  │ 3x-ui   │  │
-                    └──────────────┘     │  │(aiogram)│  │(XRay)   │  │
-                                         │  └────┬────┘  └────┬────┘  │
-                                         │       │            │       │
-                                         │  ┌────▼────────────▼────┐  │
-                                         │  │   Shared SQLite      │  │
-                                         │  │  bot.db + x-ui.db    │  │
-                                         │  └──────────────────────┘  │
-                                         └─────────────────────────────┘
-```
+**Тиры:** демо = freemium **10 ГБ/мес навсегда** (`subscription_expiry IS NULL` —
+это норма), продлевается месячной джобой; paid = **100 ГБ/мес до даты**
+`subscription_expiry` + Turbo + резервная DE-нода.
 
-### Stack
-- Python 3.12, aiogram 3.x, SQLite (WAL mode)
-- 3x-ui (ghcr.io/mhsanaei/3x-ui:latest) in Docker
-- XRay VLESS Reality on port 443
-- systemd service for bot
-
-### Code Structure
+## 3. Код (bot/ в корне репо)
 
 ```
 bot/
-├── main.py                      # Entry point (sync), init services
-├── config/
-│   ├── settings.py              # Env vars + defaults
-│   └── constants.py             # UserState, BYTES_PER_GB, MESSAGES
+├── main.py                  # entry-point: init_services() + sync polling
+├── config/                  # Settings (класс Settings!), constants (UserState, STATE_TRANSITIONS)
 ├── core/
-│   ├── database.py              # Facade → UserRepository, TicketRepository, NodeRepository, MessageMapRepository
-│   ├── repositories/            # Repository pattern (user, ticket, node, message_map, async adapters)
-│   ├── state_machine.py         # UserState transitions
-│   ├── bot.py                   # Legacy sync Bot wrapper
-│   └── cluster/                 # Failover: election, routing, sync API, health checks
+│   ├── web_server.py        # aiohttp: dashboard API + webapp + /sub + hy2-auth + /health(version)
+│   ├── database.py          # deprecated-фасад → repositories/
+│   ├── repositories/        # user / ticket / node / message_map (+ async-адаптеры)
+│   ├── state_machine.py     # переходы статусов
+│   └── cluster/             # multi-node код (в проде не активен)
 ├── handlers/
-│   ├── commands.py              # /start, /help, /stats
-│   ├── callbacks/
-│   │   ├── dispatcher.py        # Chain of Responsibility for callbacks
-│   │   ├── base.py              # ValidationService, ForumMessageService
-│   │   ├── user.py              # Demo, key, stats, support, language
-│   │   └── admin.py             # Approve, reject, revoke, profile, reset, close ticket
-│   ├── admin/                   # Modular admin handlers (base, users, broadcast, stats)
-│   ├── messages.py              # PM support threading
-│   └── forum.py                 # Forum topic management
+│   ├── admin/               # миксины: base(роутинг ADMIN_COMMANDS)/users/ops/stats/broadcast
+│   ├── callbacks/           # user.py (ключи/демо), admin.py (аппрувы, mail-заявки), forum.py
+│   ├── commands.py, messages.py, payments.py (Stars), ai_handler.py (/ai)
 ├── services/
-│   ├── vpn.py                   # VLESS key generation
-│   ├── xui_service.py           # Unified: HTTP API + DB fallback
-│   ├── xui_db.py                # Direct x-ui.db operations
-│   ├── xui_reload.py            # XRay reload via docker exec
-│   ├── notifications.py         # Scheduled + instant notifications
-│   ├── node_cluster.py          # Multi-node management
-│   └── failover_notifications.py
-├── models/
-│   ├── user.py                  # User dataclass
-│   ├── vpn_node.py              # VPNNode (Exit/Entry)
-│   └── cluster/                 # Failover models
-├── utils/
-│   ├── callback_router.py       # Declarative callback registration
-│   ├── validators.py            # Input validation
-│   └── exceptions.py            # Custom exception hierarchy
-└── webapp/                      # Telegram Mini App dashboard
+│   ├── billing.py           # grant_paid_access() — ЕДИНСТВЕННОЕ определение paid-тира
+│   ├── xui_service.py       # API-first клиент обеих панелей (xui.db на entry = None)
+│   ├── vpn.py, subscription.py  # генерация ключей, сборка /sub
+│   ├── notifications.py     # шедулер джоб + _deliver_user_notice (TG или email для ext_*)
+│   ├── email_service.py     # исходящие письма (Gmail-релей)
+│   ├── mail_intake.py       # IMAP-поллер заявок (3 мин)
+│   ├── user_lifecycle.py    # revoke_user_key — единый путь отзыва ключа
+│   ├── fallback_node.py     # DE-резерв для paid
+│   └── hermes_client.py + agent_factory.py  # /ai бэкенд
+├── models/user.py           # User dataclass
+├── webapp/                  # дашборд (index.html + app.js + style.css, отдаёт сам бот)
+└── utils/                   # admin_token (HMAC для дашборда), validators, rate_limit…
 ```
 
----
+## 4. Данные
 
-## 3. Database Schema
+**bot.db** (entry, volume `vpn-bot_vpn-bot-data`, путь `/var/lib/vpn-bot/bot.db`):
 
-### Bot Database (`bot.db`)
-
-| Table | Purpose | Key Fields |
+| Таблица | Суть | Грабли |
 |---|---|---|
-| `users` | User profiles, FSM state, VPN identity | `chat_id` PK, `uuid`, `email`, `status`, `quota_gb`, `limit_ip` |
-| `tickets` | Support ticket tracking | `topic_id` UNIQUE, `chat_id`, `status`, `closed_at` |
-| `ticket_messages` | Forum thread history | `topic_id`, `sender_type`, `text`, `has_media` |
-| `message_map` | PM mode reply threading | `admin_msg_id`, `user_chat_id`, `user_msg_id` |
-| `nodes` | Exit/Entry node registry | `name`, `type`, `host`, `public_key`, `sni`, `weight`, `status` |
-| `node_assignments` | Per-user node routing | `chat_id`, `exit_node_id`, `entry_node_id` |
-| `node_failover_log` | Automatic failover events | `chat_id`, `from_node_id`, `to_node_id`, `reason` |
-| `traffic_log` | Periodic traffic snapshots | `email`, `upload_bytes`, `download_bytes`, `recorded_at` |
-| `static_profiles` | Shared static VPN keys | `name`, `vless_url`, `max_users`, `current_users` |
-| `subscriptions` | Subscription plans | `chat_id`, `plan_type`, `start_date`, `end_date`, `is_active` |
-| `notification_log` | Notification deduplication | `chat_id`, `notification_type`, `sent_at` |
-| `admin_actions` | Admin audit trail | `admin_id`, `action`, `target_id`, `details` |
-| `xui_synced` | Legacy: synced client tracking | `email` PK, `synced_at` |
-| `xui_api_config` | Runtime X-UI API settings (singleton) | `base_url`, `username`, `password`, `use_api`, `inbound_id` |
+| `users` | профиль+статус+квота | `email` = синтетический панельный id (`user_…@nekovo.ru`), реальная почта — **`contact_email`**; email-only юзеры имеют `chat_id = ext_<crc32>` |
+| `subscriptions` | биллинг-периоды | колонки в проде `started_at`/`expires_at` (НЕ start_date/end_date) |
+| `email_requests` | входящие заявки с почты | дедуп по Message-ID |
+| `ai_sessions` | сессии /ai | ключи `pm:<id>` / `topic:<id>:<thread>` |
+| `dpi_metrics` | 5-мин срезы DPI-сигналов | `asn` с префиксом `AS`; country `*GLOBAL*`/`*TUNNEL*` |
+| `admin_actions`, `notification_log`, `tickets`, `ticket_messages`, `message_map`, `nodes` | аудит/дедуп/саппорт/ноды | |
 
-### X-UI Database (`x-ui.db`)
+**Учёт трафика:** источник правды — `client_traffics` панели exit (все
+xray-протоколы в одну строку на email; UNIQUE(email) ⇒ один клиент/квота на
+юзера, тир-гейт только в боте). Hy2-байты доливает мост на exit. Бот
+зеркалирует в `users.traffic_*` каждые 10 мин, предупреждает на 80%/100%.
 
-Managed by 3x-ui container. Bot reads/writes via `XUIDatabase`:
+## 5. Пользовательские флоу
 
-| Table | Purpose | Bot Access |
-|---|---|---|
-| `inbounds` | XRay inbound configs (JSON) | Read/write `settings` JSON to add/remove VLESS clients |
-| `client_traffics` | Traffic counters per client | Read stats, ensure records exist for new clients |
+- `/start` → «Запросить демо» → аппрув админа → выбор платформы → ключ.
+  Цепочка: `NEW → PENDING_DEMO → PLATFORM_SELECT → DEMO`; paid — только через
+  `grant_paid_access` (Stars-оплата, `/approve_payment`, кнопка ⭐ в дашборде).
+- **`/sub/<token>`** — три формата: default sing-box JSON (Hiddify/Karing),
+  `?format=links` (plain-text ссылки, v2rayNG), `?format=xray` (полный конфиг).
+- **Клиенты:** Android/PC → Hiddify, iOS → Karing (Happ и Hiddify выпилены из RU
+  App Store волнами 2026-07).
+- **Email-only юзеры**: письмо на ящик → карточка с кнопками в топике заявок →
+  демо-ключ письмом; либо админ вручную `/addmail user@x [ГБ] [дней]`.
+  Провижн идемпотентен по `contact_email` (UUID сохраняется).
+- Смена платформы — кнопки `setplat:*` прямо на карточке ключа.
 
----
+## 6. Админка
 
-## 4. User Flows
+**Telegram** (форум-группа, ответы всегда в топик источника): `/users`,
+`/users_all`, `/find <текст>` (ищет и по contact_email), `/pending`, `/quota`,
+`/expire`, `/addmail`, `/approve_payment`, `/broadcast`, `/backup`, `/ban`,
+`/unban`, `/reset`, `/ai <вопрос>` (Hermes-агент). PM-fallback при выключенном
+форуме.
 
-### Principles
-1. ≤3 clicks to result
-2. Clear feedback after every action
-3. Key can be re-obtained anytime
-4. 24/7 Support button always available
+**Дашборд** `https://<dashboard-host>:9443/?admin_token=…` (HMAC-токен из
+`/admin`, TTL 1ч): список юзеров (онлайн-бейджи, гео, шаринг-детект), карточка
+юзера (квота/лимит/дата/⭐ paid), действия approve/reject/ban/unban/revoke/
+reset/grant_paid/grant_100gb (все — через модалку подтверждения), рассылка,
+health, DPI-сигналы, алерты.
 
-### Flow 1: New User
-```
-/start
-  → "🚀 Запросить демо"
-    → Status: PENDING_DEMO, admin notified
-      → Admin approves
-        → "Выберите платформу" (Android, iOS, Windows, macOS)
-          → "📋 Получить ключ"
-            → VLESS link + QR + instructions
-              → Status: ACTIVE
-```
+**AI-агент `/ai`**: Nous Hermes на entry :4097, модель
+`minimax/minimax-m3:free` через OpenRouter (+fallback), 7 наших skills
+(vpn-ops, server-admin, incident-response, billing-ops, **user-ops**,
+code-review, dpi-analysis). Skills деплоятся ТОЛЬКО `scripts/deploy_hermes_skills.sh`.
 
-State chain: `NEW → PENDING_DEMO → PLATFORM_SELECT → ACTIVE`
+## 7. Почта и мониторинг
 
-### Flow 2: Existing User
-| Action | Path |
-|---|---|
-| Check key | Main menu → "🔑 Мой ключ" → VLESS link + QR |
-| Statistics | Main menu → "📊 Статистика" → used/total traffic |
-| Support | Main menu → "💬 Поддержка" → creates ticket |
-| Full version | Main menu → "💎 Полная версия" → payment info |
+- **Исходящие**: Gmail SMTP-релей (~500 писем/день, свой MTA невозможен — нет
+  PTR). Ключи, квота-алерты, продления; ext_*-юзерам все уведомления идут
+  письмом через `_deliver_user_notice`.
+- **Входящие**: IMAP-поллер каждые 3 мин → `email_requests` + карточка.
+- **Мониторинг**: probe-proxy сайдкар (честные пробы через реальные туннели
+  per-protocol), `/onlines` по clientStats.lastOnline, DPI-гейты по когортам
+  (country, ASN) с трендом, AlertManager (Telegram-egress outage и др.),
+  вотчдог hermes-api (не рестартит при живом агент-лупе).
 
-### Flow 3: Problems
-| Problem | Bot Response |
-|---|---|
-| Key doesn't work | Troubleshooting wizard → or ticket |
-| Traffic exhausted | "⚠️ Demo expired (5GB). [Buy full version]" |
-| Forgot platform | Re-select from menu anytime |
+## 8. Тесты — 4 уровня
 
-### Keyboards
-```
-ACTIVE menu:          Platform select:
-┌────────┬────────┐   ┌────────┬────────┐
-│📊 Stats│🔑 Key  │   │Android │  iOS   │
-├────────┼────────┤   ├────────┼────────┤
-│💬 Supp │💎 Full │   │Windows │ macOS  │
-└────────┴────────┘   ├────────┴────────┤
-                      │     Другая      │
-                      └─────────────────┘
-```
+Каждый уровень ловит класс багов, невидимый остальным (доказано 2026-08-30,
+когда три бага дашборда прошли мимо 1789 зелёных юнитов):
 
----
-
-## 5. Admin Flows
-
-### Mode 1: With Forum Group (Recommended)
-
-Forum structure:
-```
-📊 VPN Admin Panel
-├── 📈 Statistics (topic 18)
-├── 📝 Requests (topic 15)
-├── 💳 Payments (topic 16)
-├── 🆘 Support (topic 17)
-└── ✅ Solved (topic 37)
-```
-
-**Request handling:**
-- New demo request appears in Requests with inline buttons: ✅ Одобрить | ❌ Отклонить | 💬 Написать | 👁 Профиль
-- Approve → user gets platform selection, client added to X-UI
-- Reject → user gets reason, status reset to NEW
-
-**Support ticket lifecycle:**
-- User clicks "💬 Поддержка" → bot creates topic in Support
-- Admin replies in topic → bot forwards to user PM
-- User replies in PM → bot posts to topic with "👤 Пользователь:" prefix
-- Close ticket → history moved to Solved, topic closed
-
-### Mode 2: PM Only (Minimal)
-- `FORUM_ENABLED = False`
-- Admin receives all requests and support in PM
-- Commands: `/approve ID`, `/reject ID [reason]`, `/user ID`, `/stats`, `/broadcast`
-
-### Admin Commands
-```
-/stats      — Full statistics
-/pending    — Pending users list
-/user ID    — User profile + traffic
-/ban ID     — Block user
-/unban ID   — Unblock user
-/broadcast  — Mass message
-/backup     — DB backup
-/reset ID   — Reset user to NEW (removes from X-UI)
-/grant ID   — +100GB traffic
-```
-
-### Role Levels
-| Role | Permissions |
-|---|---|
-| SUPER_ADMIN | All commands, settings, admin management |
-| ADMIN | Approve/reject, support, stats, ban/unban |
-| SUPPORT | Support replies, view profiles, no approvals |
-
----
-
-## 6. Deployment
-
-### Quick Deploy (Exit Node)
 ```bash
-# Backup
-mkdir -p /backup/deploy-$(date +%Y%m%d-%H%M%S)
-cp -r /opt/vpn-bot /backup/deploy-.../
-cp /etc/cascade-vpn/bot.db /backup/deploy-.../
-cp /var/lib/docker/volumes/vpn-bot_3xui-data/_data/x-ui.db /backup/deploy-.../
-
-# Deploy code
-rsync -avz --exclude='.git' --exclude='tests' --exclude='__pycache__' \
-  ./bot/ root@<old-blocked-host>:/opt/vpn-bot/
-
-# Restart
-ssh root@<old-blocked-host> "systemctl daemon-reload && systemctl restart vpn-bot"
+python3 -m pytest tests/ -q      # 1) unit + 2) integration на реальном SQLite (~2050, ~45с)
+python3 -m pytest tests/e2e -q   # 3) Playwright-смоук дашборда (6, ~14с) — ОТДЕЛЬНОЙ стадией
+./scripts/deploy_to_entry.sh     # 4) деплой со сверкой git-sha в /health
 ```
 
-### Critical Environment Variables
+- unit+mutmut — логика функций; моки не видят межслойные эффекты.
+- `tests/integration/test_web_actions_integration.py` — все действия дашборда
+  против реальной БД, ассерты по итоговой строке.
+- `tests/e2e` — реальный браузер против реального WebAppServer; ловит мёртвый
+  JS. Не смешивать с общим прогоном (sync-Playwright травит pytest-asyncio).
+- Новому сьюту доверять только после «верни баг — убедись, что покраснел».
+
+## 9. Деплой
+
 ```bash
-BOT_TOKEN=...
-SUPER_ADMIN_ID=1652899
-DB_PATH=/etc/cascade-vpn/bot.db
-XUI_DB_PATH=/var/lib/docker/volumes/vpn-bot_3xui-data/_data/x-ui.db
-XUI_API_URL=http://127.0.0.1:2026
-XUI_BASE_PATH=/this_is_fine
-XUI_API_PATH=/this_is_fine/panel/api/inbounds
-ENTRY_NODE_IP=<entry-host>
-REALITY_PUBLIC_KEY=...
-SNI_VALUE=www.microsoft.com
-SID_VALUE=01
+git commit …                     # штамп берётся из HEAD
+./scripts/deploy_to_entry.sh     # bot/ + scripts/ → entry, rebuild --no-deps, сверка sha
 ```
 
-### Health Check
-```bash
-journalctl -u vpn-bot -f
-systemctl status vpn-bot
-python3 -m py_compile bot/main.py
-```
+Правила, оплаченные инцидентами:
+- **Только `--no-deps`** для vpn-bot: без него compose пересоздаёт 3x-ui с
+  unpinned `:latest` (2026-07-19 это снесло панель).
+- **Никогда не rsync'ать compose/.env** на entry — там ручные правки
+  (HTTPS_PROXY для РКН-обхода, WEB_BIND), которых нет в репо.
+- Деплой скилов Hermes — отдельный `deploy_hermes_skills.sh` (подстановка
+  плейсхолдеров из untracked `hermes_skill_vars.local`).
+- Бэкапы: `scripts/backup.sh` + systemd-таймер (7 снапшотов).
 
----
+## 10. Статус и планы
 
-## 7. Failover Architecture
+Активный roadmap — `docs/IMPROVEMENT_PLAN.md` (DPI-фидбэк-петля, зонды,
+lockdown-режим). Multi-node cluster-код (`bot/core/cluster/`) написан, но в
+проде один exit + DE-резерв; авто-провижн нод через API провайдера — «когда-нибудь»
+(у AdminVPS API есть, у BitCloud нет).
 
-> Status: Implemented but single-node only currently. Multi-node code exists in `bot/core/cluster/`.
-
-When multiple Exit Nodes are available:
-1. Entry Node health-checks all Exit Nodes every 5s
-2. If primary Exit fails → Performance Monitor selects best alternative
-3. Smart Routing considers CPU load, throttle status, cooldown
-4. Bot notifies admin of failover events
-5. Users experience seamless reconnection (same key, different IP)
-
-### Components
-- `node_tracker.py` — Rolling window CPU tracking, throttle detection
-- `smart_routing.py` — Routing decisions (stay / failover / delay)
-- `failover_api.py` — FastAPI endpoints for cluster sync
-- `entry_node_healthcheck.py` — Runs on Entry Node, executes failovers
-
-### Configuration
-```python
-FAILOVER_COOLDOWN_SECONDS = 300
-MAX_FAILOVER_COUNT = 3
-THROTTLED_FAILOVER_DELAY = 30
-FAILOVER_NOTIFICATION_POLICY = "silent"
-```
-
----
-
-## 8. Task Status
-
-### Completed ✅
-- [x] Modular architecture (repositories, services, handlers)
-- [x] X-UI DB path fix (Docker volume binding)
-- [x] DNAT Entry Node fix (443 → Exit Node)
-- [x] VLESS URL fix (sid=01, removed empty spx)
-- [x] Positional row[N] indices → named columns
-- [x] Legacy async stack removal (database_async, bot_aiogram, main_async, async handlers)
-- [x] DB alias tables removed (traffic_history, notifications, admin_logs)
-- [x] Deploy scripts updated for single Exit Node
-- [x] 1032 tests passing
-
-### Open ❌
-- [ ] CI/CD pipeline
-- [ ] Test bot (@test_nekovpn_bot)
-- [ ] Multi-node failover in production (code ready, only 1 Exit Node deployed)
-- [ ] Traffic collection automation (`scripts/collect_traffic_api.py` exists but not scheduled)
+Хронология всех инцидентов и решений: AGENTS.md §8–27.
