@@ -537,7 +537,8 @@
         const activityMap = state.onlineByEmail || {};
 
         container.innerHTML = users.map(u => {
-            const name = u.username ? `@${esc(u.username)}` : 'no_username';
+            const name = u.username ? `@${esc(u.username)}`
+                : (u.contact_email ? `✉️ ${esc(u.contact_email)}` : 'no_username');
             const actions = getAvailableActions(u.status);
             const act = u.email ? activityMap[u.email] : null;
             const isOnline = !!(act && act.online);
@@ -691,8 +692,17 @@
         const limitVal = d.limit_ip ?? '';
         const quotaVal = d.quota_gb ?? '';
         const expireDate = (d.subscription_expiry || '').slice(0, 10);
+        // Mobile admins mostly live in this modal — give it the same
+        // paid-upgrade shortcut the list card has.
+        const paidBlock = ['demo', 'support_topic'].includes(d.status) ? `
+            <div class="detail-edit-row">
+                <button class="btn btn-primary" id="detail-grant-paid">⭐ Сделать paid (100 ГБ, +30 дней)</button>
+            </div>
+        ` : '';
+
         const editBlock = `
             <div class="section-title">Управление лимитами</div>
+            ${paidBlock}
             <div class="detail-edit-row">
                 <label>Limit IP</label>
                 <input type="number" min="0" max="100" step="1" id="edit-limit-ip" value="${esc(String(limitVal))}">
@@ -738,6 +748,18 @@
         // canvas just stays blank — nothing else breaks.
         if (d.email && window.Chart) {
             renderTrafficChart(d.email).catch(e => console.error('traffic chart:', e));
+        }
+
+        // Paid-upgrade shortcut — same confirm flow as the list card,
+        // then re-open the detail to show the new status/quota/expiry.
+        const paidBtn = bodyEl.querySelector('#detail-grant-paid');
+        if (paidBtn) {
+            paidBtn.addEventListener('click', () => {
+                // Close the detail first — __doAction opens its own
+                // confirm modal, and the list refreshes on success.
+                overlay.classList.add('hidden');
+                window.__doAction(chatId, 'grant_paid');
+            });
         }
 
         // Wire the three save buttons. Same code path; the action and
@@ -2437,8 +2459,11 @@
     function setupModal() {
         document.getElementById('modal-cancel').addEventListener('click', hideModal);
         document.getElementById('modal-confirm').addEventListener('click', () => {
+            // Grab the callback BEFORE hideModal — it nulls modalCallback,
+            // which silently killed every confirm-gated action.
+            const cb = modalCallback;
             hideModal();
-            if (modalCallback) modalCallback();
+            if (cb) cb();
         });
         document.getElementById('modal-overlay').addEventListener('click', e => {
             if (e.target === e.currentTarget) hideModal();

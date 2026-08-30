@@ -486,7 +486,7 @@ class TestFindUser:
         mock_conn.__enter__ = Mock(return_value=mock_conn)
         mock_conn.__exit__ = Mock()
         mock_conn.execute().fetchall.return_value = [
-            ('123456', 'testuser', 'paid', 'user@example.com', 'uuid-123', 50)
+            ('123456', 'testuser', 'paid', 'user@example.com', 'uuid-123', 50, None)
         ]
 
         handler.find_user('test_chat', ['test'])
@@ -502,7 +502,7 @@ class TestFindUser:
         mock_conn.__enter__ = Mock(return_value=mock_conn)
         mock_conn.__exit__ = Mock()
         mock_conn.execute().fetchall.return_value = [
-            ('123456', 'testuser', 'paid', 'user@example.com', 'uuid-123', 50)
+            ('123456', 'testuser', 'paid', 'user@example.com', 'uuid-123', 50, None)
         ]
 
         handler.find_user('test_chat', ['123456'])
@@ -517,7 +517,7 @@ class TestFindUser:
         mock_conn.__enter__ = Mock(return_value=mock_conn)
         mock_conn.__exit__ = Mock()
         mock_conn.execute().fetchall.return_value = [
-            ('123456', 'testuser', 'paid', 'user@example.com', 'uuid-abc-123', 50)
+            ('123456', 'testuser', 'paid', 'user@example.com', 'uuid-abc-123', 50, None)
         ]
 
         handler.find_user('test_chat', ['uuid-abc'])
@@ -532,7 +532,7 @@ class TestFindUser:
         mock_conn.__enter__ = Mock(return_value=mock_conn)
         mock_conn.__exit__ = Mock()
         mock_conn.execute().fetchall.return_value = [
-            ('123456', 'testuser', 'paid', 'user@example.com', 'uuid-123', 50)
+            ('123456', 'testuser', 'paid', 'user@example.com', 'uuid-123', 50, None)
         ]
 
         handler.find_user('test_chat', ['@testuser'])
@@ -557,7 +557,7 @@ class TestFindUser:
         mock_conn.__exit__ = Mock()
         # Return 25 results but query should limit to 20
         mock_conn.execute().fetchall.return_value = [
-            (str(i), f'user{i}', 'paid', f'user{i}@ex.com', f'uuid{i}', 50)
+            (str(i), f'user{i}', 'paid', f'user{i}@ex.com', f'uuid{i}', 50, None)
             for i in range(25)
         ]
 
@@ -573,7 +573,7 @@ class TestFindUser:
         mock_conn.__enter__ = Mock(return_value=mock_conn)
         mock_conn.__exit__ = Mock()
         mock_conn.execute().fetchall.return_value = [
-            ('123456', None, 'demo', None, 'uuid-123', 5)
+            ('123456', None, 'demo', None, 'uuid-123', 5, None)
         ]
 
         handler.find_user('test_chat', ['123'])
@@ -581,6 +581,26 @@ class TestFindUser:
         text = handler.bot.send_message.call_args[1]['text']
         # Should show dashes for missing fields
         assert '—' in text
+
+    def test_find_user_by_contact_email(self, handler):
+        """Test /find matches ext_* users by contact_email and shows it."""
+        handler.db._connect = MagicMock()
+        mock_conn = handler.db._connect.return_value
+        mock_conn.__enter__ = Mock(return_value=mock_conn)
+        mock_conn.__exit__ = Mock()
+        mock_conn.execute().fetchall.return_value = [
+            ('ext_c1d47097', None, 'demo', 'user_ext_c1d47097@nekovo.ru',
+             'uuid-123', 10, 'someone@gmail.com')
+        ]
+
+        handler.find_user('test_chat', ['someone'])
+
+        # contact_email must be in both the query params and the output.
+        query_args = mock_conn.execute.call_args[0]
+        assert 'contact_email LIKE' in query_args[0]
+        assert len(query_args[1]) == 5
+        text = handler.bot.send_message.call_args[1]['text']
+        assert '✉️ someone@gmail.com' in text
 
 
 class TestShowRecentActions:

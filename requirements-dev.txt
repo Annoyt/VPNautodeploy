@@ -1,0 +1,6 @@
+# Dev/test-only dependencies — NOT installed into the prod image.
+-r requirements.txt
+
+# Browser E2E for the admin dashboard (tests/e2e/). After installing,
+# fetch the browser once: `playwright install chromium`.
+playwright>=1.49

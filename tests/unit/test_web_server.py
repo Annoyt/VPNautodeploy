@@ -203,7 +203,8 @@ class TestWebAppServer:
         user1.created_at = '2024-01-01T00:00:00'
         user1.previous_state = None
         user1.limit_ip = 1
-        
+        user1.contact_email = None
+
         mock_db.get_all_users = Mock(return_value=[user1])
         
         # The endpoint reads bulk traffic through the API-aware service
@@ -224,6 +225,123 @@ class TestWebAppServer:
         assert len(data['users']) == 1
         assert data['users'][0]['username'] == 'user1'
         assert data['users'][0]['consumed_gb'] == 3.0  # 3GB consumed
+
+    def _action_request(self, chat_id, action):
+        """Build a mock POST request for handle_user_action."""
+        async def _json():
+            return {'action': action}
+        request = Mock()
+        request.match_info = {'chat_id': chat_id}
+        request.json = _json
+        return request
+
+    @pytest.mark.asyncio
+    async def test_user_action_grant_paid_runs_billing_grant(
+        self, server, mock_db
+    ):
+        """grant_paid must run the shared billing grant + subscription
+        row even with NO NotificationService (billing used to hide in
+        the notification side-effect path and silently skip)."""
+        user = Mock(spec=User)
+        user.chat_id = '42'
+        user.username = 'u'
+        user.status = 'demo'
+        user.subscription_expiry = None
+        user.lang = 'ru'
+        mock_db.get_user = Mock(return_value=user)
+        mock_db.create_subscription = Mock()
+        mock_db.log_admin_action = Mock()
+        server.state_machine = Mock()
+        server.state_machine.transition = Mock(return_value=True)
+        assert server.notification_service is None  # the regression setup
+
+        request = self._action_request('42', 'grant_paid')
+        with patch.object(
+            server, '_validate_admin_with_rate_limit',
+            return_value=({'id': 1652899}, None),
+        ), patch(
+            'bot.services.billing.grant_paid_access',
+            return_value={'user': user, 'status_ok': True, 'panel_ok': True},
+        ) as grant:
+            response = await server.handle_user_action(request)
+
+        assert response.status == 200
+        grant.assert_called_once()
+        assert grant.call_args[0][3] == '42'  # chat_id positional arg
+        mock_db.create_subscription.assert_called_once()
+        assert mock_db.create_subscription.call_args[1]['plan_type'] == 'monthly'
+
+    @pytest.mark.asyncio
+    async def test_user_action_reject_persists_new_status(
+        self, server, mock_db
+    ):
+        """The reject side effect saves the user row — it must save the
+        POST-transition row, not the caller's stale snapshot (which
+        silently rolled the status back to pending_demo)."""
+        user_pre = Mock(spec=User)
+        user_pre.chat_id = '42'
+        user_pre.username = 'u'
+        user_pre.status = 'pending_demo'
+        user_pre.reject_count = 0
+        user_pre.lang = 'ru'
+        user_pre.uuid = None
+        user_pre.email = None
+
+        user_post = Mock(spec=User)
+        user_post.chat_id = '42'
+        user_post.username = 'u'
+        user_post.status = 'rejected'   # what the transition wrote
+        user_post.reject_count = 0
+        user_post.lang = 'ru'
+        user_post.uuid = None
+        user_post.email = None
+
+        # 1st get_user: handler snapshot; 2nd: side-effect re-fetch;
+        # 3rd: final response fetch.
+        mock_db.get_user = Mock(side_effect=[user_pre, user_post, user_post])
+        mock_db.save_user = Mock()
+        mock_db.log_admin_action = Mock()
+        server.state_machine = Mock()
+        server.state_machine.transition = Mock(return_value=True)
+        server.notification_service = Mock()
+
+        request = self._action_request('42', 'reject')
+        with patch.object(
+            server, '_validate_admin_with_rate_limit',
+            return_value=({'id': 1652899}, None),
+        ):
+            response = await server.handle_user_action(request)
+
+        assert response.status == 200
+        saved = mock_db.save_user.call_args[0][0]
+        assert saved.status == 'rejected'
+        assert saved.reject_count == 1
+
+    @pytest.mark.asyncio
+    async def test_user_action_grant_paid_invalid_transition_400(
+        self, server, mock_db
+    ):
+        """grant_paid on a non-upgradable status returns 400, no grant."""
+        user = Mock(spec=User)
+        user.chat_id = '42'
+        user.username = 'u'
+        user.status = 'banned'
+        user.subscription_expiry = None
+        mock_db.get_user = Mock(return_value=user)
+        mock_db.create_subscription = Mock()
+        server.state_machine = Mock()
+        server.state_machine.transition = Mock(return_value=False)
+
+        request = self._action_request('42', 'grant_paid')
+        with patch.object(
+            server, '_validate_admin_with_rate_limit',
+            return_value=({'id': 1652899}, None),
+        ), patch('bot.services.billing.grant_paid_access') as grant:
+            response = await server.handle_user_action(request)
+
+        assert response.status == 400
+        grant.assert_not_called()
+        mock_db.create_subscription.assert_not_called()
 
 
 class TestValidateInitData:

@@ -1029,6 +1029,22 @@ class TestAdminUsersEdgeCases:
         assert 'Все пользователи' in text or 'All users' in text
         assert '3' in text  # Count of all users
 
+    def test_show_users_list_ext_user_shows_contact_email(self, admin_handler):
+        """Email-only (ext_*) users have no username — the list must show
+        their contact_email, otherwise they're unrecognizable."""
+        users = [
+            User(chat_id='ext_c1d47097', status='demo',
+                 contact_email='someone@gmail.com'),
+            User(chat_id='12345678', status='paid', username='tguser'),
+        ]
+        admin_handler.db.get_all_users.return_value = users
+
+        admin_handler.show_active_users('admin_chat', [])
+
+        text = admin_handler.bot.send_message.call_args[1]['text']
+        assert '✉️ someone@gmail.com' in text
+        assert '@tguser' in text
+
     def test_resolve_target_by_username(self, admin_handler, sample_active_user):
         """Test _resolve_target handles @username correctly."""
         admin_handler.db.get_user_by_username = MagicMock(return_value=sample_active_user)

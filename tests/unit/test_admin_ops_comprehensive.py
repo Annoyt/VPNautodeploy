@@ -223,7 +223,7 @@ class TestFindUser:
     def test_find_by_username(self, admin_handler):
         """Find by username."""
         admin_handler.db._connect.return_value = _mock_db_connection([
-            ('123', 'john', 'demo', 'john@example.com', 'abc-123', 50)
+            ('123', 'john', 'demo', 'john@example.com', 'abc-123', 50, None)
         ])
 
         admin_handler.find_user('123', ['john'])

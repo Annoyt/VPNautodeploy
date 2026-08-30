@@ -49,6 +49,17 @@ ssh exit-node 'journalctl -u xray -n 30 --no-pager' 2>/dev/null   # if xray runs
 - 3x-ui v3.4.0 keys clients **globally by email** — a client add that fails with "already in use" means the
   email exists; the bot handles this by delete-by-email + re-add (preserves the UUID). See `xui_service.py`.
 
+# Hysteria2 — two instances on exit
+
+- **Plain hy2** = freemium tier (every user incl. demo). **hy2t "Turbo"** = second hysteria2 instance on exit
+  `:8402` with Brutal congestion control — the **paid-default** protocol.
+- Auth is split: bot serves `/api/hy2/auth` (demo+paid) vs `/api/hy2t/auth` (paid only). A demo user "hy2
+  works but Turbo denies" is the tier gate working, not a bug. Env knobs: `HY2T_*`.
+- Port-hopping format gotcha (broke Hy2 on 2026-07-26): sing-box `server_ports` wants an **array of "X:Y"**
+  ranges; the hysteria2 URI `mport` wants a **comma-separated string**. Never copy one format into the other.
+- UDP-native traffic (Telegram calls) routes via the `calls` selector (Reality/Hy2/Hy2t) — RU-direct TCP with
+  a QUIC:443 carve-out is intentional (VK banner), don't "fix" it.
+
 # Traffic & quotas
 
 - On exit, the x-ui `client_traffics(email, up, down, total)` table is the source of truth for per-client usage.
