@@ -60,3 +60,4 @@ mutants/
 .claude/settings.local.json
 scripts/hermes_skill_vars.local
 bot/version.txt
+htmlcov/
