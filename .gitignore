@@ -59,3 +59,4 @@ mutants/
 # Claude Code local permissions
 .claude/settings.local.json
 scripts/hermes_skill_vars.local
+bot/version.txt

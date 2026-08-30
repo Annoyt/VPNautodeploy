@@ -50,6 +50,23 @@ SPECIAL_ACTIONS = {'reset', 'grant_100gb', 'grant_paid', 'set_limit_ip',
 BYTES_PER_GB = 1024 ** 3
 
 
+def _deployed_version() -> str:
+    """Deployed code version for the drift check in /health.
+
+    ``bot/version.txt`` is written by scripts/deploy_to_entry.sh at
+    deploy time (git sha + timestamp) and baked into the image by the
+    ``COPY bot/`` in the Dockerfile. Absent in dev checkouts — the file
+    is gitignored — so fall back to 'dev'. Repo-vs-prod drift bit twice
+    (65b9b4c sat undeployed for 11 days); this makes it visible.
+    """
+    try:
+        from pathlib import Path
+        return (Path(__file__).resolve().parent.parent / 'version.txt') \
+            .read_text().strip() or 'dev'
+    except OSError:
+        return 'dev'
+
+
 class WebAppServer:
     """Lightweight web server for Mini App."""
     
@@ -337,11 +354,12 @@ class WebAppServer:
         """Health check endpoint for Docker."""
         try:
             await asyncio.to_thread(self.db.get_stats)
-            
+
             return web.json_response({
                 'status': 'healthy',
                 'service': 'vpn-bot',
-                'database': 'connected'
+                'database': 'connected',
+                'version': _deployed_version(),
             }, status=200)
         except Exception as e:
             logger.error(f"Health check failed: {e}")
