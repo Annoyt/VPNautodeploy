@@ -70,7 +70,9 @@ fi
 # Exit 2 = "could not check": that is a failure too, not a pass.
 echo "==> Smoke: panel client fields"
 set +e
-ssh entry "docker exec vpn-bot python3 /app/scripts/verify_panel_client_fields.py"
+# PYTHONPATH=/app: the image has no installed package, `bot` is importable
+# only from the app root, and the script lives one level down.
+ssh entry "docker exec -e PYTHONPATH=/app vpn-bot python3 /app/scripts/verify_panel_client_fields.py"
 audit_rc=$?
 set -e
 if [ "$audit_rc" -eq 1 ]; then
