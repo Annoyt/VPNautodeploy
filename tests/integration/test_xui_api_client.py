@@ -173,6 +173,7 @@ class TestXUIAPIClientClientOperations:
             result = await client.update_client(
                 "user_bob_42@nekovo.ru",
                 {"email": "user_bob_42@nekovo.ru", "id": "abc-123",
+                 "flow": "xtls-rprx-vision",
                  "totalGB": 500, "comment": "bob@gmail.com"},
                 [1, 4, 5, 6],
             )
@@ -185,6 +186,53 @@ class TestXUIAPIClientClientOperations:
         assert body["totalGB"] == 500
         assert body["comment"] == "bob@gmail.com"
         assert body["inboundIds"] == [1, 4, 5, 6]
+        # The Reality inbound rebuilds the client from this body.
+        assert body["flow"] == "xtls-rprx-vision"
+
+    @pytest.mark.asyncio
+    async def test_update_client_refuses_body_without_flow(self, client):
+        """Regression, 2026-09-01: a body with no ``flow`` strips
+        xtls-rprx-vision from every VLESS client the update touches —
+        that is how 80 of 81 clients lost Reality for four days. The
+        write must be refused, not silently corrupt the panel."""
+        mock_response = _create_mock_response(json_data={"success": True})
+        mock_session = MagicMock()
+        mock_session.post = MagicMock(
+            return_value=_create_async_context_mock(mock_response))
+
+        with patch.object(client, '_get_session', return_value=mock_session), \
+                patch.object(client, '_ensure_auth', new=AsyncMock(return_value=True)):
+            result = await client.update_client(
+                "user_bob_42@nekovo.ru",
+                {"email": "user_bob_42@nekovo.ru", "id": "abc-123",
+                 "totalGB": 500},
+                [1, 4, 5, 6],
+            )
+
+        assert result is False
+        mock_session.post.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_update_client_allows_flowless_when_opted_out(self, client):
+        """A caller that legitimately manages a client with no flow
+        (e.g. one that lives only on non-VLESS inbounds) opts out
+        explicitly rather than by accident."""
+        mock_response = _create_mock_response(json_data={"success": True})
+        mock_session = MagicMock()
+        mock_session.post = MagicMock(
+            return_value=_create_async_context_mock(mock_response))
+
+        with patch.object(client, '_get_session', return_value=mock_session), \
+                patch.object(client, '_ensure_auth', new=AsyncMock(return_value=True)):
+            result = await client.update_client(
+                "user_bob_42@nekovo.ru",
+                {"email": "user_bob_42@nekovo.ru", "id": "abc-123"},
+                [5],
+                required_fields=(),
+            )
+
+        assert result is True
+        assert "flow" not in mock_session.post.call_args[1]["json"]
 
     @pytest.mark.asyncio
     async def test_reset_client_traffic_posts_to_fork_route(self, client):

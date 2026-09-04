@@ -734,6 +734,44 @@ class XUIService:
                 return dict(c)
         return None
 
+    # Fields that live in exactly ONE inbound's settings JSON:
+    # ``flow`` only on the VLESS-Reality inbound, ``password``/``method``
+    # only on the Shadowsocks one. ``update_client`` rewrites the client
+    # on EVERY inbound from a single body, so a body assembled by reading
+    # one inbound silently blanks the others' fields.
+    #
+    # 2026-09-01: the monthly quota job read 81 clients from the SS
+    # inbound (it is first in ``lookup_order`` because it carries the
+    # SS-2022 password) and wrote the flow-less body to inbound 1.
+    # 80 clients lost ``xtls-rprx-vision`` and port 443 was dead for
+    # four days. Every read-modify-write must merge across inbounds.
+    PER_INBOUND_FIELDS = ('flow', 'password', 'method')
+
+    async def _read_client_merged_async(
+        self, email: str, lookup_order: List[int]
+    ) -> Optional[dict]:
+        """Assemble one client record from EVERY inbound it lives on.
+
+        The first inbound that has the client provides the base record
+        (``lookup_order`` puts Shadowsocks first so the SS-2022 password
+        is never missed); the remaining inbounds contribute only the
+        per-protocol fields the base record lacks. Returns None when the
+        client is on no inbound at all.
+        """
+        client = None
+        for candidate in lookup_order:
+            inbound = await self.api.get_inbound(candidate)
+            found = self._find_client_by_email(inbound, email)
+            if not found:
+                continue
+            if client is None:
+                client = found
+                continue
+            for key in self.PER_INBOUND_FIELDS:
+                if not client.get(key) and found.get(key):
+                    client[key] = found[key]
+        return client
+
     def _client_inbound_ids(self, primary: int) -> List[int]:
         """Full inbound set a bot-provisioned client belongs to: the
         primary Reality inbound plus the CDN/Shadowsocks mirrors."""
@@ -782,12 +820,7 @@ class XUIService:
         lookup_order = ([ss_id] if ss_id else []) + [
             i for i in inbound_ids if i != ss_id
         ]
-        client = None
-        for candidate in lookup_order:
-            inbound = await self.api.get_inbound(candidate)
-            client = self._find_client_by_email(inbound, email)
-            if client:
-                break
+        client = await self._read_client_merged_async(email, lookup_order)
         if client is None:
             logger.warning(
                 f"set_client_comment: {redact_email(email)} not found in panel"
@@ -836,12 +869,7 @@ class XUIService:
         lookup_order = ([ss_id] if ss_id else []) + [
             i for i in inbound_ids if i != ss_id
         ]
-        client = None
-        for candidate in lookup_order:
-            inbound = await self.api.get_inbound(candidate)
-            client = self._find_client_by_email(inbound, email)
-            if client:
-                break
+        client = await self._read_client_merged_async(email, lookup_order)
         if client is None:
             logger.warning(
                 f"update_client_fields: {redact_email(email)} not found in panel"

@@ -526,6 +526,78 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
         except Exception:
             return None
 
+    # ---- outbound probe collapse (a protocol went dark) ----
+    # 2026-09-01: VLESS-Reality died at 00:01 UTC when a client update
+    # blanked `flow` on inbound 1. The probe suite recorded it
+    # immediately — reality went from 672/960 ok per day to 0/960 —
+    # and the rows sat in outbound_health for FOUR DAYS because nothing
+    # read them. This check closes that loop.
+    PROBE_RUNS = 3              # consecutive probe runs that must be all-bad
+    PROBE_DOMAINS = 10          # HealthChecker.TARGET_DOMAINS per run
+    PROBE_MIN_SAMPLES = 15      # ignore thin windows (partial run, new deploy)
+    PROBE_WINDOW_H = 3          # only look at recent rows
+
+    def check_protocol_probe_down():
+        """Per protocol: zero successful probes across the last N runs.
+
+        Only real verdicts count. ``proxy_down`` rows mean the
+        probe-proxy sidecar was unreachable — a monitoring outage, not
+        a statement about the tunnel — so they are excluded from both
+        the numerator and the denominator; a dead sidecar must not page
+        four fake protocol outages.
+        """
+        try:
+            db_path = getattr(config, 'DB_PATH', None) or '/var/lib/vpn-bot/bot.db'
+            import sqlite3
+            from datetime import datetime, timedelta
+            cutoff = (
+                datetime.utcnow() - timedelta(hours=PROBE_WINDOW_H)
+            ).isoformat()
+            limit = PROBE_RUNS * PROBE_DOMAINS
+            with sqlite3.connect(db_path) as conn:
+                tags = [
+                    r[0] for r in conn.execute(
+                        "SELECT DISTINCT outbound_tag FROM outbound_health "
+                        "WHERE ts >= ?", (cutoff,),
+                    ).fetchall()
+                ]
+                samples = {}
+                for tag in tags:
+                    samples[tag] = [
+                        r[0] for r in conn.execute(
+                            "SELECT status FROM outbound_health "
+                            "WHERE outbound_tag = ? AND ts >= ? "
+                            "AND status != 'proxy_down' "
+                            "ORDER BY ts DESC LIMIT ?",
+                            (tag, cutoff, limit),
+                        ).fetchall()
+                    ]
+        except Exception as e:
+            logger.debug(f"protocol-probe alert read failed: {e}")
+            return ("protocol_down:", [])
+
+        alerts = []
+        for tag, statuses in samples.items():
+            if len(statuses) < PROBE_MIN_SAMPLES:
+                continue
+            ok = sum(1 for s in statuses if s == 'ok')
+            if ok > 0:
+                continue
+            alerts.append(Alert(
+                key=f'protocol_down:{tag}',
+                severity='critical',
+                min_cycles=2,
+                title=f'Протокол {tag} мёртв: 0/{len(statuses)} успешных проб',
+                detail=(
+                    f"Ни одна проба через {tag} не прошла за последние "
+                    f"{PROBE_RUNS} прогона ({len(statuses)} попыток). "
+                    f"Остальные протоколы проверь в дашборде: если живы — "
+                    f"дело в самом inbound'е (клиенты потеряли flow/пароль, "
+                    f"порт закрыт, xray отверг конфиг), а не в сети."
+                ),
+            ))
+        return ("protocol_down:", alerts)
+
     # ---- DPI / fingerprint checks (Phase C) ----
     # All three checks share the same DB read pattern: roll up the last
     # hour of dpi_metrics by (country, ASN) and look for anomalies vs
@@ -686,6 +758,7 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
     checks.extend([
         check_cpu, check_ram, check_disk,
         check_opencode, check_xray_reload_sidecar, check_xui_inbounds,
+        check_protocol_probe_down,
         check_dpi_short_sessions, check_dpi_handshake_spike, check_dpi_rst_spike,
     ])
     return checks
