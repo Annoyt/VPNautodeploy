@@ -44,6 +44,19 @@ latency; vk/yandex/sberbank legitimately fail through the exit and still
 carry one. The 2026-09-01 rows had latency NULL: nothing ever connected.
 Normal is 7/10 ok per protocol per run.
 
+HY2T (Hysteria Turbo) COVERAGE IS DYNAMIC
+-----------------------------------------
+The sidecar gets a hy2t inbound (:18085) only on deployments with
+HY2T_PORT set (HealthChecker.probe_tags_for / gen_probe_config.py). This
+script runs on the host without the bot's config, so "is hy2t probed
+here?" is read off the rows: layer A lists a tag only when outbound_health
+has rows for it in the window. Rows present → hy2t is judged like hy2
+(probe verdict first, layer C evidence second, hysteria suspects). No
+rows → the pre-2026-09-05 path: layer C (+ entry DNAT) is the only
+source and the evidence says "no probe coverage". Either way a definite
+layer-C failure (daemon not active, entry DNAT :8402 gone) is DOWN —
+probe coverage adds a signal, it never removes one.
+
 HOW TO RUN (as root on the ENTRY host; plain python3, no bot imports)
 ---------------------------------------------------------------------
     python3 /opt/vpn-bot/scripts/protocol_healthcheck.py          # human report (RU)
@@ -85,7 +98,8 @@ from typing import Dict, List, Optional, Tuple
 # Constants (mirror bot/services/alert_manager.py + health_checker.py)
 # ---------------------------------------------------------------------------
 
-PROBED = ['reality', 'hy2', 'ws', 'stls']      # what the probe sidecar speaks
+PROBED = ['reality', 'hy2', 'ws', 'stls']      # what the probe sidecar ALWAYS speaks
+PROBED_OPTIONAL = ['hy2t']   # probed only where HY2T_PORT is set — decided per run by probed_tags()
 PROTOCOLS = ['reality', 'hy2', 'hy2t', 'ws', 'stls']   # what we report on
 
 PROBE_DOMAINS = 10           # rows per protocol per run (HealthChecker.TARGET_DOMAINS)
@@ -487,6 +501,22 @@ def collect_all(sni: str) -> dict:
 # Assessment (pure)
 # ---------------------------------------------------------------------------
 
+def probed_tags(probes) -> List[str]:
+    """PROBED + the optional tags that actually have rows in the window.
+
+    hy2t is probed only on deployments with HY2T_PORT set, and this
+    script has no access to the bot's config — so the rows decide: layer
+    A emits a tag only if outbound_health has rows for it in the last
+    PROBE_WINDOW_H hours. No rows → hy2t is judged from layer C alone,
+    exactly as before the :18085 inbound existed. Never hardcoded, so a
+    deployment without turbo does not get a phantom UNKNOWN probe."""
+    out = list(PROBED)
+    for tag in PROBED_OPTIONAL:
+        if ((probes or {}).get(tag) or {}).get('rows'):
+            out.append(tag)
+    return out
+
+
 def _is_alive(row) -> bool:
     """LIVENESS RULE on one [ts, status, latency_ms] row."""
     return (len(row) > 2 and row[2] is not None) or (len(row) > 1 and row[1] == 'ok')
@@ -597,7 +627,8 @@ def _audit_flags(audit: dict) -> dict:
 
 
 def _hy2_suspects(tag: str, b: dict, c: dict, entry_dnat: set, exit_hop: set) -> List[dict]:
-    """Shared Hysteria diagnosis for hy2 (probe-driven) and hy2t (layer C only)."""
+    """Shared Hysteria diagnosis for hy2 and hy2t (both probe-driven when
+    rows exist; hy2t falls back to layer C only when it has none)."""
     out = []
     unit = HYSTERIA_UNIT[tag]
     svc = (c.get('services') or {}).get(unit)
@@ -637,6 +668,8 @@ def assess(layers: dict, now: Optional[datetime] = None) -> dict:
     c_ok = bool(c.get('ok'))
 
     probes = a.get('probes') or {}
+    probed = probed_tags(probes)          # PROBED (+ hy2t when it has rows)
+    hy2t_probed = 'hy2t' in probed
     audit = _audit_flags(a.get('audit') or {})
     entry_dnat = parse_dnat_rules(b.get('nat_prerouting'))
     exit_hop = parse_redirect_rules(c.get('nat_prerouting'))
@@ -658,7 +691,7 @@ def assess(layers: dict, now: Optional[datetime] = None) -> dict:
     stale_min = _minutes_since(newest, now) if newest else float('inf')
     pipeline_stale = a_ok and (not newest or stale_min > PROBE_STALE_MIN)
 
-    for tag in PROBED:
+    for tag in probed:
         if not a_ok:
             protocols[tag] = {'state': 'UNKNOWN', 'down_for': None, 'ok_rate': None,
                               'evidence': [f'слой A недоступен: {a.get("error") or "нет данных"} — '
@@ -734,10 +767,20 @@ def assess(layers: dict, now: Optional[datetime] = None) -> dict:
                 f'client connected за 1ч: {"?" if conns is None else conns} '
                 '(долгие QUIC-сессии → 0 не значит падение)')
 
-    # --- hy2t: no probe → layer C (+ entry DNAT) is the only source -----------
+    # --- hy2t: layer C (+ entry DNAT) --------------------------------------------
+    # Without probe rows it is the ONLY source (pre-18085 behaviour). With
+    # rows the probe verdict (set in the loop above) leads and layer C is a
+    # FLOOR: a dead hysteria-turbo / missing DNAT :8402 was DOWN before the
+    # probe existed and stays DOWN — a live probe row proves the tunnel the
+    # probe took, not that the daemon users are pointed at is up. Layer C
+    # can only worsen the probe verdict, never lift it: UNKNOWN probes plus
+    # a fine exit stay UNKNOWN (never a pass by omission).
     hy2t = protocols.setdefault('hy2t', {'state': 'UNKNOWN', 'evidence': [], 'down_for': None, 'ok_rate': None})
-    hy2t['probe_coverage'] = False
-    hy2t['evidence'].insert(0, 'no probe coverage — зонд ходит только через reality/hy2/ws/stls')
+    hy2t['probe_coverage'] = hy2t_probed
+    if not hy2t_probed:
+        hy2t['evidence'].insert(0, f'no probe coverage — строк hy2t в outbound_health за {PROBE_WINDOW_H}ч нет '
+                                   '(HY2T_PORT пуст или probe-proxy без inbound :18085 — '
+                                   'см. scripts/gen_probe_config.py)')
     if c_ok:
         svc = (c.get('services') or {}).get('hysteria-turbo')
         # Without layer B the entry DNAT is unverified; without the exit NAT
@@ -746,20 +789,31 @@ def assess(layers: dict, now: Optional[datetime] = None) -> dict:
         main_dnat_missing = b_ok and ('8402', '8402') not in entry_dnat
         hop_missing = (exit_nat_known and not all(x in exit_hop for x in EXIT_HOP_FOR['hy2t'])) or (
             b_ok and ('40001:50000', '8402') not in entry_dnat)
+        c_note = None
         if svc != 'active' or main_dnat_missing:
-            hy2t['state'] = 'DOWN'
+            c_state = 'DOWN'
         elif hop_missing:
-            hy2t['state'] = 'DEGRADED'
+            c_state = 'DEGRADED'
         elif not b_ok:
-            hy2t['state'] = 'UNKNOWN'
-            hy2t['evidence'].append(f'entry DNAT не проверен (слой B: {b.get("error") or "нет данных"}) — '
-                                    'демон активен, но путь с entry не подтверждён')
+            c_state = 'UNKNOWN'
+            c_note = (f'entry DNAT не проверен (слой B: {b.get("error") or "нет данных"}) — '
+                      'демон активен, но путь с entry не подтверждён')
         elif not exit_nat_known:
-            hy2t['state'] = 'UNKNOWN'
-            hy2t['evidence'].append('hop-правила на exit не проверены (iptables на exit не ответил: '
-                                    f'{(c.get("errors") or {}).get("nat") or "пустой вывод"})')
+            c_state = 'UNKNOWN'
+            c_note = ('hop-правила на exit не проверены (iptables на exit не ответил: '
+                      f'{(c.get("errors") or {}).get("nat") or "пустой вывод"})')
         else:
-            hy2t['state'] = 'OK'
+            c_state = 'OK'
+        if not hy2t_probed:
+            hy2t['state'] = c_state
+            if c_note:
+                hy2t['evidence'].append(c_note)
+        elif c_state in ('DOWN', 'DEGRADED') and STATE_ORDER[c_state] > STATE_ORDER[hy2t['state']]:
+            hy2t['state'] = c_state
+            if c_state == 'DEGRADED':
+                # Not a probe-rate problem: the hop suspect below names it,
+                # the generic "ok ниже половины нормы" line must not.
+                hy2t['degraded_reason'] = 'layer_c'
     else:
         hy2t['evidence'].append(f'слой C недоступен: {c.get("error") or "нет данных"}')
 
@@ -777,14 +831,14 @@ def assess(layers: dict, now: Optional[datetime] = None) -> dict:
             protocols[tag]['evidence'].append(
                 'entry DNAT: ' + ('все правила на месте' if not missing else 'НЕТ ' + ', '.join(missing)))
         if cont.get('probe-proxy') != 'running':
-            for tag in PROBED:
+            for tag in probed:
                 protocols[tag]['evidence'].append(f'entry: контейнер probe-proxy {cont.get("probe-proxy")} — '
                                                   'пробы слепы независимо от протокола')
 
     # --- suspects ---------------------------------------------------------------
     states = {t: protocols[t]['state'] for t in PROTOCOLS if t in protocols}
-    probed_down = [t for t in PROBED if states.get(t) == 'DOWN']
-    all_dark = len(probed_down) == len(PROBED)
+    probed_down = [t for t in probed if states.get(t) == 'DOWN']
+    all_dark = len(probed_down) == len(probed)
 
     if all_dark:
         pp = (b.get('containers') or {}).get('probe-proxy')
@@ -892,12 +946,12 @@ def assess(layers: dict, now: Optional[datetime] = None) -> dict:
         rows_cmd = ('docker exec vpn-bot python3 -c "import sqlite3; c=sqlite3.connect(\'/var/lib/vpn-bot/bot.db\'); '
                     '[print(r) for r in c.execute(\\"SELECT ts,target_domain,status,latency_ms,error_msg FROM outbound_health '
                     'WHERE outbound_tag=\'%s\' ORDER BY ts DESC LIMIT 20\\")]"')
-        for tag in PROBED:
+        for tag in probed:
             if states.get(tag) != 'DEGRADED':
                 continue
             reason = protocols[tag].get('degraded_reason')
-            if reason == 'audit':
-                continue                                # the audit suspect above names it
+            if reason in ('audit', 'layer_c'):
+                continue                # the audit / hop-rule suspect above names it
             if reason == 'dark_run':
                 suspects.append({'rank': 35, 'protocol': tag,
                                  'title': f'{tag}: последний прогон проб без единого ok при живых прошлых — '
@@ -1001,8 +1055,13 @@ def _verdict_line(protocols, states, all_dark, pipeline_stale, a_ok, stale_min) 
         elif st == 'UNKNOWN':
             bad.append(f'{t} UNKNOWN')
     if not bad:
-        rates = ', '.join(f'{t} {protocols[t].get("ok_rate")}' for t in PROBED)
-        return f'ИТОГ: все протоколы OK ({rates}; hy2t active, без проб)'
+        # Rates for whatever was actually probed this run; anything judged
+        # from layer C alone (hy2t without rows) is named as such.
+        rates = ', '.join(f'{t} {protocols[t].get("ok_rate")}' for t in PROTOCOLS
+                          if t in protocols and protocols[t].get('probe_coverage'))
+        unprobed = [t for t in PROTOCOLS if t in protocols and not protocols[t].get('probe_coverage')]
+        tail = f'; {", ".join(unprobed)} active, без проб' if unprobed else ''
+        return f'ИТОГ: все протоколы OK ({rates}{tail})'
     rest_ok = [t for t in PROTOCOLS if states.get(t) == 'OK']
     tail = 'остальные OK' if len(rest_ok) == len(PROTOCOLS) - len(bad) and rest_ok else 'остальных OK нет'
     return f'ИТОГ: {", ".join(bad)}, {tail}'

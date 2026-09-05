@@ -32,10 +32,18 @@ silence that key for 6h.
 
 Agent follow-ups
 ----------------
-Two alert families get an automatic AI diagnosis via ``_kick_agent``:
+Two alert families get an automatic AI diagnosis via ``_kick_agent``.
+Neither runs on the alert tick: ``_spawn_agent_worker`` hands the turn
+to a daemon thread and ``_fire`` returns at once, so the 60-s tick is
+never held by Hermes (a hung agent used to blind CPU/RAM/disk and the
+protocol pager for up to 10 min per DPI bucket — see the budget block).
 
 - ``dpi_*`` — analysis stored in ``alert_history.kimi_analysis`` for
-  the dashboard only (these fire often; chat would drown).
+  the dashboard only (these fire often; chat would drown). Bounded to
+  ``DPI_AGENT_MAX_CONCURRENT`` turns at once: a burst of buckets beyond
+  that is SKIPPED (log-only), not queued — a dashboard annotation is not
+  worth a backlog of 10-min turns, and the key's ``REPEAT_COOLDOWN_S``
+  fire will try again if the condition persists.
 - ``protocol_down:*`` — critical and rare; the analysis is stored AND
   posted to the same topic as the alert, because the operator asked for
   auto-diagnosis on suspicion and the 2026-09-01 Reality outage showed
@@ -43,7 +51,12 @@ Two alert families get an automatic AI diagnosis via ``_kick_agent``:
   the pager fired. The agent is told to run
   ``scripts/protocol_healthcheck.py`` first and reason only from it —
   host-level checks (ports, iptables, containers) all said "alive"
-  during that outage.
+  during that outage. Bounded per key only (there are a handful of
+  keys), never by the DPI slot pool — a DPI storm must not delay the
+  diagnosis of a dead protocol.
+
+Both families dedupe per alert key: while a turn for ``key`` is in
+flight a second fire of the same key is skipped, not stacked.
 """
 
 from __future__ import annotations
@@ -92,13 +105,29 @@ DASHBOARD_ONLY_PREFIXES = ('dpi_short:', 'dpi_hsfail:', 'dpi_rst:')
 DPI_AGENT_PREFIXES = ('dpi_short:', 'dpi_hsfail:', 'dpi_rst:')
 PROTOCOL_AGENT_PREFIX = 'protocol_down:'
 
-# Agent budgets. The DPI call blocks the alert tick (APScheduler skips
-# the next 60-s trigger while one is running — max_instances=1), so its
-# budget is also "how long the other checks are delayed"; it keeps the
-# historical 10 min for its multi-step skill. protocol_down runs on its
-# own worker thread (the tick is not held) and is a single scripted
-# read, so it gets a tighter budget.
+# Agent budgets. Both families run on worker threads (see
+# _spawn_agent_worker), so a budget is "how long one Hermes turn may
+# hold a thread + a session", NOT "how long the alert tick is blind".
+# Until 2026-09-05 the DPI call ran synchronously inside the tick —
+# APScheduler's default max_instances=1 skips the next 60-s trigger
+# while one is running — so every DPI bucket could hold CPU/RAM/disk
+# AND the protocol_down pager hostage for the full 10 min, and several
+# buckets fire per hour.
+#
+# DPI keeps the historical 10 min: its skill is multi-step (dpi_metrics
+# rows + error.log slice + 7d baseline + HTML render). What replaces the
+# tick as its throttle is DPI_AGENT_MAX_CONCURRENT: at most that many
+# DPI turns at once against the single Hermes on entry; the rest of a
+# burst is skipped (INFO log), not queued — DPI analysis is dashboard
+# decoration, and a queue of 10-min turns would still be draining when
+# the next hour's buckets arrive. Two = one in-progress + one more for
+# a second country/ASN, on a small VPS that also runs the bot; with a
+# stuck Hermes that is at most two parked threads, not a pile-up.
+#
+# protocol_down is a single scripted read, so it gets a tighter budget,
+# and is bounded per key only (see module docstring).
 DPI_AGENT_TIMEOUT_S = 600
+DPI_AGENT_MAX_CONCURRENT = 2
 PROTOCOL_AGENT_TIMEOUT_S = 300
 
 # The one command the agent must run for a protocol_down alert. It lives
@@ -119,12 +148,18 @@ class AlertManager:
         self.db = db  # optional — alerts still fire to Telegram if missing
         self._state: Dict[str, _Tracker] = {}
         self._checks: List[Callable[[], Optional[Alert]]] = []
-        # protocol_down follow-ups run on a worker thread (see
-        # _kick_protocol_agent). One in-flight agent turn per alert key;
-        # the last spawned thread is kept so tests can join it.
+        # Agent follow-ups run on worker threads (see _spawn_agent_worker).
+        # One in-flight agent turn per alert key; the last spawned thread
+        # is kept so tests can join it. _agent_lock guards the key set AND
+        # the non-blocking slot grab, so "key free + slot free → take
+        # both" is atomic and two ticks' worth of fires cannot interleave
+        # into a leaked slot.
         self._agent_inflight: set = set()
         self._agent_lock = threading.Lock()
         self._last_agent_thread: Optional[threading.Thread] = None
+        # Global bound on concurrent DPI turns (module docstring / budget
+        # block). Protocol turns deliberately do NOT draw from this pool.
+        self._dpi_agent_slots = threading.Semaphore(DPI_AGENT_MAX_CONCURRENT)
 
     # ----- registration -----
 
@@ -258,9 +293,10 @@ class AlertManager:
             f"{'(dashboard-only) ' if is_dashboard_only else ''}{alert.title}"
         )
 
-        # Agent follow-ups. Both wrappers swallow every failure — an
-        # agent outage must never take the pager down with it, and the
-        # alert row above is already persisted whatever happens here.
+        # Agent follow-ups. Both wrappers hand the turn to a worker thread
+        # and return at once, and both swallow every failure — an agent
+        # outage must never take the pager down with it, and the alert
+        # row above is already persisted whatever happens here.
         if alert.key.startswith(DPI_AGENT_PREFIXES):
             self._kick_dpi_agent(alert, alert_db_id)
         elif alert.key.startswith(PROTOCOL_AGENT_PREFIX):
@@ -336,18 +372,35 @@ class AlertManager:
 
     # ----- agent follow-ups -----
 
-    def _kick_dpi_agent(self, alert: Alert, alert_db_id: Optional[int]) -> Optional[str]:
+    def _kick_dpi_agent(self, alert: Alert, alert_db_id: Optional[int]
+                        ) -> Optional[threading.Thread]:
         """DPI-analysis follow-up: dashboard-only (stored against the
-        alert row, never posted to chat — these fire often)."""
+        alert row, never posted to chat — these fire often).
+
+        Off the tick since 2026-09-05. It used to run synchronously and,
+        at 600 s per turn with several buckets an hour, it was the single
+        biggest reason the 60-s alert tick went blind for long stretches
+        — including for the protocol_down pager that was added precisely
+        because nobody noticed a four-day outage. Now a worker thread,
+        bounded two ways: one turn per key, and ``DPI_AGENT_MAX_CONCURRENT``
+        turns in total (``_dpi_agent_slots``). With no slot free the fire
+        is skipped, not queued — the tracker still stamps
+        ``last_fired_ts``, so the same key retries on its next fire after
+        ``REPEAT_COOLDOWN_S`` if the condition persists, which for a
+        dashboard-only annotation is the right amount of trying.
+        Returns the started thread, or None when nothing was started
+        (agent not configured / key in flight / no slot). Never raises.
+        """
         # 600s (10 min) gives the agent room to finish the multi-step
         # skill: read dpi_metrics rows + grep error.log for the same
         # hour, compare to 7d baseline, render HTML output.
-        return self._kick_agent(
+        return self._spawn_agent_worker(
             alert, alert_db_id,
             prompt=_dpi_agent_prompt(alert),
             session_prefix='dpi-alert',
             post_to_topic=False,
             timeout=DPI_AGENT_TIMEOUT_S,
+            slots=self._dpi_agent_slots,
         )
 
     def _kick_protocol_agent(self, alert: Alert, alert_db_id: Optional[int],
@@ -366,44 +419,120 @@ class AlertManager:
         blind pager) — and a hung Hermes/proxy would do that on every
         fire. The turn is bounded per key: while one is in flight for
         ``alert.key`` a second fire of the same key is skipped (log-only)
-        rather than queued. Returns the started thread, or None when
+        rather than queued. No global slot pool on purpose: there are a
+        handful of protocol keys, each fire is a real pager event, and a
+        DPI storm holding every slot must not postpone the diagnosis of
+        a dead protocol. Returns the started thread, or None when
         nothing was started (agent not configured / already in flight).
         Never raises.
         """
+        return self._spawn_agent_worker(
+            alert, alert_db_id,
+            prompt=_protocol_agent_prompt(alert),
+            session_prefix='proto-alert',
+            post_to_topic=post_to_topic,
+            timeout=PROTOCOL_AGENT_TIMEOUT_S,
+            slots=None,
+        )
+
+    def _spawn_agent_worker(self, alert: Alert, alert_db_id: Optional[int], *,
+                            prompt: str, session_prefix: str,
+                            post_to_topic: bool, timeout: int,
+                            slots: Optional[threading.Semaphore]
+                            ) -> Optional[threading.Thread]:
+        """Run one ``_kick_agent`` turn for ``alert`` on a daemon thread,
+        bounded per key and (optionally) by a shared slot pool.
+
+        The shared half of both follow-ups, so the two wrappers cannot
+        drift apart on the parts that keep the pager safe:
+
+        * never blocks the caller — the alert tick returns in
+          milliseconds whatever Hermes is doing;
+        * one turn per ``alert.key`` at a time — a second fire of the
+          same key while one is in flight is skipped (INFO), never
+          stacked, so a stuck agent parks one thread per key, not one
+          per tick;
+        * ``slots`` (a ``threading.Semaphore``, or None for "per key
+          only") caps the family's concurrency; with no slot free the
+          fire is skipped (INFO) rather than queued — the caller's
+          tracker stamps ``last_fired_ts`` regardless, so the key retries
+          on its next fire after the cooldown;
+        * the key and the slot are released in the worker's ``finally``,
+          so a raising ``_kick_agent`` (it never should — paranoia) or a
+          failed ``Thread.start`` cannot leak them and silence the key
+          forever.
+
+        Daemon thread: a parked agent turn must never keep the process
+        from exiting on SIGTERM (docker stop has a 10-s grace).
+
+        Returns the started thread, or None when nothing was started
+        (agent not configured / key in flight / no slot / could not
+        start). Never raises.
+        """
+        tag = f"{session_prefix}-agent"
         try:
             from bot.services.agent_factory import get_agent_url
             if not get_agent_url(self.config):
                 return None
         except Exception as e:
-            logger.warning(f"proto-alert-agent: agent factory unavailable: {e}")
+            logger.warning(f"{tag}: agent factory unavailable: {e}")
             return None
 
         key = alert.key
+        # Key check and slot grab under ONE lock so "key free, slot free,
+        # take both" is atomic — otherwise two fires racing here could
+        # each pass the key check and one of them would leak a slot.
         with self._agent_lock:
             if key in self._agent_inflight:
-                logger.info(f"proto-alert-agent: {key} already in flight — not re-kicking")
+                logger.info(f"{tag}: {key} already in flight — not re-kicking")
+                return None
+            if slots is not None and not slots.acquire(blocking=False):
+                # INFO, not WARNING: this is the designed throttle doing
+                # its job, not a fault — the dashboard log panel must not
+                # fill with it during a DPI storm.
+                logger.info(
+                    f"{tag}: {key} — no free agent slot (family concurrency "
+                    f"cap reached); skipped, not queued — the key retries on "
+                    f"its next fire after cooldown"
+                )
                 return None
             self._agent_inflight.add(key)
+
+        def _release() -> None:
+            # Idempotent by construction: called exactly once, either from
+            # the worker's finally or from the start-failure path below.
+            with self._agent_lock:
+                self._agent_inflight.discard(key)
+            if slots is not None:
+                slots.release()
 
         def _worker() -> None:
             try:
                 self._kick_agent(
                     alert, alert_db_id,
-                    prompt=_protocol_agent_prompt(alert),
-                    session_prefix='proto-alert',
+                    prompt=prompt,
+                    session_prefix=session_prefix,
                     post_to_topic=post_to_topic,
-                    timeout=PROTOCOL_AGENT_TIMEOUT_S,
+                    timeout=timeout,
                 )
             except Exception as e:      # _kick_agent never raises; paranoia
-                logger.warning(f"proto-alert-agent: worker failed for {key}: {e}")
+                logger.warning(f"{tag}: worker failed for {key}: {e}")
             finally:
-                with self._agent_lock:
-                    self._agent_inflight.discard(key)
+                _release()
 
         t = threading.Thread(target=_worker, daemon=True,
-                             name=f"proto-alert-{key}")
+                             name=f"{session_prefix}-{key}")
+        try:
+            t.start()
+        except Exception as e:
+            # RuntimeError("can't start new thread") under memory/thread
+            # pressure on the small entry VPS. The worker's finally never
+            # ran, so release here — or this key would be "in flight"
+            # until the next deploy and its slot gone for good.
+            logger.warning(f"{tag}: could not start worker for {key}: {e}")
+            _release()
+            return None
         self._last_agent_thread = t
-        t.start()
         return t
 
     def _kick_agent(self, alert: Alert, alert_db_id: Optional[int], *,
@@ -419,9 +548,10 @@ class AlertManager:
         pager already fired, and ``/protocols`` is the deterministic
         fallback the admin has regardless of the agent.
 
-        Blocking: runs on whatever thread calls it. The DPI hook calls
-        it synchronously from the alert tick (unchanged, historical);
-        the protocol hook calls it from its own worker thread.
+        Blocking: runs on whatever thread calls it — in production that
+        is always a ``_spawn_agent_worker`` daemon thread (both the DPI
+        and the protocol hook go through it since 2026-09-05); nothing
+        may call this from the alert tick or the polling thread.
         Returns the reply text, or None. Never raises.
         """
         tag = f"{session_prefix}-agent"

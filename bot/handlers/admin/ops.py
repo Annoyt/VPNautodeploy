@@ -306,6 +306,9 @@ class AdminOpsMixin(AdminHandlerBase):
             probes = None
 
         if probes is None:
+            # Covers every protocol, hy2t included — no separate hy2t
+            # line here: with the table unreadable we cannot even say
+            # whether it is probed on this deployment.
             lines.append("⚠️ outbound_health недоступна — состояние проб неизвестно")
         else:
             lines.extend(self._probe_header_lines(probes['newest'], now))
@@ -315,9 +318,14 @@ class AdminOpsMixin(AdminHandlerBase):
                     window_h=self.PROTO_WINDOW_H,
                     min_samples=self.PROTO_MIN_SAMPLES,
                 ))
-        # The probe sidecar has no hy2t inbound (ports 18081-18084 are
-        # reality/hy2/ws/stls) — say so instead of showing a blank.
-        lines.append("⚪ <b>hy2t</b>: без проб, см. /ai")
+            if 'hy2t' not in probes['tags']:
+                # hy2t is probed only where HY2T_PORT is set (sidecar
+                # inbound :18085, HealthChecker.probe_tags_for). Not in
+                # the tag list = neither expected by config nor a single
+                # row in the window — say so instead of showing a blank.
+                # When it IS expected, the loop above already rendered a
+                # real line (grey "нет проб" until the first run writes).
+                lines.append("⚪ <b>hy2t</b>: без проб, см. /ai")
         lines.append("")
         lines.append(self._panel_audit_line())
         lines.append("")
@@ -333,12 +341,15 @@ class AdminOpsMixin(AdminHandlerBase):
 
         A "run" is one row per target domain (HealthChecker writes them
         with per-row timestamps, so runs are recovered by count, exactly
-        as the alert check does). Tags come from HealthChecker so a
-        protocol with NO rows at all still gets a line.
+        as the alert check does). Tags = what HealthChecker probes on
+        THIS deployment (config-driven: hy2t only with HY2T_PORT) so a
+        protocol with NO rows at all still gets a line, plus whatever
+        else has rows in the window — a tag added to the checker shows
+        up here without a code change.
         """
         try:
             from bot.services.health_checker import HealthChecker as _HC
-            expected = list(_HC.PROTOCOL_TAGS)
+            expected = _HC.probe_tags_for(self.config)
             per_run = len(_HC.TARGET_DOMAINS)
         except Exception:      # keep the card alive even if that import breaks
             expected, per_run = ['reality', 'hy2', 'ws', 'stls'], 10

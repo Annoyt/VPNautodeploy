@@ -158,7 +158,7 @@ OpenRouter по `/api/v1/key` > $0.001 между запусками = крит�
   через туннель), живость = `latency_ms IS NOT NULL OR status='ok'`. Алерт
   `protocol_down:<tag>` (3 прогона без единого ответа с latency, critical) +
   `protocol_down:all` (все разом = probe-proxy / линк / exit, один инцидент) +
-  `protocol_down:probe_pipeline` (пробы не пишутся — слепота). Критикал уходит
+  `protocol_down:probe_pipeline` (пробы не пишутся — слепота). С 2026-09-05 зонд покрывает и **hy2t** (inbound :18085 у probe-proxy, только при заданном `HY2T_PORT`; таблица портов — `HealthChecker.probe_ports_for`), а `outbound_health` чистится ежедневной джобой (ретенция 30 дней, батчами по 20k строк). Критикал уходит
   в топик AI и **автоматически запускает агент-диагностику** (первым действием
   агенту предписан `protocol_healthcheck.py`, ничего не менять); ответ пишется в
   `alert_history.kimi_analysis` (вкладка Alerts дашборда) **и постится в тот же

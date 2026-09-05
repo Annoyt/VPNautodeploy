@@ -264,7 +264,7 @@ services:
       - "${WEB_BIND:-127.0.0.1}:8080:8080"
 
   # Probe sidecar: one HTTP-proxy inbound per VPN protocol, each routed
-  # through the REAL outbound (reality/hy2/ws/stls) using the dedicated
+  # through the REAL outbound (reality/hy2/ws/stls, + hy2t) using the dedicated
   # probe_internal panel client. HealthChecker requests its targets
   # through these proxies, so outbound_health finally reflects the
   # tunnels instead of the entry node's own connectivity.
@@ -283,7 +283,8 @@ services:
     networks:
       - vpn-net
     # No published ports: only vpn-bot talks to it, over the compose
-    # network (probe-proxy:18081..18084).
+    # network (probe-proxy:18081..18085; 18085 = hy2t, emitted by the
+    # generator only when HY2T_PORT is set — see HealthChecker.PROBE_PORTS).
 
 volumes:
   3xui-data:

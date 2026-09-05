@@ -471,15 +471,27 @@ class TestProtocolKickIsOffThread:
         assert mgr._last_agent_thread.daemon is True
         join_agent(mgr)
 
-    def test_dpi_kick_still_runs_inline(self, db, config, agent):
-        """DPI is unchanged: synchronous, so the (many) DPI buckets are
-        serialised through the tick instead of flooding the agent."""
-        client, _ = agent
+    def test_dpi_kick_is_off_thread_too(self, db, config, blocking_agent):
+        """Inverted on 2026-09-05. DPI used to run inline — "serialised
+        through the tick" — which at 600 s per bucket, several buckets an
+        hour, made it the tick's single biggest blind spot (and blinded
+        the protocol_down pager this file exists for). It now goes
+        through the same worker path; what throttles the DPI flood
+        instead is the DPI_AGENT_MAX_CONCURRENT slot pool, pinned in
+        tests/unit/test_alert_dpi_agent_async.py."""
+        client, gate = blocking_agent
         mgr = AlertManager(Mock(), config, db=db)
+        t0 = time.monotonic()
         fire(mgr, dpi_alert(), wait=False)
+        assert time.monotonic() - t0 < 2.0
+        assert mgr._last_agent_thread is not None
+        assert mgr._last_agent_thread.is_alive()
+        assert history(db)[0]['kimi_analysis'] is None     # agent still thinking
+        gate.set()
+        join_agent(mgr)
         client.ask.assert_called_once()
         assert history(db)[0]['kimi_analysis'] == REPLY
-        assert mgr._last_agent_thread is None
+        mgr.bot.send_message.assert_not_called()      # still dashboard-only
 
 
 class TestFollowUpGoesWhereTheAlertWent:

@@ -4,8 +4,11 @@ Every 15 minutes the scheduler runs ``check_all_outbounds()`` which:
 1. Picks a set of representative domains (RU services, global platforms)
 2. Makes a lightweight HTTP HEAD request to each — routed through the
    probe-proxy sidecar's per-protocol HTTP proxy (sing-box with the
-   actual reality/hy2/ws/stls outbounds; see scripts/gen_probe_config.py)
-3. Records latency + status in ``outbound_health`` table
+   actual reality/hy2/ws/stls outbounds, plus hy2t on deployments that
+   set HY2T_PORT; see scripts/gen_probe_config.py)
+3. Records latency + status in ``outbound_health`` table, one row per
+   (outbound_tag, target_domain) — the tag IS the protocol short-name
+   ('hy2t' for Turbo), which is what the pager and /protocols key on.
 
 History note: until 2026-08-19 this probed DIRECTLY from the entry
 container and wrote one identical result under five protocol labels —
@@ -46,19 +49,31 @@ class HealthChecker:
         'anthropic.com',
     ]
 
-    # Protocols the probe sidecar can speak. xhttp is deliberately
+    # Protocols the probe sidecar ALWAYS speaks. xhttp is deliberately
     # absent — sing-box has no XHTTP transport (see subscription.py),
     # so that path can only be exercised by an xray-core client.
     PROTOCOL_TAGS = ['reality', 'hy2', 'ws', 'stls']
 
     # HTTP-proxy inbound ports of the probe sidecar, one per protocol.
-    # Must match scripts/gen_probe_config.py.
+    # scripts/gen_probe_config.py reads THIS table (via probe_ports_for)
+    # so the generator and the checker cannot drift apart.
     PROBE_PORTS = {
         'reality': 18081,
         'hy2': 18082,
         'ws': 18083,
         'stls': 18084,
     }
+
+    # Hysteria "Turbo" (second exit-side instance, paid-only) is optional
+    # per deployment: an empty HY2T_PORT keeps it out of subscriptions
+    # (subscription._build_hy2t returns None), and it must keep it out of
+    # the probe list too. A checker that hit :18085 on a sidecar without
+    # that inbound would write proxy_down rows (latency NULL) every run —
+    # and check_protocol_probe_down would page protocol_down:hy2t forever
+    # for a protocol that does not exist. Hence the tag joins the list
+    # ONLY through probe_tags_for(config), never the class constant.
+    HY2T_TAG = 'hy2t'
+    HY2T_PROBE_PORT = 18085
 
     # Request limits per check.
     TIMEOUT_SEC = 10
@@ -70,7 +85,8 @@ class HealthChecker:
         Args:
             db: Database instance for writing results.
             config: Settings object; PROBE_PROXY_HOST overrides the
-                sidecar hostname (default: the compose service name).
+                sidecar hostname (default: the compose service name);
+                HY2T_PORT (non-empty, numeric) enables the hy2t probe.
         """
         self.db = db
         self.config = config
@@ -78,8 +94,47 @@ class HealthChecker:
             getattr(config, 'PROBE_PROXY_HOST', '') or 'probe-proxy'
         ).strip()
 
+    # ----- config-driven probe set -----
+
+    @staticmethod
+    def hy2t_probe_enabled(config) -> bool:
+        """Same gate as subscription._build_hy2t: HY2T_PORT must be a
+        non-empty integer. Anything else (unset, '', 'oops', a Mock in
+        tests) means "no turbo here" — never a probe against a port
+        nobody listens on."""
+        raw = getattr(config, 'HY2T_PORT', '') or ''
+        try:
+            return int(str(raw).strip()) > 0
+        except (TypeError, ValueError):
+            return False
+
+    @classmethod
+    def probe_ports_for(cls, config) -> Dict[str, int]:
+        """{tag: sidecar port} for THIS deployment — the four base
+        protocols plus hy2t when the config enables it. The single
+        source of truth for both the checker and gen_probe_config.py."""
+        ports = dict(cls.PROBE_PORTS)
+        if cls.hy2t_probe_enabled(config):
+            ports[cls.HY2T_TAG] = cls.HY2T_PROBE_PORT
+        return ports
+
+    @classmethod
+    def probe_tags_for(cls, config) -> List[str]:
+        """Ordered outbound_tag list the checker will write for ``config``."""
+        return list(cls.probe_ports_for(config))
+
+    @property
+    def probe_ports(self) -> Dict[str, int]:
+        return self.probe_ports_for(self.config)
+
+    @property
+    def protocol_tags(self) -> List[str]:
+        """Tags probed by THIS instance (computed from config on every
+        access — cheap, and a test that swaps ``config`` sees the change)."""
+        return self.probe_tags_for(self.config)
+
     def _proxy_url(self, protocol: str) -> Optional[str]:
-        port = self.PROBE_PORTS.get(protocol)
+        port = self.probe_ports.get(protocol)
         return f'http://{self.proxy_host}:{port}' if port else None
 
     async def check_all_outbounds(self) -> Dict[str, Dict[str, str]]:
@@ -98,7 +153,9 @@ class HealthChecker:
             timeout=aiohttp.ClientTimeout(total=self.TIMEOUT_SEC),
             connector=aiohttp.TCPConnector(limit=self.MAX_CONCURRENT),
         ) as session:
-            for protocol in self.PROTOCOL_TAGS:
+            # Config-driven, not the class constant: hy2t is probed only
+            # where HY2T_PORT enables it (see probe_tags_for).
+            for protocol in self.protocol_tags:
                 proxy = self._proxy_url(protocol)
                 protocol_results = {}
                 tasks = [

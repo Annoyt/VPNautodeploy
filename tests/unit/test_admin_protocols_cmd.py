@@ -65,6 +65,7 @@ def handler(db):
     cfg.FORUM_ENABLED = False
     cfg.FORUM_GROUP_ID = None
     cfg.SUPER_ADMIN_ID = '1652899'
+    cfg.HY2T_PORT = ''          # no turbo on this deployment unless a test sets it
     h.config = cfg
     h._get_thread_id = Mock(return_value=None)
     return h
@@ -125,7 +126,8 @@ class TestProtocolLines:
         assert '0/10 ok' in line_for(text, 'reality')
         for p in ('hy2', 'ws', 'stls'):
             assert line_for(text, p) == f"🟢 <b>{p}</b> — 7/10 ok"
-        # hy2t has no probe-proxy port — say so instead of a blank.
+        # No HY2T_PORT and no hy2t rows: not probed here — say so
+        # instead of a blank (see TestHy2tLine for the probed cases).
         assert '<b>hy2t</b>: без проб, см. /ai' in text
 
     def test_how_long_is_anchored_on_the_last_alive_row(self, handler, db):
@@ -192,6 +194,75 @@ class TestProtocolLines:
         text = run(handler)['text']
         assert 'последний прогон' in text
         assert 'UTC (4 мин назад)' in text
+
+
+class TestHy2tLine:
+    """hy2t is probed only where HY2T_PORT is set (sidecar :18085). With
+    rows it gets the same line as any protocol; the static 'без проб'
+    note appears only when it is neither expected by config nor present
+    in the table — never both, never a blank."""
+
+    def test_rows_present_render_a_real_line_and_no_static_note(self, handler, db):
+        for p in PROTOCOLS + ['hy2t']:
+            seed(db, p, runs=3, ok_per_run=7)
+        text = run(handler)['text']
+        assert line_for(text, 'hy2t') == '🟢 <b>hy2t</b> — 7/10 ok'
+        assert 'без проб' not in text
+        assert text.count('<b>hy2t</b>') == 1
+
+    def test_dark_hy2t_rows_are_red(self, handler, db):
+        for p in PROTOCOLS:
+            seed(db, p, runs=3, ok_per_run=7)
+        seed(db, 'hy2t', runs=3, ok_per_run=0)
+        ln = line_for(run(handler)['text'], 'hy2t')
+        assert ln.startswith('🔴')
+        assert '0/10 ok' in ln and 'лежит' in ln
+
+    def test_expected_by_config_without_rows_is_grey_not_the_static_note(self, handler, db):
+        """HY2T_PORT set but the checker has not written yet (first run
+        after the deploy, or the container still runs the old code): the
+        grey 'нет проб' line is the honest state — and it is ONE line."""
+        handler.config.HY2T_PORT = '8402'
+        for p in PROTOCOLS:
+            seed(db, p, runs=3, ok_per_run=7)
+        text = run(handler)['text']
+        assert line_for(text, 'hy2t') == '⚪ <b>hy2t</b> — нет проб за 3 ч'
+        assert 'без проб, см. /ai' not in text
+        assert text.count('<b>hy2t</b>') == 1
+
+    def test_disabled_without_rows_keeps_the_static_note_once(self, handler, db):
+        for p in PROTOCOLS:
+            seed(db, p, runs=3, ok_per_run=7)
+        text = run(handler)['text']
+        assert '⚪ <b>hy2t</b>: без проб, см. /ai' in text
+        assert text.count('<b>hy2t</b>') == 1
+
+    def test_rows_win_over_a_disabled_config(self, handler, db):
+        """Rows in the window are a fact (e.g. HY2T_PORT was just emptied):
+        show them rather than claim there are no probes."""
+        handler.config.HY2T_PORT = ''
+        seed(db, 'hy2t', runs=3, ok_per_run=7)
+        text = run(handler)['text']
+        assert line_for(text, 'hy2t').startswith('🟢')
+        assert 'без проб' not in text
+
+    def test_tag_order_follows_health_checker_then_extras(self, handler, db):
+        """Config tags first in HealthChecker order (hy2t last), then any
+        other tag that has rows — a new tag needs no code change here."""
+        handler.config.HY2T_PORT = '8402'
+        for p in PROTOCOLS + ['hy2t', 'xhttp']:
+            seed(db, p, runs=3, ok_per_run=7)
+        text = run(handler)['text']
+        order = [ln.split('<b>')[1].split('</b>')[0]
+                 for ln in text.splitlines() if ln.startswith(('🟢', '🟡', '🔴', '⚪'))]
+        assert order == ['reality', 'hy2', 'ws', 'stls', 'hy2t', 'xhttp']
+
+    def test_db_failure_makes_no_hy2t_claim(self, handler):
+        handler.db = Mock()
+        handler.db._connect = Mock(side_effect=sqlite3.OperationalError('database is locked'))
+        text = run(handler)['text']
+        assert 'outbound_health недоступна' in text
+        assert '<b>hy2t</b>' not in text
 
 
 class TestPanelAudit:

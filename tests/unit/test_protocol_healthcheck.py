@@ -328,8 +328,182 @@ class TestHy2:
         assert report['verdict'] == 'ИТОГ: hy2 DOWN 50 мин, остальные OK'
 
 
+def hy2t_probed_a(*, hy2t_rows=None, hy2t_last_alive=None, now=NOW, **a_kw):
+    """Layer A on a deployment WITH the :18085 inbound: hy2t has rows in
+    the window (healthy 7/10 unless overridden), the base four healthy."""
+    probes = {t: {'rows': rows(now=now), 'last_alive': (now - timedelta(minutes=5)).isoformat()}
+              for t in hc.PROBED}
+    probes['hy2t'] = {'rows': rows(now=now) if hy2t_rows is None else hy2t_rows,
+                      'last_alive': hy2t_last_alive or (now - timedelta(minutes=5)).isoformat()}
+    return layer_a(probes=probes, now=now, **a_kw)
+
+
+class TestHy2TurboProbed:
+    """Rows for hy2t in the window (HY2T_PORT set → sidecar :18085 →
+    HealthChecker writes outbound_tag='hy2t'): judged like hy2 — probe
+    verdict first, layer C as evidence and as a definite-failure floor."""
+
+    def test_probed_tags_is_decided_by_the_rows(self):
+        assert hc.probed_tags({}) == hc.PROBED
+        assert hc.probed_tags(None) == hc.PROBED
+        assert hc.probed_tags({'hy2t': {'rows': []}}) == hc.PROBED
+        assert hc.probed_tags({'hy2t': {'rows': rows(runs=1)}}) == hc.PROBED + ['hy2t']
+        assert hc.PROBED == ['reality', 'hy2', 'ws', 'stls']       # base list never grows
+
+    def test_rows_alive_is_ok_with_probe_and_layer_c_evidence(self):
+        report = hc.assess(layers(a=hy2t_probed_a()), now=NOW)
+        h = report['protocols']['hy2t']
+        assert h['state'] == 'OK'
+        assert h['probe_coverage'] is True
+        assert h['ok_rate'] == '21/30'
+        ev = '\n'.join(h['evidence'])
+        assert ev.startswith('пробы: ok 21/30')                    # probe verdict FIRST
+        assert 'exit: hysteria-turbo active' in ev                  # layer C SECOND
+        assert 'entry DNAT: все правила на месте' in ev
+        assert 'no probe coverage' not in ev
+        assert report['suspects'] == []
+        assert report['exit_code'] == 0
+        assert 'hy2t 21/30' in report['verdict']
+        assert 'без проб' not in report['verdict']
+
+    def test_rows_dark_with_turbo_active_points_at_auth(self):
+        a = hy2t_probed_a(hy2t_rows=dark_rows(),
+                          hy2t_last_alive=(NOW - timedelta(minutes=50)).isoformat())
+        report = hc.assess(layers(a=a), now=NOW)
+        h = report['protocols']['hy2t']
+        assert h['state'] == 'DOWN'
+        assert h['down_for'] == '50 мин'
+        assert '0/30 живых' in '\n'.join(h['evidence'])
+        assert len(report['suspects']) == 1
+        top = report['suspects'][0]
+        assert top['protocol'] == 'hy2t'
+        assert 'hysteria-turbo активен' in top['title']
+        assert '/api/hy2t/auth' in top['title']
+        assert 'journalctl -u hysteria-turbo' in top['next']
+        assert report['verdict'] == 'ИТОГ: hy2t DOWN 50 мин, остальные OK'
+        assert report['exit_code'] == 1
+
+    def test_rows_dark_with_daemon_inactive_names_the_daemon_first(self):
+        a = hy2t_probed_a(hy2t_rows=dark_rows(), hy2t_last_alive=NOW.isoformat())
+        report = hc.assess(layers(a=a, c=layer_c(turbo='inactive')), now=NOW)
+        assert report['protocols']['hy2t']['state'] == 'DOWN'
+        top = report['suspects'][0]
+        assert 'daemon down' in top['title'] and 'hysteria-turbo' in top['title']
+        assert 'systemctl status hysteria-turbo' in top['next']
+        assert not any('/api/hy2t/auth' in t for t in titles(report))
+
+    def test_rows_dark_with_entry_dnat_gone_names_the_rule(self):
+        nat = [ln for ln in ENTRY_NAT if '--dport 8402 ' not in ln]
+        a = hy2t_probed_a(hy2t_rows=dark_rows(), hy2t_last_alive=NOW.isoformat())
+        report = hc.assess(layers(a=a, b=layer_b(nat=nat)), now=NOW)
+        assert report['protocols']['hy2t']['state'] == 'DOWN'
+        assert any('entry NAT rule gone' in t and '8402' in t for t in titles(report))
+
+    def test_rows_alive_but_daemon_inactive_is_still_down(self):
+        """Probe coverage adds a signal, it must not remove one: before the
+        probe existed a dead hysteria-turbo was DOWN — a live probe row
+        proves the tunnel the probe took, not that the daemon users are
+        pointed at is up."""
+        report = hc.assess(layers(a=hy2t_probed_a(), c=layer_c(turbo='inactive')), now=NOW)
+        assert report['protocols']['hy2t']['state'] == 'DOWN'
+        assert any('daemon down' in t for t in titles(report))
+        assert report['exit_code'] == 1
+
+    def test_rows_alive_but_hop_rule_gone_is_degraded_via_layer_c(self):
+        nat = [ln for ln in EXIT_NAT if '40001:50000' not in ln]
+        report = hc.assess(layers(a=hy2t_probed_a(), c=layer_c(nat=nat)), now=NOW)
+        h = report['protocols']['hy2t']
+        assert h['state'] == 'DEGRADED'
+        assert h['degraded_reason'] == 'layer_c'
+        assert any('hop rules gone' in t for t in titles(report))
+        # the generic "ok below half of normal" line would be a lie here
+        assert not any('деградирован' in t for t in titles(report))
+        assert report['exit_code'] == 1
+
+    def test_layer_c_never_lifts_an_unknown_probe_verdict(self):
+        """hy2t rows stopped 2 h ago while the others keep writing: its
+        rows say nothing about now, and a fine exit must not turn that
+        into OK."""
+        old = NOW - timedelta(hours=2)
+        a = hy2t_probed_a(hy2t_rows=rows(now=old), hy2t_last_alive=old.isoformat())
+        report = hc.assess(layers(a=a), now=NOW)
+        h = report['protocols']['hy2t']
+        assert h['state'] == 'UNKNOWN'
+        assert 'пробы по hy2t не пишутся' in '\n'.join(h['evidence'])
+        assert report['exit_code'] == 2
+        assert 'hy2t UNKNOWN' in report['verdict']
+
+    def test_stale_hy2t_rows_plus_dead_daemon_is_down(self):
+        old = NOW - timedelta(hours=2)
+        a = hy2t_probed_a(hy2t_rows=rows(now=old), hy2t_last_alive=old.isoformat())
+        report = hc.assess(layers(a=a, c=layer_c(turbo='failed')), now=NOW)
+        assert report['protocols']['hy2t']['state'] == 'DOWN'
+        assert report['exit_code'] == 1
+
+    def test_layer_b_failed_keeps_a_green_probe_verdict(self):
+        """Like hy2: a probe that came back through :8402 proves the entry
+        DNAT path; iptables not answering is evidence + a layer suspect,
+        not a downgrade (the no-rows path still goes UNKNOWN — see
+        TestLayerBFailed)."""
+        report = hc.assess(layers(a=hy2t_probed_a(),
+                                  b={'ok': False, 'error': 'iptables: permission denied'}), now=NOW)
+        h = report['protocols']['hy2t']
+        assert h['state'] == 'OK'
+        assert 'entry DNAT не проверен' in '\n'.join(h['evidence'])
+        assert any('слой B' in t for t in titles(report))
+        assert report['exit_code'] == 0
+
+    def test_all_five_dark_is_one_upstream_suspect(self):
+        probes = {t: {'rows': dark_rows(), 'last_alive': NOW.isoformat()}
+                  for t in hc.PROBED + ['hy2t']}
+        report = hc.assess(layers(a=layer_a(probes=probes)), now=NOW)
+        assert report['protocols']['hy2t']['state'] == 'DOWN'
+        assert len(report['suspects']) == 1
+        assert 'upstream' in report['suspects'][0]['title']
+        assert report['verdict'].startswith('ИТОГ: ВСЕ протоколы DOWN')
+
+    def test_four_dark_with_hy2t_alive_is_not_all_dark(self):
+        """A live hy2t probe proves probe-proxy and the entry→exit link:
+        four dark inbounds are then four (well, per-protocol) problems,
+        not the single upstream incident."""
+        probes = {t: {'rows': dark_rows(), 'last_alive': NOW.isoformat()} for t in hc.PROBED}
+        probes['hy2t'] = {'rows': rows(), 'last_alive': NOW.isoformat()}
+        report = hc.assess(layers(a=layer_a(probes=probes)), now=NOW)
+        assert report['protocols']['hy2t']['state'] == 'OK'
+        assert not any('upstream' in t for t in titles(report))
+        assert any(s['protocol'] == 'reality' for s in report['suspects'])
+
+    def test_dead_probe_proxy_container_is_evidence_for_hy2t_too(self):
+        report = hc.assess(layers(a=hy2t_probed_a(), b=layer_b(probe_proxy='exited')), now=NOW)
+        assert 'контейнер probe-proxy exited' in '\n'.join(report['protocols']['hy2t']['evidence'])
+
+    def test_probe_rate_degradation_names_hy2t_rows(self):
+        a = hy2t_probed_a(hy2t_rows=rows(n_ok=1, n_err_latency=9))
+        report = hc.assess(layers(a=a), now=NOW)
+        assert report['protocols']['hy2t']['state'] == 'DEGRADED'
+        assert report['protocols']['hy2t']['degraded_reason'] == 'probe_rate'
+        s = next(s for s in report['suspects'] if 'hy2t деградирован' in s['title'])
+        assert "outbound_tag='hy2t'" in s['next']
+
+    def test_render_shows_the_probe_line(self):
+        text = hc.render_human(hc.assess(layers(a=hy2t_probed_a()), now=NOW))
+        assert '[hy2t] OK' in text
+        assert 'пробы: ok 21/30' in text.split('[hy2t] OK', 1)[1]
+
+    def test_no_rows_keeps_the_layer_c_only_path(self):
+        """Guard for the class below: a deployment without :18085 rows is
+        judged exactly as before, and the verdict says so."""
+        report = hc.assess(layers(), now=NOW)
+        h = report['protocols']['hy2t']
+        assert h['probe_coverage'] is False
+        assert h['evidence'][0].startswith('no probe coverage')
+        assert ':18085' in h['evidence'][0]
+        assert report['verdict'].endswith('; hy2t active, без проб)')
+
+
 class TestHy2Turbo:
-    """No probe → the verdict is layer C (+ entry DNAT) only."""
+    """No probe ROWS for hy2t (HY2T_PORT unset, or the sidecar has no
+    :18085 inbound yet) → the verdict is layer C (+ entry DNAT) only."""
 
     def test_inactive_daemon_is_down_even_when_probes_are_fine(self):
         report = hc.assess(layers(c=layer_c(turbo='inactive')), now=NOW)

@@ -1859,6 +1859,15 @@ class NotificationService:
             id='dpi_metrics_cleanup',
             replace_existing=True,
         )
+        # Daily: prune outbound_health (probe rows) older than
+        # OUTBOUND_HEALTH_RETENTION_DAYS, in batches — nothing pruned it
+        # from 2026-06-21 to 2026-09-04 (326k rows, +3.8k/day).
+        self.scheduler.add_job(
+            self._cleanup_outbound_health_sync,
+            IntervalTrigger(hours=24),
+            id='outbound_health_cleanup',
+            replace_existing=True,
+        )
         # Daily DPI summary at 09:00 server time (UTC). Posts a numeric
         # summary in TOPIC_AI and, if OPENCODE_URL is set, hands off
         # to the OpenCode agent for the dpi-analysis follow-up.
@@ -2370,6 +2379,100 @@ class NotificationService:
                     )
         except Exception as e:
             logger.exception(f"dpi_metrics cleanup failed: {e}")
+
+    # Retention for outbound_health (the probe rows HealthChecker writes
+    # every 15 min: 4 tags x 10 domains = 40 rows/run, ~3.8k/day; 5 tags
+    # and ~4.8k/day once hy2t is probed). Every live reader looks back
+    # HOURS, not days: the protocol_down alert
+    # (alert_manager.PROBE_WINDOW_H), /protocols (ops.PROTO_WINDOW_H) and
+    # scripts/protocol_healthcheck.py all use 3 h; HealthChecker's
+    # get_recent_health/get_health_summary default to 24 h and have no
+    # caller. The only unbounded queries are the "dark since …" anchors
+    # (MAX(ts) of the last row that showed life) — informational, and
+    # they degrade to "—" rather than mis-report. 30 days matches
+    # ALERT_HISTORY_RETENTION_DAYS, so any protocol_down alert still in
+    # the history can be re-derived from its raw probe rows (the
+    # 2026-09-01 Reality outage needed a 4-day look-back). Steady state
+    # is ~115k rows (~145k with hy2t) instead of unbounded growth.
+    OUTBOUND_HEALTH_RETENTION_DAYS = 30
+    # Rows per DELETE and the pause between batches. The first prod run
+    # drops ~250k of 326k rows from a WAL sqlite shared with HealthChecker
+    # inserts, the 60 s alert tick and /sub reads; one big DELETE would
+    # hold the write lock (and balloon the WAL) for the whole run. 20k
+    # rows go in well under a second via idx_outbound_health_ts_tag, then
+    # the commit releases the lock and the pause lets queued writers in.
+    OUTBOUND_HEALTH_CLEANUP_BATCH = 20000
+    OUTBOUND_HEALTH_CLEANUP_PAUSE_S = 0.1
+
+    def _cleanup_outbound_health_sync(self, now: Optional[datetime] = None):
+        """Daily: prune outbound_health rows older than retention, in batches.
+
+        Same contract as _cleanup_dpi_metrics_sync (cutoff on the naive-UTC
+        ISO ``ts`` HealthChecker writes, never raises), with two differences
+        that matter for THIS table:
+
+        * Deletes in batches of OUTBOUND_HEALTH_CLEANUP_BATCH with a commit
+          and a short sleep between them, looping until a batch deletes
+          nothing. Nothing pruned the table since the probes started
+          (2026-06-21), so the first run has ~250k rows to drop on a live,
+          shared db — a single DELETE would starve every other writer for
+          its whole duration (WAL readers do not block, writers queue).
+        * Logs the total dropped AND the retained count, so the daily line
+          doubles as a size heartbeat; a run that drops nothing still logs.
+
+        No VACUUM on purpose: the file will NOT shrink after this — sqlite
+        keeps the freed pages and reuses them for new probe rows, which is
+        fine — and a VACUUM rewrites the whole db under an exclusive lock,
+        exactly what the batching avoids.
+
+        ``now`` is a test seam (the boundary row is defined relative to it);
+        the scheduler calls this with no arguments.
+        """
+        import time
+        from datetime import timedelta
+        dropped = 0
+        batches = 0
+        try:
+            now = now or datetime.utcnow()
+            cutoff = (
+                now - timedelta(days=self.OUTBOUND_HEALTH_RETENTION_DAYS)
+            ).isoformat()
+            batch = int(self.OUTBOUND_HEALTH_CLEANUP_BATCH)
+            conn = self.db._connect()
+            try:
+                while True:
+                    # Subquery form on purpose: DELETE … ORDER BY … LIMIT
+                    # needs SQLITE_ENABLE_UPDATE_DELETE_LIMIT, which the
+                    # python image's sqlite is not guaranteed to have.
+                    cur = conn.execute(
+                        "DELETE FROM outbound_health WHERE id IN ("
+                        "SELECT id FROM outbound_health WHERE ts < ? "
+                        "ORDER BY id LIMIT ?)",
+                        (cutoff, batch),
+                    )
+                    n = cur.rowcount
+                    conn.commit()          # releases the write lock per batch
+                    if n <= 0:
+                        break
+                    dropped += n
+                    batches += 1
+                    time.sleep(self.OUTBOUND_HEALTH_CLEANUP_PAUSE_S)
+                kept = conn.execute(
+                    "SELECT COUNT(*) FROM outbound_health"
+                ).fetchone()[0]
+            finally:
+                conn.close()
+            logger.info(
+                f"outbound_health cleanup: dropped {dropped} rows older than "
+                f"{self.OUTBOUND_HEALTH_RETENTION_DAYS}d in {batches} "
+                f"batch(es), {kept} rows kept"
+            )
+        except Exception as e:
+            # A partial run is not lost — every finished batch is
+            # committed — and tomorrow's run picks up where this stopped.
+            logger.exception(
+                f"outbound_health cleanup failed after {dropped} rows: {e}"
+            )
 
     def _refresh_geoip_db_sync(self):
         """Pull the latest GeoIP mmdb. Soft-fails (logs) on network errors."""
