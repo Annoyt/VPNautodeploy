@@ -239,11 +239,27 @@ class TestUpdateFieldsPreservesPerInboundFields:
         assert panel.client_on(REALITY_ID, EMAIL)['flow'] == FLOW
         assert panel.client_on(REALITY_ID, EMAIL)['comment'] == 'bob@gmail.com'
 
-    def test_flow_is_not_invented_when_panel_has_none(self):
-        """The fix must PRESERVE what the panel holds, not hardcode the
-        constant: a client on no Reality inbound must not acquire a flow
-        it never had (that would break a plain-VLESS or SS-only inbound
-        with 'unknown account type' in the other direction)."""
+    def test_flow_is_not_invented_for_a_client_off_the_reality_inbound(self):
+        """Scope the self-heal: a client that does NOT live on the
+        VLESS-Reality inbound must not acquire a flow it never had."""
+        panel = FakePanel({
+            SS_ID: [{'email': EMAIL, 'id': UUID, 'password': SS_PASSWORD,
+                     'totalGB': 1}],
+        })
+        svc = _service(panel)
+
+        assert svc.sync_client_settings_sync(EMAIL, {'enable': True}) is True
+        _email, body, _ids = panel.update_calls[-1]
+        assert not body.get('flow')
+
+    def test_flow_is_restored_when_it_is_gone_everywhere(self):
+        """The state the outage actually left behind: the client is on
+        the Reality inbound but no inbound holds a flow any more.
+        Merging cannot recover it, and refusing the write is worse than
+        useless — the monthly job's fallback is add_client, which is
+        delete+re-add and ZEROES accumulated traffic. Restore the
+        default instead: a Reality client without vision cannot connect,
+        so preserving the blank preserves a broken client."""
         panel = FakePanel({
             REALITY_ID: [{'email': EMAIL, 'id': UUID, 'totalGB': 1}],
             SS_ID: [{'email': EMAIL, 'id': UUID, 'password': SS_PASSWORD,
@@ -253,7 +269,9 @@ class TestUpdateFieldsPreservesPerInboundFields:
 
         assert svc.sync_client_settings_sync(EMAIL, {'enable': True}) is True
         _email, body, _ids = panel.update_calls[-1]
-        assert not body.get('flow')
+        assert body['flow'] == FLOW
+        assert body['password'] == SS_PASSWORD
+        assert panel.client_on(REALITY_ID, EMAIL)['flow'] == FLOW
 
     def test_missing_client_is_still_false(self, svc, panel):
         """Merging across inbounds must not turn 'not found' into a write."""

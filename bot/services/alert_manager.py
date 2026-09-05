@@ -536,25 +536,58 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
     PROBE_DOMAINS = 10          # HealthChecker.TARGET_DOMAINS per run
     PROBE_MIN_SAMPLES = 15      # ignore thin windows (partial run, new deploy)
     PROBE_WINDOW_H = 3          # only look at recent rows
+    PROBE_STALE_MIN = 45        # 3 missed runs at the 15-min cadence
+
+    def _minutes_since(ts_str, now):
+        """Minutes between an ISO timestamp string and ``now``."""
+        from datetime import datetime
+        try:
+            ts = datetime.fromisoformat(str(ts_str).replace('Z', ''))
+        except (TypeError, ValueError):
+            return float('inf')
+        return max(0.0, (now - ts).total_seconds() / 60.0)
+
+    def _humanize_minutes(mins):
+        if mins == float('inf'):
+            return '—'
+        mins = int(mins)
+        if mins < 60:
+            return f"{mins} мин"
+        hours, mins = divmod(mins, 60)
+        if hours < 24:
+            return f"{hours} ч {mins:02d} мин"
+        days, hours = divmod(hours, 24)
+        return f"{days} д {hours} ч"
 
     def check_protocol_probe_down():
-        """Per protocol: zero successful probes across the last N runs.
+        """Per protocol: no sign of life across the last N probe runs.
 
-        Only real verdicts count. ``proxy_down`` rows mean the
-        probe-proxy sidecar was unreachable — a monitoring outage, not
-        a statement about the tunnel — so they are excluded from both
-        the numerator and the denominator; a dead sidecar must not page
-        four fake protocol outages.
+        Liveness is "a latency came back", not ``status == 'ok'``. An
+        error that travelled THROUGH the tunnel carries a latency and
+        proves the tunnel works (5306 of 19535 recent error rows are
+        like that — sites that block our exit IP); the 2026-09-01 rows
+        had none, because nothing ever connected.
+
+        Two sibling failure modes are deliberately NOT reported as
+        per-protocol outages:
+          * every protocol dark at once — that is the probe sidecar or
+            the exit link, ONE incident, not four;
+          * no fresh rows at all — the probe job itself died, which the
+            first version of this check could not see (too few samples
+            => stay quiet), leaving it blind exactly when blindness was
+            total.
         """
         try:
             db_path = getattr(config, 'DB_PATH', None) or '/var/lib/vpn-bot/bot.db'
             import sqlite3
             from datetime import datetime, timedelta
-            cutoff = (
-                datetime.utcnow() - timedelta(hours=PROBE_WINDOW_H)
-            ).isoformat()
+            now = datetime.utcnow()
+            cutoff = (now - timedelta(hours=PROBE_WINDOW_H)).isoformat()
             limit = PROBE_RUNS * PROBE_DOMAINS
             with sqlite3.connect(db_path) as conn:
+                newest = conn.execute(
+                    "SELECT MAX(ts) FROM outbound_health"
+                ).fetchone()[0]
                 tags = [
                     r[0] for r in conn.execute(
                         "SELECT DISTINCT outbound_tag FROM outbound_health "
@@ -563,37 +596,93 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
                 ]
                 samples = {}
                 for tag in tags:
-                    samples[tag] = [
-                        r[0] for r in conn.execute(
-                            "SELECT status FROM outbound_health "
-                            "WHERE outbound_tag = ? AND ts >= ? "
-                            "AND status != 'proxy_down' "
-                            "ORDER BY ts DESC LIMIT ?",
-                            (tag, cutoff, limit),
-                        ).fetchall()
-                    ]
+                    samples[tag] = conn.execute(
+                        "SELECT status, latency_ms FROM outbound_health "
+                        "WHERE outbound_tag = ? AND ts >= ? "
+                        "ORDER BY ts DESC LIMIT ?",
+                        (tag, cutoff, limit),
+                    ).fetchall()
+                # Anchor "how long" on the last row that showed life —
+                # in some failure modes rows stop being written at all.
+                last_alive = {
+                    tag: conn.execute(
+                        "SELECT MAX(ts) FROM outbound_health WHERE "
+                        "outbound_tag = ? AND (latency_ms IS NOT NULL "
+                        "OR status = 'ok')",
+                        (tag,),
+                    ).fetchone()[0]
+                    for tag in tags
+                }
         except Exception as e:
             logger.debug(f"protocol-probe alert read failed: {e}")
             return ("protocol_down:", [])
 
+        # The probe pipeline itself stopped producing rows.
+        if not newest or _minutes_since(newest, now) > PROBE_STALE_MIN:
+            age = '—' if not newest else f"{int(_minutes_since(newest, now))} мин"
+            return ("protocol_down:", [Alert(
+                key='protocol_down:probe_pipeline',
+                severity='critical',
+                min_cycles=2,
+                title=f'Пробы не пишутся {age}',
+                detail=(
+                    "HealthChecker перестал складывать результаты в "
+                    "outbound_health. Пока это так, падение любого "
+                    "протокола НЕ будет замечено. Смотри джобу проб в "
+                    "логах бота и контейнер probe-proxy."
+                ),
+            )])
+
+        def _alive(row):
+            """The tunnel carried something: either it succeeded, or it
+            failed AFTER a round trip (a latency means bytes came back).
+            Only "nothing ever connected" leaves both empty."""
+            status, latency = row
+            return latency is not None or status == 'ok'
+
+        dark = {
+            tag: rows for tag, rows in samples.items()
+            if len(rows) >= PROBE_MIN_SAMPLES
+            and not any(_alive(r) for r in rows)
+        }
+        measured = [t for t, rows in samples.items()
+                    if len(rows) >= PROBE_MIN_SAMPLES]
+
+        # Everything dark at once = one upstream incident.
+        if measured and len(dark) == len(measured) and len(measured) >= 2:
+            return ("protocol_down:", [Alert(
+                key='protocol_down:all',
+                severity='critical',
+                min_cycles=2,
+                title=f'Все протоколы молчат ({len(measured)} шт.)',
+                detail=(
+                    "Ни один протокол не отвечает — это не отдельный "
+                    "inbound, а общий канал: probe-proxy сайдкар, линк "
+                    "entry→exit или сам exit. Проверь контейнер "
+                    "probe-proxy и доступность exit-узла."
+                ),
+            )])
+
         alerts = []
-        for tag, statuses in samples.items():
-            if len(statuses) < PROBE_MIN_SAMPLES:
-                continue
-            ok = sum(1 for s in statuses if s == 'ok')
-            if ok > 0:
-                continue
+        for tag, rows in dark.items():
+            since = last_alive.get(tag)
+            how_long = (
+                _humanize_minutes(_minutes_since(since, now)) if since else '—'
+            )
             alerts.append(Alert(
                 key=f'protocol_down:{tag}',
                 severity='critical',
                 min_cycles=2,
-                title=f'Протокол {tag} мёртв: 0/{len(statuses)} успешных проб',
+                title=f'Протокол {tag} мёртв (лежит {how_long})',
                 detail=(
-                    f"Ни одна проба через {tag} не прошла за последние "
-                    f"{PROBE_RUNS} прогона ({len(statuses)} попыток). "
-                    f"Остальные протоколы проверь в дашборде: если живы — "
-                    f"дело в самом inbound'е (клиенты потеряли flow/пароль, "
-                    f"порт закрыт, xray отверг конфиг), а не в сети."
+                    f"За последние {PROBE_RUNS} прогона ({len(rows)} попыток) "
+                    f"через {tag} не вернулся НИ ОДИН ответ — даже ошибочный, "
+                    f"то есть туннель не устанавливается вовсе. Остальные "
+                    f"протоколы при этом живы, значит дело в самом inbound'е. "
+                    f"Частые причины: клиенты потеряли per-protocol поле "
+                    f"(flow у Reality, password у Shadowsocks) после правки "
+                    f"клиента или месячной джобы; сменился/протух SNI-dest; "
+                    f"разъехались hop-порты у hy2; xray отверг конфиг."
                 ),
             ))
         return ("protocol_down:", alerts)

@@ -12,6 +12,7 @@ import os
 from typing import Optional, Dict, Any, List
 
 from bot.config import Settings
+from bot.config.constants import DEFAULT_FLOW
 from bot.services.xui_api.client import XUIAPIClient, XUIClientConfig
 from bot.services.xui_db import XUIDatabase
 from bot.utils.log_redaction import redact_email
@@ -748,7 +749,7 @@ class XUIService:
     PER_INBOUND_FIELDS = ('flow', 'password', 'method')
 
     async def _read_client_merged_async(
-        self, email: str, lookup_order: List[int]
+        self, email: str, lookup_order: List[int], primary: int = None
     ) -> Optional[dict]:
         """Assemble one client record from EVERY inbound it lives on.
 
@@ -757,19 +758,37 @@ class XUIService:
         is never missed); the remaining inbounds contribute only the
         per-protocol fields the base record lacks. Returns None when the
         client is on no inbound at all.
+
+        When ``primary`` (the VLESS-Reality inbound) is given and the
+        client lives there without a flow, the default is restored.
+        Merging alone can only recover a value some inbound still holds
+        — after 2026-09-01 it was gone from ALL of them, and a flow-less
+        body is refused downstream, which would push the monthly job
+        into its ``add_client`` fallback; an add is delete+re-add and
+        ZEROES the client's accumulated traffic. A client that is NOT on
+        the Reality inbound never gets a flow invented for it.
         """
         client = None
+        seen_on = []
         for candidate in lookup_order:
             inbound = await self.api.get_inbound(candidate)
             found = self._find_client_by_email(inbound, email)
             if not found:
                 continue
+            seen_on.append(candidate)
             if client is None:
                 client = found
                 continue
             for key in self.PER_INBOUND_FIELDS:
                 if not client.get(key) and found.get(key):
                     client[key] = found[key]
+        if (client is not None and primary in seen_on
+                and not client.get('flow')):
+            client['flow'] = DEFAULT_FLOW
+            logger.info(
+                f"client {redact_email(email)} is on the Reality inbound "
+                f"with no flow; restoring {DEFAULT_FLOW}"
+            )
         return client
 
     def _client_inbound_ids(self, primary: int) -> List[int]:
@@ -820,7 +839,8 @@ class XUIService:
         lookup_order = ([ss_id] if ss_id else []) + [
             i for i in inbound_ids if i != ss_id
         ]
-        client = await self._read_client_merged_async(email, lookup_order)
+        client = await self._read_client_merged_async(
+            email, lookup_order, primary=iid)
         if client is None:
             logger.warning(
                 f"set_client_comment: {redact_email(email)} not found in panel"
@@ -869,7 +889,8 @@ class XUIService:
         lookup_order = ([ss_id] if ss_id else []) + [
             i for i in inbound_ids if i != ss_id
         ]
-        client = await self._read_client_merged_async(email, lookup_order)
+        client = await self._read_client_merged_async(
+            email, lookup_order, primary=iid)
         if client is None:
             logger.warning(
                 f"update_client_fields: {redact_email(email)} not found in panel"

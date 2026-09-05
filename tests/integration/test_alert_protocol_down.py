@@ -46,7 +46,7 @@ def config(db, tmp_path):
 
 
 def seed(db, protocol, *, runs, ok_per_run, status='timeout',
-         minutes_ago_start=15, domains=DOMAINS):
+         minutes_ago_start=15, domains=DOMAINS, latency_ms=None):
     """Write ``runs`` probe runs, most recent first.
 
     One row per (protocol, domain) per run — the exact shape
@@ -61,7 +61,8 @@ def seed(db, protocol, *, runs, ok_per_run, status='timeout',
                 conn.execute(
                     "INSERT INTO outbound_health (outbound_tag, target_domain,"
                     " status, latency_ms, error_msg, ts) VALUES (?,?,?,?,?,?)",
-                    (protocol, domain, st, 120 if st == 'ok' else None,
+                    (protocol, domain, st,
+                     120 if st == 'ok' else latency_ms,
                      None if st == 'ok' else st, ts),
                 )
         conn.commit()
@@ -121,25 +122,34 @@ class TestProtocolDownCheck:
 
         assert keys(probe_check(config)()) == []
 
-    def test_proxy_down_rows_do_not_page_four_fake_outages(self, db, config):
-        """``proxy_down`` means the probe sidecar was unreachable — a
-        monitoring outage. Counting it would turn one dead sidecar into
-        four critical protocol alerts and bury the real signal."""
+    def test_sidecar_outage_pages_once_not_four_times(self, db, config):
+        """One dead sidecar is ONE incident. Every protocol going dark
+        in the same window is reported as a single upstream alert, never
+        as four per-protocol outages that bury the real signal."""
         for p in PROTOCOLS:
             seed(db, p, runs=4, ok_per_run=0, status='proxy_down')
 
+        assert keys(probe_check(config)()) == ['protocol_down:all']
+
+    def test_a_blocked_site_is_not_a_dead_protocol(self, db, config):
+        """Errors that came back THROUGH the tunnel carry a latency —
+        the tunnel demonstrably works. Only status='ok' would page here
+        forever while a site merely blocks our exit IP."""
+        seed(db, 'reality', runs=3, ok_per_run=0, latency_ms=430)
+
         assert keys(probe_check(config)()) == []
 
-    def test_stale_rows_outside_the_window_do_not_fire(self, db, config):
-        """A protocol that was dead yesterday but has no fresh probes
-        (checker stopped, protocol retired) must not page forever."""
+    def test_stale_rows_report_a_dead_probe_pipeline(self, db, config):
+        """No fresh rows at all means the CHECKER died, not that the
+        protocols are fine. The old shape stayed quiet here — blind
+        exactly when blindness was total."""
         seed(db, 'reality', runs=3, ok_per_run=0,
              minutes_ago_start=60 * 24)
 
-        assert keys(probe_check(config)()) == []
+        assert keys(probe_check(config)()) == ['protocol_down:probe_pipeline']
 
-    def test_empty_table_is_silent(self, db, config):
-        assert keys(probe_check(config)()) == []
+    def test_empty_table_reports_a_dead_probe_pipeline(self, db, config):
+        assert keys(probe_check(config)()) == ['protocol_down:probe_pipeline']
 
     def test_multiple_dead_protocols_each_get_a_key(self, db, config):
         seed(db, 'reality', runs=3, ok_per_run=0)

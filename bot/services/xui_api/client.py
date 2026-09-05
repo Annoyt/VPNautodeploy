@@ -520,11 +520,13 @@ class XUIAPIClient:
             "comment": cfg.get("comment", ""),
             "reset": _int("reset"),
         }
-        # NEVER emit an empty flow. On the Reality inbound the panel
-        # rebuilds the client from this body, so ``"flow": ""`` is a
-        # write, not a no-op: it strips xtls-rprx-vision and xray then
-        # rejects the user ("Unknown account type: x"). Omitting the key
-        # at least keeps a wrong caller from asserting a blank value.
+        # Never emit an empty flow: on the Reality inbound the panel
+        # stores this body's value verbatim, so ``"flow": ""`` is a
+        # write, not a no-op — it strips xtls-rprx-vision and the user
+        # stops connecting. Scope note: this mapper feeds ``add_client``
+        # ONLY; ``update_client`` posts the caller's dict as-is, and the
+        # 2026-09-01 wipe came through THAT path. What guards the update
+        # path is ``REQUIRED_CLIENT_FIELDS`` below, not this branch.
         flow = (cfg.get("flow") or "").strip()
         if flow:
             out["flow"] = flow
@@ -683,10 +685,17 @@ class XUIAPIClient:
 
         ``POST /panel/api/server/restartXrayService``. This is heavier
         than the client-level hot-apply the panel does on every edit —
-        and sometimes the ONLY way back to a consistent state, because
-        that hot-apply silently fails for shadowsocks inbounds when a
-        client carries a ``flow`` ("Unknown account type: x"), leaving
-        the running core out of sync with the database.
+        and sometimes the ONLY way back to a consistent state.
+
+        The fork's hot-apply is RemoveUser+AddUser per inbound, and the
+        AddUser always fails on the Shadowsocks-2022 inbound with
+        ``Unknown account type: xray.proxy.shadowsocks_2022.ServerConfig``
+        (the panel hands the inbound's ServerConfig proto over as the
+        user's account). It is unrelated to ``flow`` and predates the
+        2026-09-01 wipe — first seen 2026-08-19. Net effect: every client
+        edit drops that client from the RUNNING shadowsocks inbound while
+        the database still lists it, and only a restart — which makes the
+        panel regenerate config.json from the DB — resyncs them.
 
         Costs every live TCP session on the xray inbounds (Reality, WS,
         SS); clients reconnect. Hysteria runs as a separate daemon and
