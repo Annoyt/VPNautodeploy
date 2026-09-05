@@ -7,9 +7,9 @@ SHADOWSOCKS inbound (it is first in ``lookup_order`` because it is the
 only one carrying the per-user SS-2022 password) and then handed that one
 body to ``update_client``, which rewrites the client on EVERY inbound it
 is attached to. The SS record has no ``flow`` key, so 80 of 81 clients
-lost ``xtls-rprx-vision`` on the VLESS-Reality inbound. xray refused them
-("Unknown account type: x"), inbound-443 accepted zero connections, and
-the outage ran for four days.
+lost ``xtls-rprx-vision`` on the VLESS-Reality inbound. Without vision on
+the server side no client could complete the handshake, inbound-443
+accepted zero connections, and the outage ran for four days.
 
 Why 2050 passing tests missed it: every test of this path
 (tests/unit/test_xui_api_mode.py) stubs ``api.get_inbound`` with a single
@@ -343,8 +343,8 @@ class TestMonthlyQuotaResetRoundTripsFlow:
 
     def test_reality_inbound_stays_usable_after_the_job(self, tmp_path):
         """The operational assertion, stated the way xray sees it: every
-        client on inbound 1 must have a non-empty flow, or xray drops the
-        whole user list with 'Unknown account type: x'."""
+        client on inbound 1 must have a non-empty flow, or the Reality
+        handshake fails for that client and the inbound goes dark."""
         users = [(f'user_{i}@nekovo.ru', f'uuid-{i}') for i in range(6)]
         panel = _panel_with(*users)
         rows = [(str(i), e, u, 'demo', None)

@@ -4,10 +4,11 @@
 WHY THIS EXISTS
 ---------------
 2026-09-01: the monthly quota job blanked ``flow`` on 80 of 81 clients of
-the VLESS-Reality inbound. xray rejected the whole user list ("Unknown
-account type: x"), inbound-443 served ZERO connections, and it took four
-days for anyone to notice. Unit tests could not see it (they mock the
-panel), and the probe rows that DID see it were not alerted on.
+the VLESS-Reality inbound. Without xtls-rprx-vision on the server side no
+client could complete the Reality handshake, inbound-443 served ZERO
+connections, and it took four days for anyone to notice. Unit tests could
+not see it (they mock the panel), and the probe rows that DID see it were
+not alerted on.
 
 This is the cheap, dumb, end-to-end backstop: ask the live panel what it
 actually holds and fail loudly if any client is unusable. It does not
@@ -17,8 +18,11 @@ of.
 
 THE RULES (derived from each inbound's own protocol + stream settings)
 ----------------------------------------------------------------------
-* VLESS over raw TCP with reality/tls  → every client needs a non-empty
+* VLESS over raw TCP with REALITY → every client needs a non-empty
   ``flow`` (we use xtls-rprx-vision). Empty flow = the 2026-09-01 outage.
+  Plain VLESS+TLS is deliberately NOT held to this: vision is optional
+  there, and a false alarm on a future inbound would teach operators to
+  ignore the audit.
 * VLESS/VMess over ws / httpupgrade / xhttp → ``flow`` must be EMPTY.
   xtls-rprx-vision is only valid over raw TCP; a stray flow on the CDN
   mirrors breaks those links — the exact mistake a naive "just always
@@ -30,9 +34,10 @@ THE RULES (derived from each inbound's own protocol + stream settings)
 USAGE
 -----
 Runs on entry, inside the bot container (it needs the panel creds from
-the bot's env)::
+the bot's env; ``bot`` is importable only from the app root)::
 
-    docker exec vpn-bot python3 -m scripts.verify_panel_client_fields
+    docker exec -e PYTHONPATH=/app vpn-bot \
+        python3 /app/scripts/verify_panel_client_fields.py
 
 Exit codes: 0 = clean, 1 = at least one client is broken, 2 = could not
 check (panel unreachable / not configured) — a 2 must not be read as a
@@ -72,10 +77,11 @@ def required_fields(inbound: dict) -> Tuple[List[str], List[str]]:
     must_be_empty = []
 
     if protocol == 'vless':
-        if network not in NON_RAW_NETWORKS and security in ('reality', 'tls'):
+        if network not in NON_RAW_NETWORKS and security == 'reality':
             must_have.append('flow')
-        else:
+        elif network in NON_RAW_NETWORKS:
             must_be_empty.append('flow')
+        # raw VLESS+TLS: vision is optional — neither required nor banned
     elif protocol == 'vmess':
         must_be_empty.append('flow')
     elif protocol == 'shadowsocks':
@@ -162,6 +168,8 @@ async def _main() -> int:
     except Exception as e:                       # noqa: BLE001
         print(f'CANNOT CHECK: panel unreachable: {e}')
         return 2
+    finally:
+        await xui.api.close()   # else aiohttp complains on interpreter exit
     if not inbounds:
         print('CANNOT CHECK: panel returned no inbounds')
         return 2

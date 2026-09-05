@@ -883,12 +883,16 @@ class NotificationService:
             for u in demo_users:
                 ok = xui.renew_client_sync(u['email'], new_expiry_ms,
                                            total_bytes=demo_bytes)
-                if not ok and u['uuid']:
+                if (not ok and u['uuid']
+                        and not xui.client_attached_sync(u['email'])):
                     # The panel detaches long-expired clients from every
                     # inbound, and a detached client is invisible to the
                     # in-place renew — re-provision with the SAME uuid so
                     # the user's installed keys come back to life. (11
                     # revivals silently failed this way on 2026-08-19.)
+                    # Gated on the client being truly absent: a re-add of
+                    # an attached client is delete+re-add and zeroes its
+                    # traffic, and renew can fail for other reasons too.
                     readded = xui.add_client_sync({
                         'id': u['uuid'],
                         'email': u['email'],

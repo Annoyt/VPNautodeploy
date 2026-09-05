@@ -70,6 +70,15 @@ class TestRequiredFields:
         assert 'flow' not in must
         assert 'flow' in forbidden
 
+    def test_plain_vless_tls_over_tcp_is_not_policed_for_flow(self):
+        """Vision is optional on plain VLESS+TLS. Requiring it there
+        would make the audit cry wolf on a future inbound — and an
+        audit operators learn to ignore is worse than none."""
+        must, forbidden = required_fields(
+            inbound(9, 'vless', [], network='tcp', security='tls'))
+        assert 'flow' not in must
+        assert 'flow' not in forbidden
+
     def test_shadowsocks_needs_a_per_user_password(self):
         must, _ = required_fields(shadowsocks([]))
         assert 'password' in must

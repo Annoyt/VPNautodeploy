@@ -20,12 +20,13 @@ WHAT IT DOES
    The panel itself stores flow only on the VLESS inbound, so the other
    inbounds are unaffected in the DATABASE.
 3. Forces a panel-side Xray restart. This is REQUIRED: the fork applies
-   client edits to the running core over its API, and that hot-apply
-   fails for shadowsocks inbounds when a flow is present ("Unknown
-   account type: x" — the leading char of xtls-rprx-vision), which
-   silently drops those clients from the RUNNING config. The restart
-   makes the panel regenerate config.json from the database, which is
-   the only self-consistent state.
+   client edits to the running core as RemoveUser+AddUser per inbound,
+   and the AddUser always fails on the Shadowsocks-2022 inbound
+   ("Unknown account type: xray.proxy.shadowsocks_2022.ServerConfig" —
+   a fork bug unrelated to flow, present since 2026-08-19), which
+   silently drops every edited client from the RUNNING shadowsocks
+   inbound. The restart makes the panel regenerate config.json from the
+   database, which is the only self-consistent state.
 
 Run it ON ENTRY, inside the bot container (it needs the panel creds from
 the bot's env)::
@@ -44,7 +45,6 @@ BACK UP THE PANEL DB FIRST (on exit)::
 import argparse
 import asyncio
 import sys
-import time
 
 VISION = "xtls-rprx-vision"
 
@@ -97,14 +97,17 @@ async def _main(apply_changes: bool, restart: bool) -> int:
             print(f"  [{i}/{len(missing)}] {email}: FAILED")
         if i % 10 == 0:
             print(f"  … {i}/{len(missing)} processed")
-        time.sleep(0.2)   # be gentle with the panel
+        await asyncio.sleep(0.2)   # be gentle with the panel
 
     print(f"updated: {ok}, failed: {failed}")
 
-    if restart:
-        print("restarting Xray via panel (regenerates config.json from DB)…")
-        restarted = await xui.api.restart_xray()
-        print("restart reported:", restarted)
+    try:
+        if restart:
+            print("restarting Xray via panel (regenerates config.json from DB)…")
+            restarted = await xui.api.restart_xray()
+            print("restart reported:", restarted)
+    finally:
+        await xui.api.close()
 
     return 0 if failed == 0 else 1
 

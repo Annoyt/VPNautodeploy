@@ -768,10 +768,22 @@ class XUIService:
         ZEROES the client's accumulated traffic. A client that is NOT on
         the Reality inbound never gets a flow invented for it.
         """
+        if not lookup_order:
+            return None
+        # First read alone (it also warms the panel session — the
+        # client's login has no lock, so a cold burst would log in N
+        # times); the rest concurrently. The monthly job does this per
+        # client for ~80 clients, and the panel takes ~1 s per inbound
+        # read, so sequential reads add minutes to the job for nothing.
+        head, tail = lookup_order[0], lookup_order[1:]
+        inbounds = [await self.api.get_inbound(head)]
+        if tail:
+            inbounds.extend(await asyncio.gather(
+                *(self.api.get_inbound(i) for i in tail)
+            ))
         client = None
         seen_on = []
-        for candidate in lookup_order:
-            inbound = await self.api.get_inbound(candidate)
+        for candidate, inbound in zip(lookup_order, inbounds):
             found = self._find_client_by_email(inbound, email)
             if not found:
                 continue
@@ -790,6 +802,37 @@ class XUIService:
                 f"with no flow; restoring {DEFAULT_FLOW}"
             )
         return client
+
+    async def _client_attached_async(self, email: str) -> bool:
+        iid = await self._resolve_inbound_id_async()
+        if iid is None:
+            return True
+        ids = self._client_inbound_ids(iid)
+        return await self._read_client_merged_async(email, ids) is not None
+
+    def client_attached_sync(self, email: str) -> bool:
+        """Is the client still attached to at least one inbound?
+
+        The demo-renewal job re-provisions a client whose renew failed,
+        on the theory that the panel detached it (long-expired clients
+        are). But a renew can also fail for other reasons — a refused
+        body, a panel hiccup — and re-provisioning an ATTACHED client is
+        delete+re-add, which zeroes its accumulated traffic. This is the
+        gate: only a truly absent client may be re-added.
+
+        Errs on the side of "attached" when it cannot tell: skipping a
+        revival is recoverable next month, wiping counters is not.
+        """
+        if not self.api:
+            return True
+        try:
+            return bool(self._run_sync(self._client_attached_async(email)))
+        except Exception as e:
+            logger.warning(
+                f"client_attached: lookup failed for {redact_email(email)}, "
+                f"assuming attached: {e}"
+            )
+            return True
 
     def _client_inbound_ids(self, primary: int) -> List[int]:
         """Full inbound set a bot-provisioned client belongs to: the

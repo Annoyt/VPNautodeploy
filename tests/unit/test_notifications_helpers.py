@@ -442,6 +442,7 @@ class TestDemoResetReprovisionFallback:
         # healthy@x: renew succeeds first try.
         xui.renew_client_sync.side_effect = [False, True, True]
         xui.add_client_sync.return_value = True
+        xui.client_attached_sync.return_value = False   # truly detached
 
         with patch('bot.services.xui_service.XUIService', return_value=xui):
             svc._reset_demo_quota_sync()
@@ -464,10 +465,32 @@ class TestDemoResetReprovisionFallback:
         xui.api = Mock()
         xui.renew_client_sync.return_value = False
         xui.add_client_sync.return_value = False
+        xui.client_attached_sync.return_value = False
 
         with patch('bot.services.xui_service.XUIService', return_value=xui):
             svc._reset_demo_quota_sync()
 
+        svc.bot.send_message.assert_not_called()
+
+    def test_attached_client_is_never_readded(self, tmp_path):
+        """A renew can fail for reasons other than detachment (refused
+        body, panel hiccup). Re-adding a client the panel still holds is
+        delete+re-add and ZEROES its traffic — the fallback must be
+        gated on the client being truly absent."""
+        from unittest.mock import Mock, patch
+
+        svc, _ = self._make(tmp_path, [
+            ("1", "hiccup@x", "uuid-1", "demo"),
+        ])
+        xui = Mock()
+        xui.api = Mock()
+        xui.renew_client_sync.return_value = False
+        xui.client_attached_sync.return_value = True    # still in the panel
+
+        with patch('bot.services.xui_service.XUIService', return_value=xui):
+            svc._reset_demo_quota_sync()
+
+        xui.add_client_sync.assert_not_called()
         svc.bot.send_message.assert_not_called()
 
     def test_no_uuid_skips_readd(self, tmp_path):

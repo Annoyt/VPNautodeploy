@@ -533,7 +533,11 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
     # and the rows sat in outbound_health for FOUR DAYS because nothing
     # read them. This check closes that loop.
     PROBE_RUNS = 3              # consecutive probe runs that must be all-bad
-    PROBE_DOMAINS = 10          # HealthChecker.TARGET_DOMAINS per run
+    try:
+        from bot.services.health_checker import HealthChecker as _HC
+        PROBE_DOMAINS = len(_HC.TARGET_DOMAINS)   # rows per protocol per run
+    except Exception:            # keep the alert alive even if that import breaks
+        PROBE_DOMAINS = 10
     PROBE_MIN_SAMPLES = 15      # ignore thin windows (partial run, new deploy)
     PROBE_WINDOW_H = 3          # only look at recent rows
     PROBE_STALE_MIN = 45        # 3 missed runs at the 15-min cadence
@@ -602,19 +606,11 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
                         "ORDER BY ts DESC LIMIT ?",
                         (tag, cutoff, limit),
                     ).fetchall()
-                # Anchor "how long" on the last row that showed life —
-                # in some failure modes rows stop being written at all.
-                last_alive = {
-                    tag: conn.execute(
-                        "SELECT MAX(ts) FROM outbound_health WHERE "
-                        "outbound_tag = ? AND (latency_ms IS NOT NULL "
-                        "OR status = 'ok')",
-                        (tag,),
-                    ).fetchone()[0]
-                    for tag in tags
-                }
         except Exception as e:
-            logger.debug(f"protocol-probe alert read failed: {e}")
+            # A monitoring read failure is itself worth a line in the
+            # log at a level someone will see — this check exists
+            # because a silent gap cost four days.
+            logger.warning(f"protocol-probe alert read failed: {e}")
             return ("protocol_down:", [])
 
         # The probe pipeline itself stopped producing rows.
@@ -663,9 +659,25 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
                 ),
             )])
 
+        # "How long" — anchored on the last row that showed life, since
+        # in some failure modes rows stop being written at all. Looked
+        # up only for the (rare) dark tags: the healthy path is one
+        # query per tick, not one per protocol.
+        def _last_alive(tag):
+            try:
+                with sqlite3.connect(db_path) as conn:
+                    return conn.execute(
+                        "SELECT MAX(ts) FROM outbound_health WHERE "
+                        "outbound_tag = ? AND (latency_ms IS NOT NULL "
+                        "OR status = 'ok')",
+                        (tag,),
+                    ).fetchone()[0]
+            except Exception:
+                return None
+
         alerts = []
         for tag, rows in dark.items():
-            since = last_alive.get(tag)
+            since = _last_alive(tag)
             how_long = (
                 _humanize_minutes(_minutes_since(since, now)) if since else '—'
             )
