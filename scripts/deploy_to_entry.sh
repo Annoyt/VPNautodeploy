@@ -28,7 +28,10 @@ echo "==> Version stamp: $stamp"
 
 paths=("$@")
 if [ ${#paths[@]} -eq 0 ]; then
-    paths=(bot/ scripts/deploy_entry_bot.sh)
+    # scripts/ ships whole: the Dockerfile bakes it into the image, so a
+    # helper that only exists locally is invisible to `docker exec`
+    # (that is how the panel audit failed its first deploy).
+    paths=(bot/ scripts/)
 fi
 # version.txt must always ship, whatever subset is deployed.
 paths+=(bot/version.txt)
@@ -42,7 +45,10 @@ for p in "${paths[@]}"; do
 done
 
 echo "==> Rsync to entry:/opt/vpn-bot (itemized — watch for unexpected drift)"
-rsync -aviR "${paths[@]}" entry:/opt/vpn-bot/ | grep -v '/$' || true
+# *.local holds untracked operator secrets (see deploy_hermes_skills.sh);
+# it has no business on a prod box.
+rsync -aviR --exclude='*.local' --exclude='__pycache__' \
+    "${paths[@]}" entry:/opt/vpn-bot/ | grep -v '/$' || true
 
 echo "==> Remote rebuild (--no-deps)"
 ssh entry "cd /opt/vpn-bot && ./scripts/deploy_entry_bot.sh"
@@ -55,4 +61,30 @@ if [ "$deployed" != "$stamp" ]; then
     echo "ERROR: version mismatch — prod runs '$deployed', expected '$stamp'." >&2
     exit 1
 fi
+
+# Panel audit: every client on every enabled inbound must still carry the
+# fields its protocol needs. Cheap (one API read per inbound) and it is
+# the only check here that looks at the PANEL rather than at our own
+# code. 2026-09-01: 80 clients lost `flow` on the Reality inbound and
+# nothing — not the tests, not /health — noticed for four days.
+# Exit 2 = "could not check": that is a failure too, not a pass.
+echo "==> Smoke: panel client fields"
+set +e
+# PYTHONPATH=/app: the image has no installed package, `bot` is importable
+# only from the app root, and the script lives one level down.
+ssh entry "docker exec -e PYTHONPATH=/app vpn-bot python3 /app/scripts/verify_panel_client_fields.py"
+audit_rc=$?
+set -e
+if [ "$audit_rc" -eq 1 ]; then
+    echo "ERROR: the panel holds unusable clients (code IS deployed)." >&2
+    echo "       Repair with scripts/restore_reality_flow.py --apply," >&2
+    echo "       then force a panel-side Xray restart." >&2
+    exit 1
+elif [ "$audit_rc" -ne 0 ]; then
+    echo "ERROR: could not run the panel audit (rc=$audit_rc) — this is" >&2
+    echo "       NOT a pass. Panel unreachable, or the script never" >&2
+    echo "       reached the image (is scripts/ in the deployed paths?)." >&2
+    exit 1
+fi
+
 echo "==> Deploy verified: $sha is live."

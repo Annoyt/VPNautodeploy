@@ -526,6 +526,179 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
         except Exception:
             return None
 
+    # ---- outbound probe collapse (a protocol went dark) ----
+    # 2026-09-01: VLESS-Reality died at 00:01 UTC when a client update
+    # blanked `flow` on inbound 1. The probe suite recorded it
+    # immediately — reality went from 672/960 ok per day to 0/960 —
+    # and the rows sat in outbound_health for FOUR DAYS because nothing
+    # read them. This check closes that loop.
+    PROBE_RUNS = 3              # consecutive probe runs that must be all-bad
+    try:
+        from bot.services.health_checker import HealthChecker as _HC
+        PROBE_DOMAINS = len(_HC.TARGET_DOMAINS)   # rows per protocol per run
+    except Exception:            # keep the alert alive even if that import breaks
+        PROBE_DOMAINS = 10
+    PROBE_MIN_SAMPLES = 15      # ignore thin windows (partial run, new deploy)
+    PROBE_WINDOW_H = 3          # only look at recent rows
+    PROBE_STALE_MIN = 45        # 3 missed runs at the 15-min cadence
+
+    def _minutes_since(ts_str, now):
+        """Minutes between an ISO timestamp string and ``now``."""
+        from datetime import datetime
+        try:
+            ts = datetime.fromisoformat(str(ts_str).replace('Z', ''))
+        except (TypeError, ValueError):
+            return float('inf')
+        return max(0.0, (now - ts).total_seconds() / 60.0)
+
+    def _humanize_minutes(mins):
+        if mins == float('inf'):
+            return '—'
+        mins = int(mins)
+        if mins < 60:
+            return f"{mins} мин"
+        hours, mins = divmod(mins, 60)
+        if hours < 24:
+            return f"{hours} ч {mins:02d} мин"
+        days, hours = divmod(hours, 24)
+        return f"{days} д {hours} ч"
+
+    def check_protocol_probe_down():
+        """Per protocol: no sign of life across the last N probe runs.
+
+        Liveness is "a latency came back", not ``status == 'ok'``. An
+        error that travelled THROUGH the tunnel carries a latency and
+        proves the tunnel works (5306 of 19535 recent error rows are
+        like that — sites that block our exit IP); the 2026-09-01 rows
+        had none, because nothing ever connected.
+
+        Two sibling failure modes are deliberately NOT reported as
+        per-protocol outages:
+          * every protocol dark at once — that is the probe sidecar or
+            the exit link, ONE incident, not four;
+          * no fresh rows at all — the probe job itself died, which the
+            first version of this check could not see (too few samples
+            => stay quiet), leaving it blind exactly when blindness was
+            total.
+        """
+        try:
+            db_path = getattr(config, 'DB_PATH', None) or '/var/lib/vpn-bot/bot.db'
+            import sqlite3
+            from datetime import datetime, timedelta
+            now = datetime.utcnow()
+            cutoff = (now - timedelta(hours=PROBE_WINDOW_H)).isoformat()
+            limit = PROBE_RUNS * PROBE_DOMAINS
+            with sqlite3.connect(db_path) as conn:
+                newest = conn.execute(
+                    "SELECT MAX(ts) FROM outbound_health"
+                ).fetchone()[0]
+                tags = [
+                    r[0] for r in conn.execute(
+                        "SELECT DISTINCT outbound_tag FROM outbound_health "
+                        "WHERE ts >= ?", (cutoff,),
+                    ).fetchall()
+                ]
+                samples = {}
+                for tag in tags:
+                    samples[tag] = conn.execute(
+                        "SELECT status, latency_ms FROM outbound_health "
+                        "WHERE outbound_tag = ? AND ts >= ? "
+                        "ORDER BY ts DESC LIMIT ?",
+                        (tag, cutoff, limit),
+                    ).fetchall()
+        except Exception as e:
+            # A monitoring read failure is itself worth a line in the
+            # log at a level someone will see — this check exists
+            # because a silent gap cost four days.
+            logger.warning(f"protocol-probe alert read failed: {e}")
+            return ("protocol_down:", [])
+
+        # The probe pipeline itself stopped producing rows.
+        if not newest or _minutes_since(newest, now) > PROBE_STALE_MIN:
+            age = '—' if not newest else f"{int(_minutes_since(newest, now))} мин"
+            return ("protocol_down:", [Alert(
+                key='protocol_down:probe_pipeline',
+                severity='critical',
+                min_cycles=2,
+                title=f'Пробы не пишутся {age}',
+                detail=(
+                    "HealthChecker перестал складывать результаты в "
+                    "outbound_health. Пока это так, падение любого "
+                    "протокола НЕ будет замечено. Смотри джобу проб в "
+                    "логах бота и контейнер probe-proxy."
+                ),
+            )])
+
+        def _alive(row):
+            """The tunnel carried something: either it succeeded, or it
+            failed AFTER a round trip (a latency means bytes came back).
+            Only "nothing ever connected" leaves both empty."""
+            status, latency = row
+            return latency is not None or status == 'ok'
+
+        dark = {
+            tag: rows for tag, rows in samples.items()
+            if len(rows) >= PROBE_MIN_SAMPLES
+            and not any(_alive(r) for r in rows)
+        }
+        measured = [t for t, rows in samples.items()
+                    if len(rows) >= PROBE_MIN_SAMPLES]
+
+        # Everything dark at once = one upstream incident.
+        if measured and len(dark) == len(measured) and len(measured) >= 2:
+            return ("protocol_down:", [Alert(
+                key='protocol_down:all',
+                severity='critical',
+                min_cycles=2,
+                title=f'Все протоколы молчат ({len(measured)} шт.)',
+                detail=(
+                    "Ни один протокол не отвечает — это не отдельный "
+                    "inbound, а общий канал: probe-proxy сайдкар, линк "
+                    "entry→exit или сам exit. Проверь контейнер "
+                    "probe-proxy и доступность exit-узла."
+                ),
+            )])
+
+        # "How long" — anchored on the last row that showed life, since
+        # in some failure modes rows stop being written at all. Looked
+        # up only for the (rare) dark tags: the healthy path is one
+        # query per tick, not one per protocol.
+        def _last_alive(tag):
+            try:
+                with sqlite3.connect(db_path) as conn:
+                    return conn.execute(
+                        "SELECT MAX(ts) FROM outbound_health WHERE "
+                        "outbound_tag = ? AND (latency_ms IS NOT NULL "
+                        "OR status = 'ok')",
+                        (tag,),
+                    ).fetchone()[0]
+            except Exception:
+                return None
+
+        alerts = []
+        for tag, rows in dark.items():
+            since = _last_alive(tag)
+            how_long = (
+                _humanize_minutes(_minutes_since(since, now)) if since else '—'
+            )
+            alerts.append(Alert(
+                key=f'protocol_down:{tag}',
+                severity='critical',
+                min_cycles=2,
+                title=f'Протокол {tag} мёртв (лежит {how_long})',
+                detail=(
+                    f"За последние {PROBE_RUNS} прогона ({len(rows)} попыток) "
+                    f"через {tag} не вернулся НИ ОДИН ответ — даже ошибочный, "
+                    f"то есть туннель не устанавливается вовсе. Остальные "
+                    f"протоколы при этом живы, значит дело в самом inbound'е. "
+                    f"Частые причины: клиенты потеряли per-protocol поле "
+                    f"(flow у Reality, password у Shadowsocks) после правки "
+                    f"клиента или месячной джобы; сменился/протух SNI-dest; "
+                    f"разъехались hop-порты у hy2; xray отверг конфиг."
+                ),
+            ))
+        return ("protocol_down:", alerts)
+
     # ---- DPI / fingerprint checks (Phase C) ----
     # All three checks share the same DB read pattern: roll up the last
     # hour of dpi_metrics by (country, ASN) and look for anomalies vs
@@ -686,6 +859,7 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
     checks.extend([
         check_cpu, check_ram, check_disk,
         check_opencode, check_xray_reload_sidecar, check_xui_inbounds,
+        check_protocol_probe_down,
         check_dpi_short_sessions, check_dpi_handshake_spike, check_dpi_rst_spike,
     ])
     return checks

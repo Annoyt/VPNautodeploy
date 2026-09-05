@@ -500,12 +500,11 @@ class XUIAPIClient:
         expiry_time = _int("expiryTime", "expiry_time")
         tg_id = _int("tgId", "tg_id")
         sub_id = cfg.get("subId") or cfg.get("sub_id") or ""
-        return {
+        out = {
             "email": cfg.get("email", ""),
             # v3.4.0 add binds the client UUID from "id", not "uuid".
             "id": cfg.get("id") or cfg.get("uuid") or "",
             "password": cfg.get("password", ""),
-            "flow": cfg.get("flow", ""),
             "security": cfg.get("security", "auto"),
             "limitIp": limit_ip,
             "limit_ip": limit_ip,
@@ -521,6 +520,17 @@ class XUIAPIClient:
             "comment": cfg.get("comment", ""),
             "reset": _int("reset"),
         }
+        # Never emit an empty flow: on the Reality inbound the panel
+        # stores this body's value verbatim, so ``"flow": ""`` is a
+        # write, not a no-op — it strips xtls-rprx-vision and the user
+        # stops connecting. Scope note: this mapper feeds ``add_client``
+        # ONLY; ``update_client`` posts the caller's dict as-is, and the
+        # 2026-09-01 wipe came through THAT path. What guards the update
+        # path is ``REQUIRED_CLIENT_FIELDS`` below, not this branch.
+        flow = (cfg.get("flow") or "").strip()
+        if flow:
+            out["flow"] = flow
+        return out
 
     async def add_client(self, inbound_ids, client_config: dict) -> bool:
         """Attach a client to one or more inbounds (3x-ui v3.4.0).
@@ -570,8 +580,18 @@ class XUIAPIClient:
             logger.error(f"Error adding client: {e}")
             return False
 
+    # Per-protocol fields the panel zero-values when the update body
+    # omits them (it deletes and re-adds the record internally). An
+    # update that does not carry ``flow`` therefore STRIPS
+    # xtls-rprx-vision from the VLESS-Reality inbound — that is how
+    # 80 of 81 clients were killed on 2026-09-01. Fail the write loudly
+    # instead of corrupting the panel; callers that legitimately manage
+    # a flow-less client pass ``required_fields=()``.
+    REQUIRED_CLIENT_FIELDS = ('flow',)
+
     async def update_client(self, email: str, client_config: dict,
-                            inbound_ids) -> bool:
+                            inbound_ids, *,
+                            required_fields: Optional[tuple] = None) -> bool:
         """Update an existing client in place, keyed by email.
 
         Unlike ``add_client`` this endpoint reads a FLAT classic client
@@ -589,6 +609,20 @@ class XUIAPIClient:
         """
         if isinstance(inbound_ids, int):
             inbound_ids = [inbound_ids]
+        required = (
+            self.REQUIRED_CLIENT_FIELDS if required_fields is None
+            else required_fields
+        )
+        for field in required:
+            if not (client_config.get(field) or ''):
+                logger.error(
+                    f"update_client refused for {redact_email(email)}: body "
+                    f"has no '{field}'. The panel rebuilds the client from "
+                    f"this body, so the update would blank '{field}' on every "
+                    f"inbound (2026-09-01 killed inbound-443 exactly this "
+                    f"way). Read the live value first."
+                )
+                return False
         try:
             await self._ensure_auth()
             session = await self._get_session()
@@ -644,6 +678,51 @@ class XUIAPIClient:
                 return False
         except Exception as e:
             logger.error(f"Error resetting client traffic: {e}")
+            return False
+
+    async def restart_xray(self) -> bool:
+        """Full Xray restart: panel regenerates config.json from its DB.
+
+        ``POST /panel/api/server/restartXrayService``. This is heavier
+        than the client-level hot-apply the panel does on every edit —
+        and sometimes the ONLY way back to a consistent state.
+
+        The fork's hot-apply is RemoveUser+AddUser per inbound, and the
+        AddUser always fails on the Shadowsocks-2022 inbound with
+        ``Unknown account type: xray.proxy.shadowsocks_2022.ServerConfig``
+        (the panel hands the inbound's ServerConfig proto over as the
+        user's account). It is unrelated to ``flow`` and predates the
+        2026-09-01 wipe — first seen 2026-08-19. Net effect: every client
+        edit drops that client from the RUNNING shadowsocks inbound while
+        the database still lists it, and only a restart — which makes the
+        panel regenerate config.json from the DB — resyncs them.
+
+        Costs every live TCP session on the xray inbounds (Reality, WS,
+        SS); clients reconnect. Hysteria runs as a separate daemon and
+        is untouched.
+        """
+        try:
+            await self._ensure_auth()
+            session = await self._get_session()
+            url = (f"{self.config.base_url}{self.config.base_path}"
+                   f"/panel/api/server/restartXrayService")
+            async with session.post(url,
+                                    headers=self._auth_headers()) as response:
+                if response.status == 200:
+                    data = await response.json(content_type=None)
+                    if data.get("success"):
+                        logger.info("Xray restart requested via panel")
+                        return True
+                    logger.warning(
+                        f"restartXray error: {data.get('msg', 'unknown')}"
+                    )
+                    return False
+                logger.warning(
+                    f"Failed to restart Xray: HTTP {response.status}"
+                )
+                return False
+        except Exception as e:
+            logger.error(f"Error restarting Xray: {e}")
             return False
 
     async def del_client_by_email(self, email: str) -> bool:
