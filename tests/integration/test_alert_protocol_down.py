@@ -115,12 +115,14 @@ class TestProtocolDownCheck:
 
         assert keys(probe_check(config)()) == []
 
-    def test_one_surviving_probe_is_enough_to_stay_quiet(self, db, config):
-        """Degraded is not dead. Only a total collapse pages."""
+    def test_one_surviving_probe_is_degraded_not_dead(self, db, config):
+        """Degraded is not dead: one ok in the newest run keeps the
+        critical 'мёртв' key quiet — what fires is the warn-level
+        degraded key (1/30 ok is not a healthy protocol either)."""
         seed(db, 'reality', runs=3, ok_per_run=0)
         seed(db, 'reality', runs=1, ok_per_run=1, minutes_ago_start=5)
 
-        assert keys(probe_check(config)()) == []
+        assert keys(probe_check(config)()) == ['protocol_down:reality:degraded']
 
     def test_sidecar_outage_pages_once_not_four_times(self, db, config):
         """One dead sidecar is ONE incident. Every protocol going dark
@@ -137,7 +139,9 @@ class TestProtocolDownCheck:
         forever while a site merely blocks our exit IP."""
         seed(db, 'reality', runs=3, ok_per_run=0, latency_ms=430)
 
-        assert keys(probe_check(config)()) == []
+        fired = keys(probe_check(config)())
+        assert 'protocol_down:reality' not in fired          # not dead
+        assert fired == ['protocol_down:reality:degraded']   # but 0/30 ok is degraded
 
     def test_stale_rows_report_a_dead_probe_pipeline(self, db, config):
         """No fresh rows at all means the CHECKER died, not that the
@@ -209,3 +213,32 @@ class TestProtocolDownReachesTelegram:
         mgr.run_once()
         assert mgr._state['protocol_down:reality'].consecutive_fails == 0
         bot.send_message.assert_not_called()
+
+
+class TestProtocolDegraded:
+    """A protocol that comes up but barely passes anything is not
+    'dark' (rows carry a latency), so protocol_down:<tag> stays quiet —
+    2026-09-05 ws sat at 2/30 ok for an hour unnoticed. The degraded
+    key covers that band."""
+
+    def test_sustained_low_ok_rate_fires_degraded(self, db, config):
+        seed(db, 'ws', runs=3, ok_per_run=1)          # 3/30 ok, tunnel alive
+        assert keys(probe_check(config)()) == ['protocol_down:ws:degraded']
+
+    def test_normal_baseline_is_quiet(self, db, config):
+        seed(db, 'ws', runs=3, ok_per_run=7)
+        assert keys(probe_check(config)()) == []
+
+    def test_moderate_dip_is_quiet(self, db, config):
+        """30% ok is a bad hour, not a degraded protocol."""
+        seed(db, 'ws', runs=3, ok_per_run=3)
+        assert keys(probe_check(config)()) == []
+
+    def test_dark_is_down_not_degraded(self, db, config):
+        seed(db, 'ws', runs=3, ok_per_run=0)
+        assert keys(probe_check(config)()) == ['protocol_down:ws']
+
+    def test_one_bad_run_is_not_enough(self, db, config):
+        """Only ~1.5 runs of data: below the sample floor, stay quiet."""
+        seed(db, 'ws', runs=1, ok_per_run=0, latency_ms=300)
+        assert keys(probe_check(config)()) == []

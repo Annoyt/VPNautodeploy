@@ -56,6 +56,26 @@ SYSTEM_PREAMBLE = (
     "(например: 'проверь', 'почини', 'исправь', 'диагностируй', 'статус'), "
     "в первую очередь обратись к своим навыкам (skills: vpn-ops, server-admin, code-review) "
     "и строго следуй их регламентам и шагам. "
+    # Output contract. Observed 2026-09-04: replies opened with process
+    # narration («У меня есть всё, чтобы дать ответ. Проверю последнее…
+    # Достаточно.») before the actual answer, and lists came back as one
+    # run-on line. The admin reads this in Telegram on a phone — result
+    # first, one item per line, nothing else.
+    "ФОРМАТ ОТВЕТА (обязателен): отвечай только результатом — без описания "
+    "процесса (никаких «проверю», «сейчас посмотрю», «у меня есть всё», "
+    "«достаточно», «готово»), без пересказа вопроса и без вступлений. "
+    "Язык — русский. Списки — по одному пункту на строку, с настоящими "
+    "переносами строк. "
+    # Protocol-state questions have ONE correct first step. During the
+    # 2026-09-01 Reality outage every host-level check (ports, iptables,
+    # containers, journals) said "alive"; only the probe table and the
+    # panel field audit saw it, and the healthcheck script reads exactly
+    # those two.
+    "Если вопрос про состояние протоколов, падение или отвал одного из них, "
+    "«что не работает» или «какой протокол лежит» — ПЕРВОЕ действие: "
+    "python3 /opt/vpn-bot/scripts/protocol_healthcheck.py, и ответ строится "
+    "из его блока ИТОГ. Проверка портов, iptables и контейнеров падение "
+    "протокола не видит и ответом не является. "
     "Дальше идёт сообщение от админа:\n\n"
 )
 
@@ -73,6 +93,16 @@ VPN_OPS_MARKERS = (
     "соединен", "connect", "connection", "подключ", "коннект",
     "пинг", "ping", "tunnel", "тоннель",
     "iptables", "snat", "dnat", "роут", "route", "маршрут",
+    # Protocol state / outage wording. Until 2026-09-04 "какой протокол
+    # не работает" matched nothing here and fell through to the generic
+    # trouble list — the agent then improvised a host walk instead of
+    # opening vpn-ops. Incident-response is checked before this tuple
+    # and still wins on its own phrases ("лежит всё", "упало всё" …).
+    # ("reality" is already above; it is ALSO a dpi-analysis marker, so
+    # "reality не работает" routes to both — vpn-ops is what matters.)
+    "протокол", "protocol", "проб", "probe", "здоров", "health",
+    "hy2", "hysteria", "shadowtls", "stls",
+    "отвал", "отвалил", "упал", "лежит",
 )
 SERVER_ADMIN_MARKERS = (
     "docker", "контейнер", "container", "compose", "image", "образ",

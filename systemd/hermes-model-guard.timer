@@ -1,0 +1,10 @@
+[Unit]
+Description=Run Hermes model guard every 30 min
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=30min
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

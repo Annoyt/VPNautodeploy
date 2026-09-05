@@ -1,0 +1,22 @@
+[Unit]
+Description=Hermes free-model billing guard (oneshot, timer-driven)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# The script reads /root/.hermes/.env (OpenRouter key + proxy) and
+# /opt/vpn-bot/.env (bot token + proxy) itself — nothing secret lives in
+# this unit. Root is required: it rewrites /root/.hermes/config.yaml and
+# restarts hermes-api.service when the primary model stops being free.
+ExecStart=/usr/local/bin/hermes_model_guard.py
+# /var/lib/hermes-guard — last key usage, dedupe timestamps, model states,
+# undelivered messages. No secrets.
+StateDirectory=hermes-guard
+# oneshot has NO start timeout by default; worst case inside the script is
+# 2 HTTP calls x 30 s + systemctl restart 120 s + ss 15 s — 10 min is a
+# hard ceiling so a hung proxy cannot pin the timer's unit forever.
+TimeoutStartSec=10min
+
+MemoryMax=128M
+CPUQuota=30%

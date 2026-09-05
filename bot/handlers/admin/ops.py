@@ -1,14 +1,19 @@
-"""Operational admin commands: status, find, recent, repair, topics, quota, expire, whoami.
+"""Operational admin commands: status, protocols, find, recent, repair, topics, quota, expire, whoami.
 
 These cover the gap between the dashboard (rich UI, mouse-friendly) and
 inline ops where you just need a quick text answer in the same forum
 topic — e.g. "what's the bot's RAM right now", "find user with uuid
-starting with abc", "set @ivan's quota to 50".
+starting with abc", "set @ivan's quota to 50", "which protocol is dead".
 """
 
+import html
 import logging
 import os
+import subprocess
+import sys
+import threading
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Optional
 
 from bot.config.constants import BYTES_PER_GB
@@ -41,6 +46,72 @@ def _fmt_uptime(seconds: float) -> str:
     if m or not parts:
         parts.append(f"{m}m")
     return " ".join(parts)
+
+
+# ----- /protocols helpers -----
+# Twins of the closures inside alert_manager.build_default_checks (they
+# are not importable from there). Keep the semantics identical: the card
+# and the pager must agree on what "alive" and "how long" mean.
+
+def _probe_alive(row) -> bool:
+    """LIVENESS RULE. The tunnel carried something if the probe either
+    succeeded or failed AFTER a round trip (a latency means bytes came
+    back — e.g. an HTTP 418 from a site that blocks our exit IP). Only
+    "nothing ever connected" leaves both empty, which is what the
+    2026-09-01 outage rows looked like."""
+    status, latency = row[0], row[1]
+    return latency is not None or status == 'ok'
+
+
+def _minutes_since(ts_str, now: datetime) -> float:
+    """Minutes between an ISO-UTC-naive timestamp string and ``now``;
+    ``inf`` when unparsable so callers can treat it as 'never'."""
+    try:
+        ts = datetime.fromisoformat(str(ts_str).replace('Z', ''))
+    except (TypeError, ValueError):
+        return float('inf')
+    return max(0.0, (now - ts).total_seconds() / 60.0)
+
+
+def _humanize_minutes(mins: float) -> str:
+    if mins == float('inf'):
+        return '—'
+    mins = int(mins)
+    if mins < 60:
+        return f"{mins} мин"
+    hours, mins = divmod(mins, 60)
+    if hours < 24:
+        return f"{hours} ч {mins:02d} мин"
+    days, hours = divmod(hours, 24)
+    return f"{days} д {hours} ч"
+
+
+def _format_probe_line(tag: str, info: Optional[dict], now: datetime,
+                       *, window_h: int, min_samples: int) -> str:
+    """One card line per protocol. States, in order of severity:
+
+    🔴 no sign of life across the whole window (≥ ``min_samples`` rows,
+       none alive) — this is what the pager calls protocol_down;
+    🟡 the LAST run had no answer at all, or fewer than half its probes
+       succeeded — degraded / possibly the first minutes of an outage;
+    🟢 otherwise (7/10 is the everyday baseline — RU domestic targets
+       fail through the tunnel by design);
+    ⚪ no rows in the window at all.
+    """
+    if not info:
+        return f"⚪ <b>{tag}</b> — нет проб за {window_h} ч"
+    rate = f"{info['last_ok']}/{info['last_n']} ok"
+    if info['alive_window'] == 0 and info['rows'] >= min_samples:
+        since = info.get('last_alive_ts')
+        how_long = (_humanize_minutes(_minutes_since(since, now))
+                    if since else 'всё время наблюдений')
+        return (f"🔴 <b>{tag}</b> — {rate}, лежит {how_long} "
+                f"(ни одного ответа за {info['rows']} попыток)")
+    if info['last_alive'] == 0:
+        return f"🟡 <b>{tag}</b> — {rate}, последний прогон без единого ответа"
+    if info['last_ok'] * 2 < info['last_n']:
+        return f"🟡 <b>{tag}</b> — {rate}, деградация"
+    return f"🟢 <b>{tag}</b> — {rate}"
 
 
 class AdminOpsMixin(AdminHandlerBase):
@@ -169,6 +240,254 @@ class AdminOpsMixin(AdminHandlerBase):
             chat_id=chat_id, text="\n".join(lines), parse_mode='HTML',
             message_thread_id=self._get_thread_id(chat_id),
         )
+
+    # ----- /protocols -----
+
+    # Window/threshold twins of check_protocol_probe_down in
+    # bot/services/alert_manager.py — the card and the pager must agree
+    # on what "dark" means, or the admin sees a red line the pager never
+    # fired on (or vice versa). Class attrs so tests can shrink them.
+    PROTO_RUNS = 3              # probe runs shown per protocol
+    PROTO_WINDOW_H = 3          # only rows this recent count
+    PROTO_STALE_MIN = 45        # 3 missed runs at the 15-min cadence
+    PROTO_MIN_SAMPLES = 15      # fewer rows than this cannot be "DOWN"
+    PROTO_ALERT_HOURS = 6       # alert_history lookback
+    PROTO_AUDIT_TIMEOUT_S = 40  # panel-audit subprocess budget
+
+    def show_protocols(self, chat_id: str, args: list) -> "threading.Thread":
+        """Deterministic per-protocol health card — no LLM involved, so
+        it works when the agent is down (which is exactly when you need
+        it). Three read-only sources:
+
+        * ``outbound_health`` — the probe rows, judged by the LIVENESS
+          RULE (see ``_probe_alive``);
+        * the panel field audit (``scripts/verify_panel_client_fields.py``)
+          — catches a blanked ``flow``/``password`` on the panel, i.e.
+          the 2026-09-01 root cause, independently of the probes;
+        * ``alert_history`` — what the pager already said in the last 6 h.
+
+        The audit is a subprocess with a 40-s budget and handlers run on
+        the polling thread, so the whole card is built on a worker and
+        posted afterwards (same pattern as /addmail). The topic id is
+        captured up front: ``_current_update`` may point at a different
+        command by the time the worker finishes. The thread is returned
+        so tests can join it; the dispatcher ignores the value.
+        """
+        thread_id = self._get_thread_id(chat_id)
+
+        def _worker() -> None:
+            try:
+                text = self._build_protocols_report()
+            except Exception as e:      # belt and braces — must always answer
+                logger.exception("/protocols failed")
+                text = f"❌ /protocols: {html.escape(str(e))[:200]}"
+            # Same discipline as AIHandler._reply: a Telegram hiccup on a
+            # worker thread must be logged, not left as an unhandled
+            # thread exception on stderr.
+            try:
+                self._send(chat_id=chat_id, text=text, parse_mode='HTML',
+                           message_thread_id=thread_id)
+            except Exception as e:
+                logger.warning(f"/protocols: reply send failed: {e}")
+
+        t = threading.Thread(target=_worker, daemon=True,
+                             name=f"protocols-{chat_id}")
+        t.start()
+        return t
+
+    def _build_protocols_report(self) -> str:
+        now = datetime.utcnow()
+        lines = ["📡 <b>Протоколы</b>"]
+
+        try:
+            probes = self._read_probe_state(now)
+        except Exception as e:
+            logger.warning(f"/protocols: outbound_health read failed: {e}")
+            probes = None
+
+        if probes is None:
+            # Covers every protocol, hy2t included — no separate hy2t
+            # line here: with the table unreadable we cannot even say
+            # whether it is probed on this deployment.
+            lines.append("⚠️ outbound_health недоступна — состояние проб неизвестно")
+        else:
+            lines.extend(self._probe_header_lines(probes['newest'], now))
+            for tag in probes['tags']:
+                lines.append(_format_probe_line(
+                    tag, probes['per_tag'].get(tag), now,
+                    window_h=self.PROTO_WINDOW_H,
+                    min_samples=self.PROTO_MIN_SAMPLES,
+                ))
+            if 'hy2t' not in probes['tags']:
+                # hy2t is probed only where HY2T_PORT is set (sidecar
+                # inbound :18085, HealthChecker.probe_tags_for). Not in
+                # the tag list = neither expected by config nor a single
+                # row in the window — say so instead of showing a blank.
+                # When it IS expected, the loop above already rendered a
+                # real line (grey "нет проб" until the first run writes).
+                lines.append("⚪ <b>hy2t</b>: без проб, см. /ai")
+        lines.append("")
+        lines.append(self._panel_audit_line())
+        lines.append("")
+        lines.extend(self._recent_alert_lines(now))
+
+        text = "\n".join(lines)
+        if len(text) > 3900:  # Telegram cap is 4096
+            text = text[:3900] + "\n…(обрезано)"
+        return text
+
+    def _read_probe_state(self, now: datetime) -> dict:
+        """Newest ``PROTO_RUNS`` runs per protocol from outbound_health.
+
+        A "run" is one row per target domain (HealthChecker writes them
+        with per-row timestamps, so runs are recovered by count, exactly
+        as the alert check does). Tags = what HealthChecker probes on
+        THIS deployment (config-driven: hy2t only with HY2T_PORT) so a
+        protocol with NO rows at all still gets a line, plus whatever
+        else has rows in the window — a tag added to the checker shows
+        up here without a code change.
+        """
+        try:
+            from bot.services.health_checker import HealthChecker as _HC
+            expected = _HC.probe_tags_for(self.config)
+            per_run = len(_HC.TARGET_DOMAINS)
+        except Exception:      # keep the card alive even if that import breaks
+            expected, per_run = ['reality', 'hy2', 'ws', 'stls'], 10
+
+        cutoff = (now - timedelta(hours=self.PROTO_WINDOW_H)).isoformat()
+        limit = self.PROTO_RUNS * per_run
+        per_tag: dict = {}
+        with self.db._connect() as conn:
+            newest = conn.execute(
+                "SELECT MAX(ts) FROM outbound_health").fetchone()[0]
+            seen = [r[0] for r in conn.execute(
+                "SELECT DISTINCT outbound_tag FROM outbound_health WHERE ts >= ?",
+                (cutoff,)).fetchall()]
+            tags = expected + sorted(t for t in seen if t not in expected)
+            for tag in tags:
+                rows = conn.execute(
+                    "SELECT status, latency_ms, ts FROM outbound_health "
+                    "WHERE outbound_tag = ? AND ts >= ? "
+                    "ORDER BY ts DESC LIMIT ?",
+                    (tag, cutoff, limit),
+                ).fetchall()
+                if not rows:
+                    continue
+                last_run = rows[:per_run]
+                info = {
+                    'rows': len(rows),
+                    'alive_window': sum(1 for r in rows if _probe_alive(r)),
+                    'last_n': len(last_run),
+                    'last_ok': sum(1 for r in last_run if r[0] == 'ok'),
+                    'last_alive': sum(1 for r in last_run if _probe_alive(r)),
+                    'last_alive_ts': None,
+                }
+                if info['alive_window'] == 0:
+                    # "How long" is anchored on the last row that showed
+                    # life — looked up only for dark tags (rare).
+                    info['last_alive_ts'] = conn.execute(
+                        "SELECT MAX(ts) FROM outbound_health WHERE "
+                        "outbound_tag = ? AND (latency_ms IS NOT NULL "
+                        "OR status = 'ok')",
+                        (tag,),
+                    ).fetchone()[0]
+                per_tag[tag] = info
+        return {'newest': newest, 'tags': tags, 'per_tag': per_tag}
+
+    def _probe_header_lines(self, newest, now: datetime) -> list:
+        """Staleness first: rows that stopped arriving mean the probe
+        pipeline died, and every per-protocol line below is then history,
+        not status — the first version of the pager was blind to this."""
+        if not newest:
+            return ["⚠️ outbound_health пуст — пробы ни разу не писались"]
+        age = _minutes_since(newest, now)
+        if age > self.PROTO_STALE_MIN:
+            return [f"⚠️ пробы не пишутся уже {_humanize_minutes(age)} — "
+                    f"HealthChecker или probe-proxy встали, строки ниже устарели"]
+        return [f"<i>последний прогон {str(newest)[11:16]} UTC "
+                f"({int(age)} мин назад) · норма 7/10: vk/yandex/sber "
+                f"не ходят через туннель</i>"]
+
+    def _run_panel_audit(self):
+        """Run scripts/verify_panel_client_fields.py as a subprocess.
+
+        Returns ``(returncode, first_lines)``; returncode is None when
+        the script could not be run at all (missing, timed out, failed
+        to spawn). The script is not importable (scripts/ is not a
+        package) and needs the panel creds from this process's env, so
+        it runs with our environment plus PYTHONPATH=<app root> — that
+        is /app in the container and the repo root on a dev box.
+        """
+        root = Path(__file__).resolve().parents[3]
+        script = root / 'scripts' / 'verify_panel_client_fields.py'
+        if not script.exists():
+            return None, f"скрипт не найден: {script}"
+        env = dict(os.environ)
+        env['PYTHONPATH'] = (f"{root}{os.pathsep}{env['PYTHONPATH']}"
+                             if env.get('PYTHONPATH') else str(root))
+        try:
+            proc = subprocess.run(
+                [sys.executable, str(script)],
+                capture_output=True, text=True,
+                timeout=self.PROTO_AUDIT_TIMEOUT_S, env=env,
+            )
+        except subprocess.TimeoutExpired:
+            return None, (f"таймаут {self.PROTO_AUDIT_TIMEOUT_S} с "
+                          f"(панель не отвечает?)")
+        except Exception as e:
+            return None, f"не запустился: {e}"
+        out = (proc.stdout or '').strip() or (proc.stderr or '').strip()[-300:]
+        return proc.returncode, out
+
+    def _panel_audit_line(self) -> str:
+        try:
+            rc, out = self._run_panel_audit()
+        except Exception as e:      # _run_panel_audit is defensive; this is paranoia
+            rc, out = None, f"ошибка: {e}"
+        text_lines = [ln.strip() for ln in (out or '').splitlines() if ln.strip()]
+        first = text_lines[0] if text_lines else ''
+        if rc == 0:
+            return f"✅ Аудит панели: {html.escape(first or 'OK')}"
+        if rc == 1:
+            # Show the headline plus the first few offenders — enough to
+            # see WHICH inbound/field, without pasting 80 lines.
+            body = html.escape(first or 'BROKEN')
+            for p in text_lines[1:4]:
+                body += f"\n   <code>{html.escape(p)}</code>"
+            return f"🔴 Аудит панели: {body}"
+        # rc == 2 (script says it cannot check) or None (we could not run it).
+        reason = first or out or '?'
+        return f"⚠️ Аудит панели: не удалось проверить — {html.escape(reason)[:200]}"
+
+    def _recent_alert_lines(self, now: datetime) -> list:
+        """What the pager already said about protocols/DPI recently, so
+        the admin does not have to scroll the topic to correlate."""
+        # fired_at defaults to CURRENT_TIMESTAMP ('YYYY-MM-DD HH:MM:SS'),
+        # so the cutoff must use the same shape for the string compare.
+        cutoff = (now - timedelta(hours=self.PROTO_ALERT_HOURS)
+                  ).strftime('%Y-%m-%d %H:%M:%S')
+        try:
+            with self.db._connect() as conn:
+                rows = conn.execute(
+                    "SELECT fired_at, key, title, acked_at, kimi_at "
+                    "FROM alert_history "
+                    "WHERE (key LIKE 'protocol_down:%' OR key LIKE 'dpi_%') "
+                    "AND fired_at >= ? "
+                    "ORDER BY fired_at DESC, id DESC LIMIT 8",
+                    (cutoff,),
+                ).fetchall()
+        except Exception as e:
+            return [f"⚠️ alert_history недоступна: {html.escape(str(e))[:80]}"]
+        if not rows:
+            return [f"🔔 Алертов protocol_down / dpi за {self.PROTO_ALERT_HOURS} ч: нет"]
+        out = [f"🔔 <b>Алерты за {self.PROTO_ALERT_HOURS} ч</b> "
+               f"({len(rows)}; ✅ = ack, 🤖 = есть разбор агента):"]
+        for fired_at, key, title, acked_at, kimi_at in rows:
+            when = str(fired_at or '')[11:16]
+            flags = (' ✅' if acked_at else '') + (' 🤖' if kimi_at else '')
+            out.append(f"• <code>{when}</code> {html.escape(str(key))} — "
+                       f"{html.escape(str(title))}{flags}")
+        return out
 
     # ----- /whoami -----
 
