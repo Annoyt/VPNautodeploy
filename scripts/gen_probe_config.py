@@ -15,9 +15,20 @@ Run inside the vpn-bot container, redirect to the mounted config:
 
     docker exec vpn-bot python3 scripts/gen_probe_config.py \
         > /opt/vpn-bot/probe-proxy/config.json
-    docker compose up -d probe-proxy   # или restart, если уже запущен
+    docker exec probe-proxy sing-box check -c /etc/sing-box/config.json
+    docker compose restart probe-proxy   # config.json — bind-mount: `up -d` ничего не
+                                          # пересоздаст (спека не менялась), sing-box
+                                          # читает файл только на старте
 
-Regenerate whenever protocol env (SNI/ports/keys) changes.
+Regenerate whenever protocol env (SNI/ports/keys, HY2T_PORT) changes.
+
+PORT TABLE = HealthChecker.probe_ports_for(config) — imported, not
+copied. Until 2026-09-05 the ports lived in two hand-synced dicts with a
+"must match" comment; the checker now owns them, and the same call
+decides whether hy2t (18085) exists at all: an empty HY2T_PORT keeps it
+out of subscriptions, out of the checker's tag list and out of this
+config — a dead inbound here would only make a curl "work" against a
+tunnel nobody sells.
 
 xhttp is absent by design: sing-box does not implement Xray's XHTTP
 transport (see subscription.py) — that path can only be probed by an
@@ -31,33 +42,23 @@ sys.path.insert(0, '/app')
 
 from bot.config import Settings                      # noqa: E402
 from bot.core.database import Database               # noqa: E402
+from bot.services.health_checker import HealthChecker  # noqa: E402
 from bot.services.subscription import SubscriptionService  # noqa: E402
-
-PROBE_PORTS = {
-    'reality': 18081,
-    'hy2': 18082,
-    'ws': 18083,
-    'stls': 18084,
-}
 
 PROBE_CHAT_ID = 'probe_internal'
 
 
-def main() -> int:
-    config = Settings()
-    db = Database(config.DB_PATH)
-    user = db.get_user(PROBE_CHAT_ID)
-    if not user or not user.uuid:
-        print(f"probe user {PROBE_CHAT_ID} not found in bot.db",
-              file=sys.stderr)
-        return 1
-
-    svc = SubscriptionService(config)
+def build_config(config, user, svc=None, *, log=None) -> dict:
+    """Pure-ish builder (unit-tested): the sing-box config dict for
+    ``config`` + the probe ``user``. ``log`` receives one line per
+    skipped protocol (a builder returned None = not configured here)."""
+    svc = svc or SubscriptionService(config)
+    log = log or (lambda msg: None)
     inbounds, outbounds, rules = [], [], []
-    for proto, port in PROBE_PORTS.items():
+    for proto, port in HealthChecker.probe_ports_for(config).items():
         ob = svc._build_outbound(proto, user)
         if ob is None:
-            print(f"skip {proto}: not configured", file=sys.stderr)
+            log(f"skip {proto}: not configured")
             continue
         obs = ob if isinstance(ob, list) else [ob]
         # tls.fragment is a client-app anti-DPI knob some sing-box
@@ -77,12 +78,25 @@ def main() -> int:
         })
         rules.append({'inbound': [f'probe-in-{proto}'], 'outbound': tag})
 
-    cfg = {
+    return {
         'log': {'level': 'warn'},
         'inbounds': inbounds,
         'outbounds': outbounds + [{'type': 'direct', 'tag': 'direct'}],
         'route': {'rules': rules, 'final': 'direct'},
     }
+
+
+def main() -> int:
+    config = Settings()
+    db = Database(config.DB_PATH)
+    user = db.get_user(PROBE_CHAT_ID)
+    if not user or not user.uuid:
+        print(f"probe user {PROBE_CHAT_ID} not found in bot.db",
+              file=sys.stderr)
+        return 1
+
+    cfg = build_config(config, user,
+                       log=lambda msg: print(msg, file=sys.stderr))
     print(json.dumps(cfg, indent=2))
     return 0
 

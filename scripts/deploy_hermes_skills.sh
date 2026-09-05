@@ -54,5 +54,17 @@ done
 echo "==> Syncing workspace AGENTS.md"
 rsync -a "$STAGE/workspace/AGENTS.md" entry:/root/hermes-work/AGENTS.md
 
-echo "==> Done. Restart hermes-api to pick up AGENTS.md changes:"
-echo "    ssh entry systemctl restart hermes-api.service"
+# Hermes reads AGENTS.md at start, so a restart is needed — but a restart
+# kills any /ai turn in flight (the 2026-08-30 watchdog incident). Same
+# guard the watchdog uses: an ESTABLISHED client on :4097 is a live turn.
+# SKIP_RESTART=1 to only sync.
+if [ -z "${SKIP_RESTART:-}" ]; then
+    echo "==> Restarting hermes-api (only if no /ai turn is in flight)"
+    ssh entry 'n=$(ss -Htn state established "( sport = :4097 )" | wc -l); \
+        if [ "$n" = 0 ]; then systemctl restart hermes-api.service && sleep 5 \
+            && echo "    restarted: $(systemctl is-active hermes-api.service)"; \
+        else echo "    SKIPPED: $n /ai turn(s) in flight — rerun later or: ssh entry systemctl restart hermes-api.service"; fi'
+else
+    echo "==> SKIP_RESTART set — restart hermes-api yourself to pick up AGENTS.md"
+fi
+echo "==> Done."

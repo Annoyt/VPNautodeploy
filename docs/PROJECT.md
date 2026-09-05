@@ -1,6 +1,6 @@
 # NekoVPN — обзор проекта
 
-**Last updated: 2026-08-30.** Этот файл — человекочитаемый обзор «как всё
+**Last updated: 2026-09-05.** Этот файл — человекочитаемый обзор «как всё
 устроено сейчас». Парный документ — **AGENTS.md** в корне: гайд для агентов,
 секция Deployment и хроника граблей (§8–27) — при конфликте прав AGENTS.md.
 Живая операционная память — в memory-файлах агентских сессий.
@@ -28,6 +28,9 @@
 - **VLESS + XTLS-Reality** (:443) — базовый TCP-протокол. SNI сейчас `www.bing.com`
   (Microsoft-сертификат перерос 8192-байтный буфер xray — AGENTS.md §23);
   менять SNI = три слоя разом (панель, HAProxy ACL на entry, `SNI_VALUE` в .env).
+  Каждый клиент инбаунда обязан нести `flow=xtls-rprx-vision`: пустой flow =
+  мёртвый Reality при зелёных портах (2026-09-01..04, 4 дня; починка —
+  `scripts/restore_reality_flow.py --apply` + рестарт xray со стороны панели).
 - **Hysteria2** — freemium-тир, доступен всем (в т.ч. демо). Порт-хоппинг:
   формат `HY2_HOP_PORTS` различается для sing-box (`server_ports` массив `"X:Y"`)
   и URI (`mport` через запятую) — не путать.
@@ -110,8 +113,10 @@ xray-протоколы в одну строку на email; UNIQUE(email) ⇒ �
 **Telegram** (форум-группа, ответы всегда в топик источника): `/users`,
 `/users_all`, `/find <текст>` (ищет и по contact_email), `/pending`, `/quota`,
 `/expire`, `/addmail`, `/approve_payment`, `/broadcast`, `/backup`, `/ban`,
-`/unban`, `/reset`, `/ai <вопрос>` (Hermes-агент). PM-fallback при выключенном
-форуме.
+`/unban`, `/reset`, `/protocols` (живость протоколов по таблице проб
+`outbound_health` + результат аудита полей клиентов панели — тот же взгляд, что
+у алерта `protocol_down`), `/ai <вопрос>` (Hermes-агент). PM-fallback при
+выключенном форуме.
 
 **Дашборд** `https://<dashboard-host>:9443/?admin_token=…` (HMAC-токен из
 `/admin`, TTL 1ч): список юзеров (онлайн-бейджи, гео, шаринг-детект), карточка
@@ -123,6 +128,19 @@ health, DPI-сигналы, алерты.
 `minimax/minimax-m3:free` через OpenRouter (+fallback), 7 наших skills
 (vpn-ops, server-admin, incident-response, billing-ops, **user-ops**,
 code-review, dpi-analysis). Skills деплоятся ТОЛЬКО `scripts/deploy_hermes_skills.sh`.
+Правило агента с 2026-09-05: любая диагностика начинается с
+`protocol_healthcheck.py`, ответ — результат первым, без нарратива, ≤ ~900
+символов (hermes/AGENTS.md). **Гард бесплатной модели**
+`scripts/hermes_model_guard.py` (на entry-хосте под root, systemd-таймер раз в
+30 мин; деплой вместе с вотчдогом — `scripts/deploy_hermes_host.sh`): если
+текущая `:free`-модель пропала из `/api/v1/models` или стала платной —
+переключает `model.default` на первый **бесплатный** fallback (старая уходит в
+конец цепочки), делает бэкап config.yaml, рестартит hermes-api и пишет в топик
+AI. Если бесплатных не осталось — **ничего не переписывает**, только критикал
+(платную модель гард не ставит никогда). Отдельно: рост `usage` ключа
+OpenRouter по `/api/v1/key` > $0.001 между запусками = критикал независимо от
+причины. Все вызовы OpenRouter/Telegram с хоста — через HTTPS_PROXY из
+соответствующих .env; `--dry-run` ничего не пишет и не шлёт.
 
 ## 7. Почта и мониторинг
 
@@ -134,6 +152,24 @@ code-review, dpi-analysis). Skills деплоятся ТОЛЬКО `scripts/depl
   per-protocol), `/onlines` по clientStats.lastOnline, DPI-гейты по когортам
   (country, ASN) с трендом, AlertManager (Telegram-egress outage и др.),
   вотчдог hermes-api (не рестартит при живом агент-лупе).
+- **Живость протоколов** (после 4-дневного мёртвого Reality 2026-09-01..04 при
+  зелёных `ss`/`iptables`/`docker ps`): таблица `outbound_health` — 10 проб на
+  протокол каждые 15 мин, **7/10 ok — норма** (vk/yandex/sberbank честно падают
+  через туннель), живость = `latency_ms IS NOT NULL OR status='ok'`. Алерт
+  `protocol_down:<tag>` (3 прогона без единого ответа с latency, critical) +
+  `protocol_down:all` (все разом = probe-proxy / линк / exit, один инцидент) +
+  `protocol_down:probe_pipeline` (пробы не пишутся — слепота). С 2026-09-05 зонд покрывает и **hy2t** (inbound :18085 у probe-proxy, только при заданном `HY2T_PORT`; таблица портов — `HealthChecker.probe_ports_for`), а `outbound_health` чистится ежедневной джобой (ретенция 30 дней, батчами по 20k строк). Критикал уходит
+  в топик AI и **автоматически запускает агент-диагностику** (первым действием
+  агенту предписан `protocol_healthcheck.py`, ничего не менять); ответ пишется в
+  `alert_history.kimi_analysis` (вкладка Alerts дашборда) **и постится в тот же
+  топик** («Диагностика по алерту»; при недоступности агента — строка-отказ с
+  отсылкой к `/protocols`). В отличие от `dpi_*`, где анализ только на дашборде.
+- **Скрипты-«глаза»**: `scripts/protocol_healthcheck.py` (на entry-хосте под
+  root: ИТОГ по протоколам, ранжированные подозреваемые, точные следующие
+  команды, `--json`, exit 0/1/2) — STEP 0 любой диагностики у агента и у
+  человека; `scripts/verify_panel_client_fields.py` (в контейнере бота,
+  `PYTHONPATH=/app`) — аудит per-protocol полей клиентов панели, гоняется как
+  post-deploy smoke в `deploy_to_entry.sh`.
 
 ## 8. Тесты — 4 уровня
 

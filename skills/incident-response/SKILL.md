@@ -8,9 +8,27 @@ whenToUse: User reports a mass outage (лежит, не работает у вс
 You run on **entry**; the bot is local, xray + 3x-ui are on **exit** (`ssh exit-node`). Shorthand:
 `DC="docker compose -f /opt/vpn-bot/docker-compose.yml -f /opt/vpn-bot/docker-compose.entry.yml"`.
 
-# First 60 seconds — confirm scope, don't act yet
+# First 60 seconds — run the healthcheck, then confirm scope. Don't act yet.
 
-Is this **one user, some users, or everyone?**
+```sh
+python3 /opt/vpn-bot/scripts/protocol_healthcheck.py     # ИТОГ per protocol + ranked suspects + next commands
+```
+
+Its **ИТОГ** decides which runbook you are in — read it before touching anything:
+
+- **One protocol dead, the others alive** → **NOT a network incident.** It is an inbound / per-client-field
+  problem on that one protocol (`flow` wiped on Reality, `password` missing on SS, hop-ports drifted on hy2, dest
+  cert outgrew the 8192-B buffer). Ports, containers and iptables will all look fine — they did for four days in
+  2026-09. Go to **`vpn-ops`** (STEP 0 + Reality section) and verify the suspects the healthcheck printed, in
+  order. Same routing for a `protocol_down:<tag>` alert.
+- **All protocols dead at once** → upstream, ONE incident: the probe-proxy sidecar on entry, the entry→exit
+  link, or the exit host itself. Stay in this runbook, triage below. Same for `protocol_down:all`.
+- **`Пробы не пишутся` / `protocol_down:probe_pipeline`** → the bot's HealthChecker stopped writing rows. You are
+  BLIND, not necessarily down: check the bot container and probe-proxy first, then ask users.
+- **Healthcheck all green, users still complain** → the break is between users and entry (ASN-level blocking,
+  entry IP profiled) — that is `dpi-analysis`, not a server incident.
+
+Then confirm scope: is this **one user, some users, or everyone?**
 
 ```sh
 # How many users are paid/demo right now?
@@ -30,12 +48,20 @@ If only 1-2 users complain → user-specific, use `vpn-ops`. If half+ complain �
 # Triage order (do NOT skip steps — stop at the first failure, fix, re-test)
 
 ```
+0. Healthcheck ИТОГ           python3 /opt/vpn-bot/scripts/protocol_healthcheck.py    # one dark → vpn-ops; all dark → go on
+```
+
+Steps 1–9 are the **manual fallback**: run them only if the healthcheck cannot assess (exit 2 — its `Слои:` line
+names the FAILED layer — / traceback / file missing) or its ИТОГ says *all* protocols are dark and points upstream. They collect by hand the same
+evidence the script already ranks — and none of them can see a broken per-client field in the panel.
+
+```
 1. Bot container up?          $DC ps
 2. Entry ingress listening?   ss -tlnp | grep :443
 3. Exit reachable?            ssh exit-node 'uptime'
 4. xray inbound on exit up?   ssh exit-node 'ss -tlnp | grep :443'
 5. 3x-ui panel on exit up?    ssh exit-node 'ss -tlnp | grep :2026; docker ps | grep 3x-ui'
-6. Reality params unchanged?  ssh exit-node 'docker exec 3x-ui cat /etc/x-ui/x-ui.json' | python3 -m json.tool | grep -E 'publicKey|shortIds|serverName'
+6. Reality params unchanged?  ssh exit-node 'docker exec 3x-ui cat /app/bin/config.json' | python3 -m json.tool | grep -E 'shortIds|serverNames|"dest"'   # config.json = what xray RUNS; never grep privateKey
 7. Dashboard cert valid?      echo | openssl s_client -connect <dashboard-host>:9443 2>/dev/null | openssl x509 -noout -dates
 8. Disk full (either node)?   df -h / /var/lib/docker ; ssh exit-node 'df -h /'
 9. OOM killer fired?          dmesg -T | grep -iE 'killed|oom' | tail -5 ; ssh exit-node 'dmesg -T | grep -iE oom | tail -5'
@@ -66,8 +92,11 @@ curl -s -X POST "http://127.0.0.1:8080/api/admin/broadcast?admin_token=$TOKEN" \
 
 1. **Restart the bot container** — fixes ~half of stuck-state / memory-leak incidents:
    `$DC restart vpn-bot`
-2. **Restart xray / 3x-ui on exit** — if the break is exit-side:
-   `ssh exit-node 'docker restart 3x-ui'` (confirm first).
+2. **Restart xray / 3x-ui on exit** — if the break is exit-side. Lighter first: a **panel-side xray restart**
+   (regenerates `config.json` from the panel DB, keeps the panel up) —
+   `docker exec -e PYTHONPATH=/app vpn-bot python3 -c "import asyncio; from bot.config import Settings; from bot.services.xui_service import XUIService; x = XUIService(Settings()); print(asyncio.run(x.api.restart_xray()))"`;
+   heavier: `ssh exit-node 'docker restart 3x-ui'` (confirm first). Note `reload_xray()` in `xui_reload.py`
+   is neither — it hits ENTRY's sidecar.
 3. **Revert a bad code deploy** — code is NOT git-managed on entry. If the incident started right after a
    redeploy, the fix is authored/reverted in the **dev repo** and re-rsynced by the human; you can't `git revert`
    here. As a stopgap you may hot-edit the offending file under `/opt/vpn-bot/bot/` + `$DC up -d --build vpn-bot`,
@@ -78,6 +107,9 @@ curl -s -X POST "http://127.0.0.1:8080/api/admin/broadcast?admin_token=$TOKEN" \
 
 | Symptom | Most likely cause | First check |
 |---|---|---|
+| ONE protocol dark in the healthcheck / `protocol_down:<tag>`, every port green | per-client field wiped in the panel (`flow` on Reality — 2026-09-01), dest cert > 8192 B, hy2 hop-ports drift | `python3 /opt/vpn-bot/scripts/protocol_healthcheck.py` → its suspects → `vpn-ops` |
+| ALL protocols dark / `protocol_down:all` | probe-proxy sidecar on entry, entry→exit link, or the exit host | `docker ps \| grep probe-proxy; ssh exit-node uptime` |
+| `protocol_down:probe_pipeline` ("Пробы не пишутся") | HealthChecker job dead in the bot — you are blind, not down | `$DC logs vpn-bot --tail 200 \| grep -i health` |
 | All users down, xray container down on exit | OOM / restart loop on the 929 MB exit | `ssh exit-node 'dmesg -T \| tail; docker ps -a \| grep 3x-ui'` |
 | New keys "fail to connect", old ones work | `sid`/`pbk` env passthrough broken | `$DC exec -T vpn-bot env \| grep -E 'SID_VALUE\|REALITY'` |
 | Bot polls but doesn't respond | Telegram rate limit / BOT_TOKEN revoked, or Telegram egress proxy down | `$DC logs vpn-bot \| grep -i '429\|401\|forbidden'` |
@@ -87,8 +119,11 @@ curl -s -X POST "http://127.0.0.1:8080/api/admin/broadcast?admin_token=$TOKEN" \
 
 # After it's over
 
-Note the **trigger**, the **detection delay**, and the **mitigation**. If there's a permanent lesson (new check,
-schema invariant), tell the human to add it to the repo `AGENTS.md`. Incidents repeat when the post-mortem is skipped.
+Note the **trigger**, the **detection delay**, and the **mitigation**. If the incident fired a `protocol_down:*`
+alert, its row in `alert_history` (dashboard → Alerts) already carries an automatic agent diagnosis
+(`kimi_analysis`) — start the post-mortem from that, and say where it was wrong. If there's a permanent lesson
+(new check, schema invariant), tell the human to add it to the repo `AGENTS.md`. Incidents repeat when the
+post-mortem is skipped.
 
 # Do NOT during an incident
 - `docker system prune` (wipes images mid-restart).
