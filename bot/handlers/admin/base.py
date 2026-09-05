@@ -18,6 +18,8 @@ ADMIN_HELP_TEXT = (
 
     "📊 <b>Быстрая инфо</b>\n"
     "• <code>/status</code> — health всех сервисов + CPU/RAM/Disk\n"
+    "• <code>/protocols</code> — какой протокол жив/лежит: пробы + аудит "
+    "панели + алерты за 6 ч (без LLM, работает и когда агент лежит)\n"
     "• <code>/stats</code> — статистика по юзерам / трафику\n"
     "• <code>/onlines</code> — кто онлайн (lastOnline панели, hy2 тоже) + трафик\n"
     "• <code>/whoami</code> — твой id + проверка прав\n"
@@ -114,6 +116,9 @@ class AdminHandlerBase(BaseHandler):
         '/backup': 'backup_db',
         # Ops — added 2026-06 (mixin: ops.py)
         '/status': 'show_status',
+        # Deterministic protocol card — added 2026-09 after the Reality
+        # outage that /status could not see (it only pings services).
+        '/protocols': 'show_protocols',
         '/whoami': 'show_whoami',
         '/onlines': 'show_onlines',
         '/find': 'find_user',

@@ -22,11 +22,28 @@ Where alerts go
 ---------------
 - TOPIC_AI in the forum group if ``TOPIC_AI`` is set (this is the
   same topic Kimi posts into — admin's already watching it).
-- Always to the super-admin's PM if the alert severity is "critical".
+- The super-admin's PM only as a FALLBACK for criticals when the forum
+  send failed or no forum is configured (house rule: never PM while the
+  group is alive).
 
 Each message carries an inline keyboard with "✅ ACK" →
 ``alert_ack:<key>``; ``AlertAckHandler`` records the ack so we
 silence that key for 6h.
+
+Agent follow-ups
+----------------
+Two alert families get an automatic AI diagnosis via ``_kick_agent``:
+
+- ``dpi_*`` — analysis stored in ``alert_history.kimi_analysis`` for
+  the dashboard only (these fire often; chat would drown).
+- ``protocol_down:*`` — critical and rare; the analysis is stored AND
+  posted to the same topic as the alert, because the operator asked for
+  auto-diagnosis on suspicion and the 2026-09-01 Reality outage showed
+  the per-protocol signal needs a human-readable follow-up right where
+  the pager fired. The agent is told to run
+  ``scripts/protocol_healthcheck.py`` first and reason only from it —
+  host-level checks (ports, iptables, containers) all said "alive"
+  during that outage.
 """
 
 from __future__ import annotations
@@ -34,6 +51,7 @@ from __future__ import annotations
 import html
 import logging
 import os
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional
@@ -70,6 +88,27 @@ class _Tracker:
 # place to review them; daily DPI summary still goes to Telegram.
 DASHBOARD_ONLY_PREFIXES = ('dpi_short:', 'dpi_hsfail:', 'dpi_rst:')
 
+# Alert families that get an agent follow-up (see module docstring).
+DPI_AGENT_PREFIXES = ('dpi_short:', 'dpi_hsfail:', 'dpi_rst:')
+PROTOCOL_AGENT_PREFIX = 'protocol_down:'
+
+# Agent budgets. The DPI call blocks the alert tick (APScheduler skips
+# the next 60-s trigger while one is running — max_instances=1), so its
+# budget is also "how long the other checks are delayed"; it keeps the
+# historical 10 min for its multi-step skill. protocol_down runs on its
+# own worker thread (the tick is not held) and is a single scripted
+# read, so it gets a tighter budget.
+DPI_AGENT_TIMEOUT_S = 600
+PROTOCOL_AGENT_TIMEOUT_S = 300
+
+# The one command the agent must run for a protocol_down alert. It lives
+# on the entry HOST (rsync target /opt/vpn-bot), where Hermes runs as
+# root — not the bot container path (/app), which the agent cannot see.
+PROTOCOL_HEALTHCHECK_CMD = 'python3 /opt/vpn-bot/scripts/protocol_healthcheck.py'
+
+# Telegram hard cap is 4096; leave headroom for the prefix + HTML.
+_FOLLOWUP_BODY_LIMIT = 3500
+
 
 class AlertManager:
     """Runs configured checks every cycle, fires Telegram alerts as needed."""
@@ -80,6 +119,12 @@ class AlertManager:
         self.db = db  # optional — alerts still fire to Telegram if missing
         self._state: Dict[str, _Tracker] = {}
         self._checks: List[Callable[[], Optional[Alert]]] = []
+        # protocol_down follow-ups run on a worker thread (see
+        # _kick_protocol_agent). One in-flight agent turn per alert key;
+        # the last spawned thread is kept so tests can join it.
+        self._agent_inflight: set = set()
+        self._agent_lock = threading.Lock()
+        self._last_agent_thread: Optional[threading.Thread] = None
 
     # ----- registration -----
 
@@ -200,43 +245,77 @@ class AlertManager:
                     {'text': '✅ Понятно', 'callback_data': f'alert_ack:{alert.key}'},
                 ]]
             }
-            # Forum topic — same place Kimi posts so admin watches one channel.
-            topic = getattr(self.config, 'TOPIC_AI', 0) or 0
-            group = getattr(self.config, 'FORUM_GROUP_ID', None)
-            sent_to_group = False
-            if topic and group:
-                try:
-                    self.bot.send_message(
-                        chat_id=group, text=text, parse_mode='HTML',
-                        message_thread_id=topic, reply_markup=kb,
-                    )
-                    sent_to_group = True
-                except Exception as e:
-                    logger.warning(f"alert: forum send failed: {e}")
-
             # PM is a FALLBACK for criticals, not a duplicate: while the
             # forum group is configured and reachable the bot must not
             # write to the admin's personal chat (house rule).
-            if alert.severity == 'critical' and not sent_to_group:
-                admin = getattr(self.config, 'SUPER_ADMIN_ID', None)
-                if admin:
-                    try:
-                        self.bot.send_message(
-                            chat_id=admin, text=text, parse_mode='HTML',
-                            reply_markup=kb,
-                        )
-                    except Exception as e:
-                        logger.warning(f"alert: PM send failed: {e}")
+            self._deliver_to_admin(
+                text, reply_markup=kb,
+                pm_fallback=(alert.severity == 'critical'),
+            )
 
         logger.info(
             f"ALERT fired: {alert.key} [{alert.severity}] "
             f"{'(dashboard-only) ' if is_dashboard_only else ''}{alert.title}"
         )
 
-        # DPI alerts get a Kimi follow-up — the analysis is stored
-        # against the alert row, not posted to chat.
-        if alert.key.startswith(('dpi_short:', 'dpi_hsfail:', 'dpi_rst:')):
+        # Agent follow-ups. Both wrappers swallow every failure — an
+        # agent outage must never take the pager down with it, and the
+        # alert row above is already persisted whatever happens here.
+        if alert.key.startswith(DPI_AGENT_PREFIXES):
             self._kick_dpi_agent(alert, alert_db_id)
+        elif alert.key.startswith(PROTOCOL_AGENT_PREFIX):
+            # The diagnosis goes where the alert went: if the alert was
+            # dashboard-only (below ALERT_TG_MIN_SEVERITY), the chat must
+            # not receive a follow-up to a headline it never saw.
+            self._kick_protocol_agent(
+                alert, alert_db_id, post_to_topic=not is_dashboard_only,
+            )
+
+    def _deliver_to_admin(self, text: str, *, reply_markup=None,
+                          pm_fallback: bool = False) -> bool:
+        """Post ``text`` where the admin watches: TOPIC_AI in the forum
+        group. The super-admin's PM is used ONLY when ``pm_fallback`` is
+        set and the forum path is unavailable (not configured, or the
+        send failed) — never as a duplicate. Returns True if anything
+        was delivered. Never raises.
+
+        ``TelegramClient.send_message`` does not raise on a Telegram-side
+        failure (HTTP error, ``ok: false`` such as a bad HTML entity or
+        the bot kicked from the group) — it logs and returns ``None``.
+        A ``None`` is therefore treated as "not delivered" too, so the
+        critical fallback still fires in exactly the cases it exists for.
+        """
+        # Forum topic — same place Kimi posts so admin watches one channel.
+        topic = getattr(self.config, 'TOPIC_AI', 0) or 0
+        group = getattr(self.config, 'FORUM_GROUP_ID', None)
+        if topic and group:
+            try:
+                res = self.bot.send_message(
+                    chat_id=group, text=text, parse_mode='HTML',
+                    message_thread_id=topic, reply_markup=reply_markup,
+                )
+                if res is not None:
+                    return True
+                logger.warning("alert: forum send returned no message (see client log)")
+            except Exception as e:
+                logger.warning(f"alert: forum send failed: {e}")
+        if not pm_fallback:
+            return False
+        admin = getattr(self.config, 'SUPER_ADMIN_ID', None)
+        if not admin:
+            return False
+        try:
+            res = self.bot.send_message(
+                chat_id=admin, text=text, parse_mode='HTML',
+                reply_markup=reply_markup,
+            )
+            if res is not None:
+                return True
+            logger.warning("alert: PM send returned no message (see client log)")
+            return False
+        except Exception as e:
+            logger.warning(f"alert: PM send failed: {e}")
+            return False
 
     def _persist_alert(self, alert: Alert) -> Optional[int]:
         """Append an alert row to alert_history. Returns the row id or None."""
@@ -255,58 +334,112 @@ class AlertManager:
             logger.warning(f"persist_alert failed for {alert.key}: {e}")
             return None
 
-    def _kick_dpi_agent(self, alert: Alert, alert_db_id: Optional[int]) -> None:
-        """Ask the OpenCode agent for a DPI-analysis follow-up and attach
-        the result to the alert row in alert_history. Result is visible in
-        the dashboard's Alerts tab — no chat noise.
+    # ----- agent follow-ups -----
+
+    def _kick_dpi_agent(self, alert: Alert, alert_db_id: Optional[int]) -> Optional[str]:
+        """DPI-analysis follow-up: dashboard-only (stored against the
+        alert row, never posted to chat — these fire often)."""
+        # 600s (10 min) gives the agent room to finish the multi-step
+        # skill: read dpi_metrics rows + grep error.log for the same
+        # hour, compare to 7d baseline, render HTML output.
+        return self._kick_agent(
+            alert, alert_db_id,
+            prompt=_dpi_agent_prompt(alert),
+            session_prefix='dpi-alert',
+            post_to_topic=False,
+            timeout=DPI_AGENT_TIMEOUT_S,
+        )
+
+    def _kick_protocol_agent(self, alert: Alert, alert_db_id: Optional[int],
+                             *, post_to_topic: bool = True
+                             ) -> Optional[threading.Thread]:
+        """protocol_down follow-up: stored AND (``post_to_topic``) posted
+        to the alert's topic. The prompt pins the agent to
+        ``protocol_healthcheck.py`` — the only reader of the two signals
+        (probe rows, panel field audit) that actually saw the 2026-09-01
+        outage.
+
+        Runs on a daemon thread. The alert tick is a single APScheduler
+        job (60 s, max_instances=1): a synchronous 300-s agent turn would
+        hold CPU/RAM/disk AND the other protocol_down checks hostage for
+        five minutes per dark protocol (two protocols dark = 10 min of
+        blind pager) — and a hung Hermes/proxy would do that on every
+        fire. The turn is bounded per key: while one is in flight for
+        ``alert.key`` a second fire of the same key is skipped (log-only)
+        rather than queued. Returns the started thread, or None when
+        nothing was started (agent not configured / already in flight).
+        Never raises.
         """
-        from bot.services.agent_factory import build_agent_client, get_agent_url
-        url = get_agent_url(self.config)
-        if not url:
-            return
         try:
-            # 600s (10 min) gives the agent room to finish the multi-step
-            # skill: read dpi_metrics rows + grep error.log for the same
-            # hour, compare to 7d baseline, render HTML output.
+            from bot.services.agent_factory import get_agent_url
+            if not get_agent_url(self.config):
+                return None
+        except Exception as e:
+            logger.warning(f"proto-alert-agent: agent factory unavailable: {e}")
+            return None
+
+        key = alert.key
+        with self._agent_lock:
+            if key in self._agent_inflight:
+                logger.info(f"proto-alert-agent: {key} already in flight — not re-kicking")
+                return None
+            self._agent_inflight.add(key)
+
+        def _worker() -> None:
+            try:
+                self._kick_agent(
+                    alert, alert_db_id,
+                    prompt=_protocol_agent_prompt(alert),
+                    session_prefix='proto-alert',
+                    post_to_topic=post_to_topic,
+                    timeout=PROTOCOL_AGENT_TIMEOUT_S,
+                )
+            except Exception as e:      # _kick_agent never raises; paranoia
+                logger.warning(f"proto-alert-agent: worker failed for {key}: {e}")
+            finally:
+                with self._agent_lock:
+                    self._agent_inflight.discard(key)
+
+        t = threading.Thread(target=_worker, daemon=True,
+                             name=f"proto-alert-{key}")
+        self._last_agent_thread = t
+        t.start()
+        return t
+
+    def _kick_agent(self, alert: Alert, alert_db_id: Optional[int], *,
+                    prompt: str, session_prefix: str,
+                    post_to_topic: bool, timeout: int) -> Optional[str]:
+        """Ask the /ai agent for a follow-up on ``alert`` and attach the
+        reply to the alert row (``alert_history.kimi_analysis``), which
+        is what the dashboard's Alerts tab renders.
+
+        ``post_to_topic`` additionally posts the reply to the topic the
+        alert itself went to. Failures (agent down, quota, timeout,
+        empty reply) are log-only — no chat notice, same as DPI: the
+        pager already fired, and ``/protocols`` is the deterministic
+        fallback the admin has regardless of the agent.
+
+        Blocking: runs on whatever thread calls it. The DPI hook calls
+        it synchronously from the alert tick (unchanged, historical);
+        the protocol hook calls it from its own worker thread.
+        Returns the reply text, or None. Never raises.
+        """
+        tag = f"{session_prefix}-agent"
+        try:
+            from bot.services.agent_factory import build_agent_client, get_agent_url
+            if not get_agent_url(self.config):
+                return None
             client = build_agent_client(
                 self.config,
                 getattr(self.config, 'DB_PATH', '') or '/var/lib/vpn-bot/bot.db',
-                default_timeout=600,
-            )
-            prompt = (
-                f"DPI ALERT fired: {alert.title}\n\n"
-                f"Severity: {alert.severity}\n"
-                f"Key: {alert.key}\n\n"
-                f"Detail: {alert.detail}\n\n"
-                f"Investigate using the dpi-analysis skill. Read the "
-                f"relevant dpi_metrics rows for the (country, ASN) "
-                f"called out above for the last 1h vs the 7d baseline, "
-                f"plus the matching error.log / access.log slices. "
-                f"Respond in HTML (no markdown fences), ~1200 chars max, "
-                f"following the skill's 'When called from an alert' format."
+                default_timeout=timeout,
             )
             # Fresh session per alert so analyses don't bleed into each
-            # other and Kimi starts with a clean slate.
-            session_key = f"dpi-alert:{alert.key}:{int(time.time())}"
+            # other and the agent starts with a clean slate.
+            session_key = f"{session_prefix}:{alert.key}:{int(time.time())}"
             reply, _ms = client.ask(
-                session_key, prompt, model=None, timeout=600, mode=None,
+                session_key, prompt, model=None, timeout=timeout, mode=None,
             )
-            if not reply:
-                return
-            # Persist against the alert row — dashboard reads from here.
-            if self.db is not None and alert_db_id is not None:
-                try:
-                    with self.db._connect() as conn:
-                        conn.execute(
-                            "UPDATE alert_history "
-                            "SET kimi_analysis = ?, kimi_at = CURRENT_TIMESTAMP "
-                            "WHERE id = ?",
-                            (reply[:8000], alert_db_id),
-                        )
-                        conn.commit()
-                except Exception as e:
-                    logger.warning(f"dpi-kimi: DB attach failed: {e}")
-            logger.info(f"dpi-agent: analysis stored for {alert.key} ({len(reply)} chars)")
         except Exception as e:
             # Quota / rate-limit / time-out are all transient operator
             # conditions, not bugs in our code. Log them at INFO so the
@@ -314,16 +447,125 @@ class AlertManager:
             msg = str(e).lower()
             if 'rate_limit' in msg or '429' in str(e):
                 logger.info(
-                    f"dpi-agent: skipping {alert.key} — provider quota exhausted "
+                    f"{tag}: skipping {alert.key} — provider quota exhausted "
                     f"(will retry on next alert tick after refresh)"
                 )
             elif '504' in str(e) or 'timed out' in msg:
                 logger.info(
-                    f"dpi-agent: skipping {alert.key} — agent timed out "
+                    f"{tag}: skipping {alert.key} — agent timed out "
                     f"(consider a larger default_timeout)"
                 )
             else:
-                logger.warning(f"dpi-agent: agent call failed for {alert.key}: {e}")
+                logger.warning(f"{tag}: agent call failed for {alert.key}: {e}")
+            return None
+
+        if not reply:
+            logger.info(f"{tag}: empty reply for {alert.key}")
+            return None
+
+        # Persist against the alert row — dashboard reads from here.
+        if self.db is not None and alert_db_id is not None:
+            try:
+                with self.db._connect() as conn:
+                    conn.execute(
+                        "UPDATE alert_history "
+                        "SET kimi_analysis = ?, kimi_at = CURRENT_TIMESTAMP "
+                        "WHERE id = ?",
+                        (reply[:8000], alert_db_id),
+                    )
+                    conn.commit()
+            except Exception as e:
+                logger.warning(f"{tag}: DB attach failed: {e}")
+        logger.info(f"{tag}: analysis stored for {alert.key} ({len(reply)} chars)")
+
+        if post_to_topic:
+            self._post_agent_followup(alert, reply)
+        return reply
+
+    def _post_agent_followup(self, alert: Alert, reply: str) -> None:
+        """Post the agent's diagnosis to the same place the alert went.
+        Never raises — a Telegram hiccup here must not be mistaken for
+        an agent failure by the caller."""
+        try:
+            head = (f"🤖 <b>Диагностика по алерту</b> "
+                    f"<code>{html.escape(alert.key)}</code>:")
+            # The agent answers in plain text — a raw '<' kills the HTML
+            # parse and the message is silently lost. Escape first, then
+            # cut, then drop a half-sliced entity at the cut point.
+            body = html.escape(reply.strip())
+            if len(body) > _FOLLOWUP_BODY_LIMIT:
+                body = body[:_FOLLOWUP_BODY_LIMIT]
+                amp = body.rfind('&')
+                if amp != -1 and ';' not in body[amp:]:
+                    body = body[:amp]
+                body += "\n… (обрезано)"
+            self._deliver_to_admin(
+                f"{head}\n\n{body}",
+                pm_fallback=(alert.severity == 'critical'),
+            )
+        except Exception as e:
+            logger.warning(f"agent follow-up post failed for {alert.key}: {e}")
+
+
+def _dpi_agent_prompt(alert: Alert) -> str:
+    """Prompt for the DPI follow-up — unchanged wording from the original
+    ``_kick_dpi_agent`` so the dpi-analysis skill keeps its contract."""
+    return (
+        f"DPI ALERT fired: {alert.title}\n\n"
+        f"Severity: {alert.severity}\n"
+        f"Key: {alert.key}\n\n"
+        f"Detail: {alert.detail}\n\n"
+        f"Investigate using the dpi-analysis skill. Read the "
+        f"relevant dpi_metrics rows for the (country, ASN) "
+        f"called out above for the last 1h vs the 7d baseline, "
+        f"plus the matching error.log / access.log slices. "
+        f"Respond in HTML (no markdown fences), ~1200 chars max, "
+        f"following the skill's 'When called from an alert' format."
+    )
+
+
+def _protocol_agent_prompt(alert: Alert) -> str:
+    """Prompt for the protocol_down follow-up.
+
+    Wording is deliberate on two counts:
+    * it names ONE first action — the healthcheck script — and forbids
+      substituting a host walk for it. On 2026-09-04 the agent, asked
+      "which protocol is down", spent 105 s on ports/iptables/containers
+      and answered "everything alive" while Reality had been dead for
+      four days; the probe table and the panel audit are the only
+      signals that saw it, and the script reads exactly those.
+    * it avoids the incident-response marker words ("инцидент",
+      "авария", "outage", "срочно"…) — ``_detect_skill_domains`` gives
+      that skill absolute priority, and its broad triage regimen is the
+      very behaviour this prompt is steering away from. Likewise
+      "сверка" rather than "аудит" ("ауди" is a code-review marker).
+      Keep it routed to vpn-ops (see the routing test).
+    """
+    # The key sits in guillemets: a bare " protocol_down…" trips the
+    # code-review " pr" marker (as does " probe-proxy" in the details).
+    return (
+        f"АЛЕРТ ПО ПРОТОКОЛУ: {alert.title}\n"
+        f"Severity: {alert.severity}\n"
+        f"Key: «{alert.key}»\n"
+        f"Детали: {alert.detail}\n\n"
+        f"Ты на entry-хосте под root. ПЕРВЫМ действием выполни ровно эту команду:\n"
+        f"  {PROTOCOL_HEALTHCHECK_CMD}\n"
+        f"Рассуждай ТОЛЬКО по её выводу. Не подменяй его самостоятельным "
+        f"обходом хоста (сокеты, файрвол, список запущенного): 2026-09-01 всё "
+        f"это показывало «живо», пока Reality четыре дня не принимал ни одного "
+        f"клиента. Падение протокола видят только пробы outbound_health и "
+        f"сверка полей клиентов панели — именно их читает скрипт.\n\n"
+        f"Формат ответа — plain text, без markdown-заборов и заголовков, "
+        f"не длиннее 900 символов, без описания процесса (никаких «проверю», "
+        f"«готово», «у меня есть всё»):\n"
+        f"ИТОГ: одна строка на протокол (reality, hy2, ws, stls, hy2t) — "
+        f"жив / лежит <сколько> / нет данных.\n"
+        f"ПОДОЗРЕВАЕМЫЙ: главная причина + улика (процитируй строку вывода скрипта).\n"
+        f"СЛЕДУЮЩАЯ КОМАНДА: одна точная команда для подтверждения или починки.\n\n"
+        f"Ничего не меняй сам: никаких рестартов, правок панели, iptables и "
+        f"записи в БД без явного OK админа. Если скрипт отсутствует или упал — "
+        f"напиши это одной строкой и остановись."
+    )
 
 
 # ====== Concrete checks ======
@@ -541,6 +783,8 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
     PROBE_MIN_SAMPLES = 15      # ignore thin windows (partial run, new deploy)
     PROBE_WINDOW_H = 3          # only look at recent rows
     PROBE_STALE_MIN = 45        # 3 missed runs at the 15-min cadence
+    PROBE_DEGRADED_OK_RATIO = 0.25   # below a quarter of the 7/10 norm…
+    PROBE_DEGRADED_MIN_SAMPLES = 25  # …sustained over ~3 runs, not one dip
 
     def _minutes_since(ts_str, now):
         """Minutes between an ISO timestamp string and ``now``."""
@@ -621,11 +865,14 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
                 severity='critical',
                 min_cycles=2,
                 title=f'Пробы не пишутся {age}',
+                # «probe-proxy» in guillemets on purpose: this text rides
+                # in the agent prompt, and a bare " probe" trips the
+                # code-review " pr" marker (see _protocol_agent_prompt).
                 detail=(
                     "HealthChecker перестал складывать результаты в "
                     "outbound_health. Пока это так, падение любого "
                     "протокола НЕ будет замечено. Смотри джобу проб в "
-                    "логах бота и контейнер probe-proxy."
+                    "логах бота и контейнер «probe-proxy»."
                 ),
             )])
 
@@ -653,9 +900,9 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
                 title=f'Все протоколы молчат ({len(measured)} шт.)',
                 detail=(
                     "Ни один протокол не отвечает — это не отдельный "
-                    "inbound, а общий канал: probe-proxy сайдкар, линк "
+                    "inbound, а общий канал: сайдкар «probe-proxy», линк "
                     "entry→exit или сам exit. Проверь контейнер "
-                    "probe-proxy и доступность exit-узла."
+                    "«probe-proxy» и доступность exit-узла."
                 ),
             )])
 
@@ -695,6 +942,33 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
                     f"(flow у Reality, password у Shadowsocks) после правки "
                     f"клиента или месячной джобы; сменился/протух SNI-dest; "
                     f"разъехались hop-порты у hy2; xray отверг конфиг."
+                ),
+            ))
+
+        # Degraded: the tunnel comes up (rows carry a latency) but almost
+        # nothing gets through. 2026-09-05: ws sat at 2/30 ok for an hour
+        # — a CF-path slowdown — and nothing paged, because "dark" needs
+        # zero alive rows. Baseline is ~7/10; a quarter of that over
+        # three runs is not a blip. warn-level (dashboard by default),
+        # same key family so the agent hook and the reset logic apply.
+        for tag, rows in samples.items():
+            if tag in dark or len(rows) < PROBE_DEGRADED_MIN_SAMPLES:
+                continue
+            ok = sum(1 for s, _l in rows if s == 'ok')
+            if ok / len(rows) >= PROBE_DEGRADED_OK_RATIO:
+                continue
+            alerts.append(Alert(
+                key=f'protocol_down:{tag}:degraded',
+                severity='warn',
+                min_cycles=3,
+                title=f'Протокол {tag} деградировал: ok {ok}/{len(rows)}',
+                detail=(
+                    f"Туннель через {tag} устанавливается, но за последние "
+                    f"{PROBE_RUNS} прогона прошло лишь {ok} из {len(rows)} проб "
+                    f"при норме ~7/10. Обычно это медленный путь (CF-PoP, "
+                    f"перегруженный exit, троттлинг UDP), а не мёртвый "
+                    f"inbound. Сравни с остальными протоколами и запусти "
+                    f"protocol_healthcheck.py."
                 ),
             ))
         return ("protocol_down:", alerts)
