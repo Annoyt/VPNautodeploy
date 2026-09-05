@@ -16,7 +16,9 @@ Run inside the vpn-bot container, redirect to the mounted config:
     docker exec vpn-bot python3 scripts/gen_probe_config.py \
         > /opt/vpn-bot/probe-proxy/config.json
     docker exec probe-proxy sing-box check -c /etc/sing-box/config.json
-    docker compose up -d --no-deps probe-proxy   # или restart, если уже запущен
+    docker compose restart probe-proxy   # config.json — bind-mount: `up -d` ничего не
+                                          # пересоздаст (спека не менялась), sing-box
+                                          # читает файл только на старте
 
 Regenerate whenever protocol env (SNI/ports/keys, HY2T_PORT) changes.
 
