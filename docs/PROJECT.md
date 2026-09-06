@@ -1,8 +1,8 @@
 # NekoVPN — обзор проекта
 
-**Last updated: 2026-09-05.** Этот файл — человекочитаемый обзор «как всё
+**Last updated: 2026-09-06.** Этот файл — человекочитаемый обзор «как всё
 устроено сейчас». Парный документ — **AGENTS.md** в корне: гайд для агентов,
-секция Deployment и хроника граблей (§8–27) — при конфликте прав AGENTS.md.
+секция Deployment и хроника граблей (§8–29) — при конфликте прав AGENTS.md.
 Живая операционная память — в memory-файлах агентских сессий.
 
 ---
@@ -66,6 +66,7 @@ bot/
 │   ├── xui_service.py       # API-first клиент обеих панелей (xui.db на entry = None)
 │   ├── vpn.py, subscription.py  # генерация ключей, сборка /sub
 │   ├── notifications.py     # шедулер джоб + _deliver_user_notice (TG или email для ext_*)
+│   ├── dpi_monitor.py       # DPIMonitor — авто-понижение каскада по сигналам (джоба каждые 10 мин)
 │   ├── email_service.py     # исходящие письма (Gmail-релей)
 │   ├── mail_intake.py       # IMAP-поллер заявок (3 мин)
 │   ├── user_lifecycle.py    # revoke_user_key — единый путь отзыва ключа
@@ -87,6 +88,7 @@ bot/
 | `email_requests` | входящие заявки с почты | дедуп по Message-ID |
 | `ai_sessions` | сессии /ai | ключи `pm:<id>` / `topic:<id>:<thread>` |
 | `dpi_metrics` | 5-мин срезы DPI-сигналов | `asn` с префиксом `AS`; country `*GLOBAL*`/`*TUNNEL*` |
+| `app_settings` | key/value тюнинги | `cascade_protocol_order` / `cascade_by_asn` / `cascade_by_country` — операторские; `cascade_auto` + `dpi_monitor_state` пишет ТОЛЬКО DPIMonitor — руками не править, откат одной командой `/cascade reset` |
 | `admin_actions`, `notification_log`, `tickets`, `ticket_messages`, `message_map`, `nodes` | аудит/дедуп/саппорт/ноды | |
 
 **Учёт трафика:** источник правды — `client_traffics` панели exit (все
@@ -115,8 +117,11 @@ xray-протоколы в одну строку на email; UNIQUE(email) ⇒ �
 `/expire`, `/addmail`, `/approve_payment`, `/broadcast`, `/backup`, `/ban`,
 `/unban`, `/reset`, `/protocols` (живость протоколов по таблице проб
 `outbound_health` + результат аудита полей клиентов панели — тот же взгляд, что
-у алерта `protocol_down`), `/ai <вопрос>` (Hermes-агент). PM-fallback при
-выключенном форуме.
+у алерта `protocol_down`), `/cascade` (действующий порядок каскада с тегами
+тиров + авто-понижения DPIMonitor с since/reason и per-ASN записями;
+`/cascade AS31133` — порядок для ASN, `/cascade reset` — снять все
+авто-понижения, `/cascade on|off` — монитор), `/ai <вопрос>` (Hermes-агент).
+PM-fallback при выключенном форуме.
 
 **Дашборд** `https://<dashboard-host>:9443/?admin_token=…` (HMAC-токен из
 `/admin`, TTL 1ч): список юзеров (онлайн-бейджи, гео, шаринг-детект), карточка
@@ -170,6 +175,18 @@ OpenRouter по `/api/v1/key` > $0.001 между запусками = крит�
   человека; `scripts/verify_panel_client_fields.py` (в контейнере бота,
   `PYTHONPATH=/app`) — аудит per-protocol полей клиентов панели, гоняется как
   post-deploy smoke в `deploy_to_entry.sh`.
+- **Фидбэк-петля (с 2026-09-06, IMPROVEMENT_PLAN A1)**: сигналы (`outbound_health`
+  DARK/DEGRADED, Reality handshake-fail per-ASN в `dpi_metrics`, шторм
+  `hy2_auth_log` у одного юзера → его `users.last_asn`, ≥2 отчёта «не работает»
+  с одного ASN за 6 ч) → **DPIMonitor** (`services/dpi_monitor.py`, джоба
+  каждые 10 мин; гистерезис 2 плохих оценки → понижение, 6 хороших → возврат,
+  ≥30 мин между сменами, ≤2 смены за прогон, все пробы тёмные разом = ничего)
+  → `app_settings.cascade_auto` → `get_cascade_order` ставит понижённые
+  протоколы **в конец, не удаляя** → `/sub`, карточка ключа, `?format=links`.
+  Операторские `cascade_protocol_order` / `cascade_by_asn` всегда старше авто
+  (решают базовый порядок, авто только переставляет внутри него). Каждая смена
+  — строка в `admin_actions` + пост в топик AI; `/cascade` показывает, что и
+  почему понижено, `/cascade reset` снимает всё одной командой.
 
 ## 8. Тесты — 4 уровня
 
@@ -207,9 +224,9 @@ git commit …                     # штамп берётся из HEAD
 
 ## 10. Статус и планы
 
-Активный roadmap — `docs/IMPROVEMENT_PLAN.md` (DPI-фидбэк-петля, зонды,
-lockdown-режим). Multi-node cluster-код (`bot/core/cluster/`) написан, но в
+Активный roadmap — `docs/IMPROVEMENT_PLAN.md` (lockdown-режим, CI, охват
+фидбэк-петли A1.2 — сама петля замкнута DPIMonitor'ом 2026-09-06). Multi-node cluster-код (`bot/core/cluster/`) написан, но в
 проде один exit + DE-резерв; авто-провижн нод через API провайдера — «когда-нибудь»
 (у AdminVPS API есть, у BitCloud нет).
 
-Хронология всех инцидентов и решений: AGENTS.md §8–27.
+Хронология всех инцидентов и решений: AGENTS.md §8–29.

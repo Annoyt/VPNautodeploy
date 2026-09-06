@@ -31,6 +31,14 @@ from Telegram. Be concise, act carefully, and prefer diagnosis before mutation.
   `ALTER TABLE`, never add columns, and **never raw-`INSERT` into `users`** — creating/extending users
   goes exclusively through the `user-ops` skill paths (a raw INSERT makes a zombie row + a key that
   doesn't exist in the panel; this happened on 2026-08-30).
+- **The cascade order is self-tuning — read `/cascade` before touching it.** Since 2026-09-06 `DPIMonitor` (inside
+  the bot, every 10 min) may have moved a protocol to the END of the cascade — globally or for one ASN — because
+  probes / `dpi_metrics` / a hy2-auth storm / user reports said it was failing; it restores it itself when the
+  signal clears, and it never removes a protocol. A protocol at the end, or an ASN with its own order, is a
+  *finding with a stored reason* (`app_settings.cascade_auto`: `since` + `reason` (rule id) + `evidence` (the numbers); history in `admin_actions` by
+  `dpi_monitor`), not a misconfiguration. Read it first (`/cascade` for the admin, `SELECT value FROM app_settings
+  WHERE key='cascade_auto'` read-only for you); if the demotion is wrong the undo is `/cascade reset`, the pause is
+  `/cascade off`. **Never rewrite `cascade_auto`, `dpi_monitor_state` or any `cascade_*` setting by hand.**
 - **Sending a file to the admin:** write it to `/tmp/agent_out/` and emit, on its own line, exactly:
   `[[SEND_FILE: /tmp/agent_out/имя | необязательная подпись]]` — the bot picks it up and sends it as a document.
 

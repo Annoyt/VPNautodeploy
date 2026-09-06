@@ -1868,6 +1868,24 @@ class NotificationService:
             id='outbound_health_cleanup',
             replace_existing=True,
         )
+        # Every DPI_MONITOR_INTERVAL_MIN (10) min: DPIMonitor turns the
+        # probe/DPI telemetry into cascade moves (auto-demote with
+        # hysteresis, auto-restore) — the A1 loop that was still open when
+        # the 2026-09-01 Reality outage sat in outbound_health for four
+        # days. Always registered: the on/off switch is app_settings
+        # (dpi_monitor_enabled, flipped by /cascade on|off) with the env
+        # flag as its default, so neither disabling nor re-enabling needs
+        # a restart; a disabled monitor costs one get_setting per tick.
+        try:
+            dpi_interval = max(1, int(getattr(self.config, 'DPI_MONITOR_INTERVAL_MIN', 10)))
+        except (TypeError, ValueError):
+            dpi_interval = 10
+        self.scheduler.add_job(
+            self._dpi_monitor_sync,
+            IntervalTrigger(minutes=dpi_interval),
+            id='dpi_monitor',
+            replace_existing=True,
+        )
         # Daily DPI summary at 09:00 server time (UTC). Posts a numeric
         # summary in TOPIC_AI and, if OPENCODE_URL is set, hands off
         # to the OpenCode agent for the dpi-analysis follow-up.
@@ -2064,6 +2082,22 @@ class NotificationService:
             logger.debug(f"dpi_collect: wrote {len(rows)} rows at {ts}")
         except Exception as e:
             logger.exception(f"dpi_collect failed: {e}")
+
+    def _dpi_monitor_sync(self):
+        """Every 10 min: DPIMonitor.run_once() — auto-demote/restore
+        cascade protocols from the telemetry (bot/services/dpi_monitor.py).
+
+        Thin on purpose: the monitor owns its guards (enabled flag, stale
+        probes, all-dark) and its reporting (admin_actions + one topic
+        message). This wrapper only guarantees that a failure inside it
+        is a log line, never a dead scheduler job — the class of bug the
+        monitor exists to catch must not be able to kill the monitor.
+        """
+        try:
+            from bot.services.dpi_monitor import DPIMonitor
+            DPIMonitor(self.db, self.config, self.bot).run_once()
+        except Exception as e:
+            logger.exception(f"dpi_monitor tick failed: {e}")
 
     def _dpi_hy2_rows(self, ts: str) -> list:
         """Synthesise dpi_metrics rows for Hy2 from hy2_auth_log.

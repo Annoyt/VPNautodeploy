@@ -2062,11 +2062,15 @@ class WebAppServer:
         labels and checkboxes without hard-coding them. ``order`` is
         the operator's persisted view (kept for backward compat as a
         bare list of enabled names); ``config`` is the new
-        per-protocol on/off list the editor talks to."""
+        per-protocol on/off list the editor talks to; ``auto`` is
+        DPIMonitor's read-only overlay (what it sank to the tail and
+        why) — undo lives in the bot (/cascade reset), not here."""
         if not self._validate_admin(request):
             return web.json_response({'error': 'Unauthorized'}, status=401)
         from bot.handlers.callbacks.user import MyKeyAnswerHandler
         from bot.services.notifications import NotificationService
+        from bot.handlers.admin.ops import (
+            load_cascade_auto, load_dpi_monitor_state, dpi_monitor_enabled)
         cfg = MyKeyAnswerHandler.get_cascade_config(self.db)
         order = [c['name'] for c in cfg if c.get('enabled')]
         labels = NotificationService.PROTOCOL_LABELS_RU
@@ -2079,11 +2083,24 @@ class WebAppServer:
                 'desc': desc,
                 'tier': MyKeyAnswerHandler.PROTOCOL_TIER.get(name, 'paid'),
             })
+        # ``config``/``order`` stay the RAW operator order — that is
+        # what the editor edits and saves back. The monitor's demotions
+        # are reported separately so the editor can show "users get ws
+        # last right now" without the operator's saved order drifting.
+        # Same tolerant readers as /cascade: bad JSON → empty, never 500.
+        auto = load_cascade_auto(self.db)
+        last_run = load_dpi_monitor_state(self.db).get('last_run')
         return web.json_response({
             'config': cfg,
             'order': order,
             'catalog': catalog,
             'default': list(MyKeyAnswerHandler.DEFAULT_CASCADE_ORDER),
+            'auto': {
+                'enabled': dpi_monitor_enabled(self.db, self.config),
+                'global': auto['global'],
+                'asn': auto['asn'],
+                'last_run': last_run if isinstance(last_run, str) else None,
+            },
         })
 
     async def handle_admin_cascade_order_set(self, request: web.Request) -> web.Response:

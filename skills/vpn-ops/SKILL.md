@@ -2,7 +2,7 @@
 name: vpn-ops
 description: VPN infrastructure ops — Xray nodes, X-UI panel, traffic, client configs, per-protocol liveness, and entry↔exit ingress diagnostics
 type: prompt
-whenToUse: User asks about VPN nodes, server health, client configs, X-UI, traffic, broken keys, which protocol is down (какой протокол не работает / что с reality|hy2|ws|stls), or anything that touches entry/exit ingress
+whenToUse: User asks about VPN nodes, server health, client configs, X-UI, traffic, broken keys, which protocol is down (какой протокол не работает / что с reality|hy2|ws|stls), or anything that touches entry/exit ingress, or why the cascade / protocol order changed (каскад, порядок протоколов, почему X в конце)
 ---
 
 # Topology (see AGENTS.md for the full table)
@@ -150,6 +150,41 @@ Rules that make or break this repair:
   ranges; the hysteria2 URI `mport` wants a **comma-separated string**. Never copy one format into the other.
 - UDP-native traffic (Telegram calls) routes via the `calls` selector (Reality/Hy2/Hy2t) — RU-direct TCP with
   a QUIC:443 carve-out is intentional (VK banner), don't "fix" it.
+
+# Cascade is self-tuning (DPIMonitor, since 2026-09-06)
+
+The protocol order users get from `/sub`, the key card and `?format=links` is **no longer only the operator's
+setting**. `bot/services/dpi_monitor.py` runs inside the bot every 10 min and moves a protocol to the END of the
+order (it never removes one) when the data says it is failing: probes DARK/DEGRADED → globally; a Reality
+handshake-fail storm in `dpi_metrics` for one ASN, a hy2-auth reconnect storm from a user of that ASN, or ≥2
+"не работает" reports from one ASN → for that ASN only. It restores the protocol by itself after ~1 h of clean
+signals. So, BEFORE you "fix" an order that looks wrong:
+
+1. **A protocol at the end, or an ASN with its own order, is a finding with a stored reason — read it first.** The
+   admin runs `/cascade` (or `/cascade AS31133`) in Telegram; you read the same thing from bot.db, read-only:
+   ```sh
+   docker exec vpn-bot python3 -c "
+   import sqlite3
+   c = sqlite3.connect('/var/lib/vpn-bot/bot.db')
+   for k in ('cascade_protocol_order','cascade_by_asn','cascade_by_country','cascade_auto','dpi_monitor_state','dpi_monitor_enabled'):
+       r = c.execute('SELECT value FROM app_settings WHERE key = ?', (k,)).fetchone(); print(k, '=', r[0] if r else None)
+   "
+   ```
+   `cascade_auto` holds every ACTIVE auto-demotion (`global` + per-`asn`) with `since`, `reason` (the rule id:
+   `probe_dark` / `probe_degraded` / `reality_asn` / `udp_storm_asn` / `user_reports_asn`) and `evidence` (the
+   human line with the numbers);
+   `admin_actions` rows by `dpi_monitor` (`cascade_auto_demote` / `cascade_auto_restore`) are the history; the AI
+   topic got one message per run that changed something.
+2. A demotion with a reason means: go check THAT protocol (STEP 0 healthcheck, Reality section above) — the monitor
+   found the problem before the user did. Don't reorder around it.
+3. Wrong demotion (the signal was noise, the protocol is fine)? The one-command undo is **`/cascade reset`** (admin,
+   in Telegram) — it clears `cascade_auto` + `dpi_monitor_state` and logs the action; `/cascade off` pauses the
+   monitor without clearing. Propose those to the admin. **Never `UPDATE`/`DELETE` `cascade_auto`,
+   `dpi_monitor_state` or any `cascade_*` key by hand** — a hand-edited JSON is exactly what the monitor replaced,
+   and the next run will not know what you meant (it may restore, re-demote, or count your edit as its own).
+4. The operator's `cascade_protocol_order` / `cascade_by_asn` always win on the BASE order; the monitor only
+   reorders inside it. "Pin protocol X first regardless of signals" is `/cascade off` **then** `/cascade reset`
+   (off only stops NEW changes — demotions already in effect stay until reset), not an edit.
 
 # Traffic & quotas
 

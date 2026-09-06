@@ -300,6 +300,25 @@ class Settings:
         except ValueError:
             self.TOPIC_AI = 0
 
+        # DPIMonitor (bot/services/dpi_monitor.py): auto-demotes failing
+        # protocols in the cascade from probe/DPI telemetry. On by default
+        # — the 2026-09-01 Reality outage sat in the tables for four days
+        # with nothing acting on them. The env flag is only the DEFAULT:
+        # app_settings.dpi_monitor_enabled (/cascade on|off) overrides it
+        # at runtime without a restart. '1'/'0' (true/false also accepted).
+        self.DPI_MONITOR_ENABLED: bool = (
+            (os.getenv('DPI_MONITOR_ENABLED', '1') or '1').strip().lower()
+            not in ('0', 'false', 'no', 'off')
+        )
+        # Evaluation cadence, minutes. The hysteresis numbers in the
+        # monitor (demote after 2 bad, restore after 6 good) are
+        # calibrated for 10; changing this rescales them in wall time.
+        try:
+            self.DPI_MONITOR_INTERVAL_MIN: int = max(
+                1, int(os.getenv('DPI_MONITOR_INTERVAL_MIN', '10') or '10'))
+        except ValueError:
+            self.DPI_MONITOR_INTERVAL_MIN = 10
+
     def validate(self) -> list:
         """Validate settings, return list of errors"""
         errors = []
