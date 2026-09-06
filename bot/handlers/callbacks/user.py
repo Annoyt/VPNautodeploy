@@ -644,6 +644,9 @@ class MyKeyAnswerHandler(BaseCallbackHandler):
     SETTING_KEY = 'cascade_protocol_order'
     COUNTRY_SETTING_KEY = 'cascade_by_country'
     ASN_SETTING_KEY = 'cascade_by_asn'
+    # Written ONLY by bot/services/dpi_monitor.py (auto-demotions with
+    # hysteresis); the operator clears it with /cascade reset.
+    AUTO_SETTING_KEY = 'cascade_auto'
 
     # Hardcoded per-country defaults. Used when the operator hasn't
     # set ``cascade_by_country`` and we know the user's last_country.
@@ -780,12 +783,57 @@ class MyKeyAnswerHandler(BaseCallbackHandler):
         return cls.COUNTRY_CASCADE_DEFAULTS.get(country)
 
     @classmethod
+    def get_auto_demotions(cls, db, asn: Optional[str] = None) -> set:
+        """Protocols DPIMonitor currently holds at the end of the cascade:
+        the union of the global set and this ASN's set from
+        ``app_settings.cascade_auto`` (``{"global": {"ws": {...}},
+        "asn": {"AS31133": {"reality": {...}}}}``).
+
+        Tolerant by design — bad JSON, a hand-edited blob, an unknown
+        protocol name or a Mock db all collapse to "nothing demoted":
+        this runs inside /sub and the key card, where an exception would
+        take the user's config down with it (2026-09-01 lesson: the
+        failure mode to avoid is the silent one, and an empty set here
+        is loud in /cascade, not silent).
+        """
+        try:
+            raw = db.get_setting(cls.AUTO_SETTING_KEY) if db else None
+        except Exception as e:          # a db double whose get_setting raises
+            logger.warning(f"cascade_auto read failed: {e}")
+            return set()
+        if not isinstance(raw, str) or not raw.strip():
+            return set()
+        try:
+            import json
+            parsed = json.loads(raw)
+        except (ValueError, TypeError) as e:
+            logger.warning(f"bad cascade_auto JSON: {e}")
+            return set()
+        if not isinstance(parsed, dict):
+            return set()
+        out = set()
+        global_part = parsed.get('global')
+        if isinstance(global_part, dict):
+            out.update(p for p in global_part
+                       if isinstance(p, str) and p in cls.PROTOCOL_METHOD_MAP)
+        if asn and isinstance(asn, str):
+            asn_part = parsed.get('asn')
+            if isinstance(asn_part, dict):
+                mine = asn_part.get(asn.strip().upper())
+                if isinstance(mine, dict):
+                    out.update(p for p in mine
+                               if isinstance(p, str) and p in cls.PROTOCOL_METHOD_MAP)
+        return out
+
+    @classmethod
     def get_cascade_order(
         cls,
         db,
         user=None,
         country: Optional[str] = None,
         asn: Optional[str] = None,
+        *,
+        apply_auto: bool = True,
     ) -> tuple:
         """Effective rotation: enabled-only protocols filtered by tier
         and (if known) ASN/country tuned.
@@ -797,11 +845,20 @@ class MyKeyAnswerHandler(BaseCallbackHandler):
            ``COUNTRY_CASCADE_DEFAULTS``) — broad region default.
         3. Global enabled cascade (``cascade_protocol_order``).
 
+        Then DPIMonitor's auto-demotions (``cascade_auto``, global ∪ the
+        effective ASN's) are applied as a STABLE PARTITION: demoted
+        protocols move to the end, everything keeps its relative order,
+        nothing is dropped. The operator's explicit choice above still
+        decides the base order — auto only reorders within it — and
+        ``apply_auto=False`` returns that raw operator order (the
+        dashboard editor must show what the operator saved, not what
+        the monitor did to it this hour).
+
         Explicit ``asn=`` / ``country=`` args win over the user's
         stored ``last_asn`` / ``last_country`` — used by /sub which
-        knows the request-time IP. Tier filtering applies after
-        ordering. Passing ``user=None`` returns the unrestricted set,
-        used by the dashboard preview.
+        knows the request-time IP. Tier filtering applies last, after
+        ordering and after the auto merge. Passing ``user=None``
+        returns the unrestricted set, used by the dashboard preview.
         """
         cfg = cls.get_cascade_config(db)
         enabled_set = {c['name'] for c in cfg if c.get('enabled')}
@@ -830,6 +887,18 @@ class MyKeyAnswerHandler(BaseCallbackHandler):
                     ordered.append(n); seen.add(n)
         else:
             ordered = enabled_default_order
+
+        # DPIMonitor's verdicts: stable partition, demoted to the tail.
+        # Reads happen here (not earlier) so the base order above is
+        # purely the operator's and the tier filter below still runs
+        # last — a free user sees the same demotion a paid one does.
+        if apply_auto:
+            demoted = cls.get_auto_demotions(db, effective_asn)
+            if demoted:
+                ordered = (
+                    [n for n in ordered if n not in demoted]
+                    + [n for n in ordered if n in demoted]
+                )
 
         if user is None:
             return tuple(ordered)

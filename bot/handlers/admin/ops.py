@@ -1,4 +1,4 @@
-"""Operational admin commands: status, protocols, find, recent, repair, topics, quota, expire, whoami.
+"""Operational admin commands: status, protocols, cascade, find, recent, repair, topics, quota, expire, whoami.
 
 These cover the gap between the dashboard (rich UI, mouse-friendly) and
 inline ops where you just need a quick text answer in the same forum
@@ -7,8 +7,10 @@ starting with abc", "set @ivan's quota to 50", "which protocol is dead".
 """
 
 import html
+import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -112,6 +114,130 @@ def _format_probe_line(tag: str, info: Optional[dict], now: datetime,
     if info['last_ok'] * 2 < info['last_n']:
         return f"🟡 <b>{tag}</b> — {rate}, деградация"
     return f"🟢 <b>{tag}</b> — {rate}"
+
+
+# ----- /cascade helpers -----
+# app_settings keys shared with bot/services/dpi_monitor.py (the writer)
+# and MyKeyAnswerHandler.get_auto_demotions (the reader on the /sub
+# path). The command and the dashboard endpoint parse the keys HERE,
+# not through the monitor: the operator must see the truth — and be
+# able to undo it — precisely when the monitor module is the thing
+# that is broken or missing. The JSON shapes are the contract:
+#   cascade_auto      {"global": {proto: {"since", "reason", "evidence"}},
+#                      "asn": {"AS31133": {proto: {...}}}}
+#                     reason = the rule id the monitor keys hysteresis on
+#                     (probe_dark, reality_asn, …); evidence = the human
+#                     sentence. The card shows evidence — an operator
+#                     reading "probe_dark" at 03:00 learns nothing.
+#   dpi_monitor_state {"targets": {...}, "last_run": iso, "runs": int}
+#   dpi_monitor_enabled  "1" / "0" (absent = Settings.DPI_MONITOR_ENABLED)
+CASCADE_AUTO_KEY = 'cascade_auto'
+DPI_MONITOR_STATE_KEY = 'dpi_monitor_state'
+DPI_MONITOR_ENABLED_KEY = 'dpi_monitor_enabled'
+
+
+def _load_json_dict(db, key: str) -> dict:
+    """A JSON-object setting, or ``{}`` when missing / not JSON / not
+    an object. The keys are hand-editable in an emergency, so a typo
+    in one must degrade to "nothing auto-demoted", never take the
+    operator surface (or the /sub path) down with it."""
+    try:
+        raw = db.get_setting(key)
+    except Exception as e:      # get_setting already swallows sqlite errors; mocks may not
+        logger.warning(f"get_setting({key!r}) failed: {e}")
+        return {}
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        logger.warning(f"{key}: not valid JSON, treating as empty")
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def load_cascade_auto(db) -> dict:
+    """Effective DPIMonitor demotions, normalised so every level is a
+    dict of dicts: ``{'global': {proto: meta}, 'asn': {'AS…': {proto:
+    meta}}}``. ASN keys are upper-cased and ASNs with no protocols are
+    dropped (the monitor may leave an empty map behind after a
+    restore)."""
+    raw = _load_json_dict(db, CASCADE_AUTO_KEY)
+
+    def _protos(m) -> dict:
+        if not isinstance(m, dict):
+            return {}
+        return {str(p): (v if isinstance(v, dict) else {}) for p, v in m.items()}
+
+    per_asn = raw.get('asn')
+    asn_map = {}
+    if isinstance(per_asn, dict):
+        for a, m in per_asn.items():
+            protos = _protos(m)
+            if protos:
+                asn_map[str(a).upper()] = protos
+    return {'global': _protos(raw.get('global')), 'asn': asn_map}
+
+
+def load_dpi_monitor_state(db) -> dict:
+    return _load_json_dict(db, DPI_MONITOR_STATE_KEY)
+
+
+def _truthy(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() not in ('0', 'false', 'off', 'no', '')
+
+
+def dpi_monitor_enabled(db, config) -> bool:
+    """Mirror of DPIMonitor.is_enabled (keep in step — the card and the
+    job must never disagree about whether the monitor acts): the
+    app_settings flag wins because /cascade on|off writes it, and a set
+    flag means ON only when it is exactly ``'1'`` (a hand-typed 'true'
+    keeps the job off, so the card must say off too); the env default
+    (Settings.DPI_MONITOR_ENABLED, bool or '1'/'0'/true/false) applies
+    until the operator has ever toggled; absent both = enabled."""
+    try:
+        raw = db.get_setting(DPI_MONITOR_ENABLED_KEY)
+    except Exception:
+        raw = None
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip() == '1'
+    return _truthy(getattr(config, 'DPI_MONITOR_ENABLED', '1'))
+
+
+def _why(meta: dict) -> str:
+    """Human reason of one demotion: the monitor's ``evidence`` sentence,
+    falling back to ``reason`` (the rule id) for a hand-written or
+    older entry, ``?`` when neither is there."""
+    if not isinstance(meta, dict):
+        return '?'
+    return str(meta.get('evidence') or meta.get('reason') or '?')
+
+
+def _fmt_since(iso, now: datetime) -> str:
+    """``HH:MM UTC`` for today, ``DD.MM HH:MM UTC`` when older — a
+    demotion that has been in effect for days must read as such, not
+    look like it happened this afternoon."""
+    s = str(iso or '')
+    if len(s) < 16:
+        return s or '?'
+    hhmm = s[11:16]
+    if s[:10] == now.strftime('%Y-%m-%d'):
+        return f"{hhmm} UTC"
+    return f"{s[8:10]}.{s[5:7]} {hhmm} UTC"
+
+
+def _partition_demoted(order, demoted) -> list:
+    """Stable partition: healthy first, auto-demoted after, relative
+    order preserved inside each half — the same merge
+    MyKeyAnswerHandler.get_cascade_order applies on the /sub path
+    (never removes a protocol, only sinks it). Idempotent, so the card
+    is right whether or not the order it starts from already had the
+    merge applied."""
+    order = list(order)
+    return ([p for p in order if p not in demoted]
+            + [p for p in order if p in demoted])
 
 
 class AdminOpsMixin(AdminHandlerBase):
@@ -253,6 +379,9 @@ class AdminOpsMixin(AdminHandlerBase):
     PROTO_MIN_SAMPLES = 15      # fewer rows than this cannot be "DOWN"
     PROTO_ALERT_HOURS = 6       # alert_history lookback
     PROTO_AUDIT_TIMEOUT_S = 40  # panel-audit subprocess budget
+    # /cascade: the monitor ticks every 10 min (DPI_MONITOR_INTERVAL_MIN);
+    # three missed ticks + slack means the job is not running.
+    CASCADE_MONITOR_STALE_MIN = 35
 
     def show_protocols(self, chat_id: str, args: list) -> "threading.Thread":
         """Deterministic per-protocol health card — no LLM involved, so
@@ -488,6 +617,277 @@ class AdminOpsMixin(AdminHandlerBase):
             out.append(f"• <code>{when}</code> {html.escape(str(key))} — "
                        f"{html.escape(str(title))}{flags}")
         return out
+
+    # ----- /cascade -----
+
+    CASCADE_USAGE = (
+        "🔁 <b>/cascade</b> — каскад протоколов и авто-понижения DPIMonitor\n"
+        "• <code>/cascade</code> — эффективный глобальный порядок + все авто-понижения\n"
+        "• <code>/cascade AS31133</code> — порядок, который получают юзеры этого ASN\n"
+        "• <code>/cascade reset</code> — снять все авто-понижения (streaks обнуляются)\n"
+        "• <code>/cascade off</code> / <code>/cascade on</code> — пауза / запуск монитора"
+    )
+
+    def show_cascade(self, chat_id: str, args: list) -> None:
+        """Operator surface of the DPIMonitor feedback loop
+        (IMPROVEMENT_PLAN A1). The monitor sinks protocols in the
+        user-facing cascade on its own — probe DARK/DEGRADED, per-ASN
+        Reality handshake failures, hy2 reconnect storms, clustered
+        failure reports — and restores them with hysteresis. This is
+        where the operator sees what it did and undoes it in one move:
+
+          /cascade            effective global order + every auto-demotion
+          /cascade AS31133    the order users of that ASN receive
+          /cascade reset      drop all auto-demotions and the streaks
+          /cascade off | on   pause / resume the monitor
+
+        Pure app_settings reads, answers on the polling thread in
+        milliseconds — no subprocess, no LLM, no worker thread. The
+        2026-09-01 flow-wipe ran four days because nobody could see
+        what the monthly job had done; an automatic actor without a
+        one-command view and undo is not shipped here.
+        """
+        sub = (args[0] if args else '').strip()
+        low = sub.lower()
+        try:
+            if not sub:
+                text = self._cascade_overview()
+            elif low == 'reset':
+                text = self._cascade_reset()
+            elif low in ('on', 'off'):
+                text = self._cascade_toggle(low == 'on')
+            elif re.fullmatch(r'(as)?\d{1,10}', low):
+                text = self._cascade_for_asn('AS' + low.lstrip('as'))
+            else:
+                text = self.CASCADE_USAGE
+        except Exception as e:      # must always answer — this is the undo path
+            logger.exception("/cascade failed")
+            text = f"❌ /cascade: {html.escape(str(e))[:200]}"
+        if len(text) > 3900:  # Telegram cap is 4096
+            # Cut on a line boundary: every line closes the tags it
+            # opens, a cut inside ``<b>…`` makes Telegram reject the
+            # whole message and the operator gets no card at all.
+            cut = text.rfind('\n', 0, 3900)
+            text = text[:cut if cut > 0 else 3900] + "\n…(обрезано)"
+        self._send(chat_id=chat_id, text=text, parse_mode='HTML')
+
+    def _cascade_overview(self) -> str:
+        from bot.handlers.callbacks.user import MyKeyAnswerHandler as MK
+        now = datetime.utcnow()
+        auto = load_cascade_auto(self.db)
+        state = load_dpi_monitor_state(self.db)
+        enabled = dpi_monitor_enabled(self.db, self.config)
+
+        lines = ["🔁 <b>Каскад протоколов</b>",
+                 self._monitor_status_line(enabled, state, now), ""]
+        # The operator's enabled global order (user=None = before the
+        # tier filter) with the monitor's global demotions sunk to the
+        # tail. Partitioning here as well as in get_cascade_order keeps
+        # the card truthful during a partial deploy of either side.
+        base = MK.get_cascade_order(self.db)
+        order = _partition_demoted(base, set(auto['global']))
+        lines.append("<b>Глобальный порядок</b> (эффективный, до тир-фильтра):")
+        lines.extend(self._order_lines(order, auto['global'], now, MK))
+        disabled = [c['name'] for c in MK.get_cascade_config(self.db)
+                    if not c.get('enabled')]
+        if disabled:
+            lines.append(f"<i>выключены оператором: "
+                         f"{html.escape(', '.join(disabled))}</i>")
+        lines.append("")
+        lines.extend(self._asn_auto_lines(auto['asn'], now))
+        if not enabled and (auto['global'] or auto['asn']):
+            lines.append("")
+            lines.append("⚠️ монитор выключен, но авто-понижения продолжают "
+                         "действовать — снять: /cascade reset")
+        lines.append("")
+        lines.append("<i>/cascade AS31133 · /cascade reset · /cascade off|on</i>")
+        return "\n".join(lines)
+
+    def _monitor_status_line(self, enabled: bool, state: dict, now: datetime) -> str:
+        flag = "🟢 вкл" if enabled else "⏸ выкл"
+        last = state.get('last_run')
+        if last:
+            age = _minutes_since(last, now)
+            when = (f"последний прогон {str(last)[11:16]} UTC "
+                    f"({_humanize_minutes(age)} назад)")
+            if enabled and age > self.CASCADE_MONITOR_STALE_MIN:
+                when += " ⚠️ давно не запускался"
+        else:
+            when = "ещё не запускался"
+        runs = state.get('runs')
+        runs_s = f", прогонов: {runs}" if isinstance(runs, int) else ""
+        return f"монитор: {flag} · {when}{runs_s}"
+
+    def _order_lines(self, order, demoted: dict, now: datetime, MK) -> list:
+        """``1. hy2t (paid)`` per protocol; a demoted one carries the
+        monitor's reason and since-when. ``demoted[proto]`` may carry a
+        ``scope`` (the ASN view mixes global and per-ASN entries)."""
+        out = []
+        for i, p in enumerate(order, 1):
+            tier = MK.PROTOCOL_TIER.get(p, 'paid')
+            line = f"{i}. <b>{html.escape(p)}</b> ({tier})"
+            meta = demoted.get(p)
+            if meta is not None:
+                scope = meta.get('scope')
+                tag = f" ({html.escape(str(scope))})" if scope else ""
+                reason = html.escape(_why(meta))
+                line += (f" ⬇︎ авто{tag}: {reason}, "
+                         f"с {_fmt_since(meta.get('since'), now)}")
+            out.append(line)
+        if not out:
+            out.append("<i>пусто — все протоколы выключены оператором</i>")
+        return out
+
+    def _asn_auto_lines(self, per_asn: dict, now: datetime) -> list:
+        if not per_asn:
+            return ["<b>Авто по ASN:</b> нет"]
+        out = [f"<b>Авто по ASN</b> ({len(per_asn)}):"]
+        for asn in sorted(per_asn):
+            org = self._asn_org(asn)
+            label = html.escape(asn) + (f" ({html.escape(org)})" if org else "")
+            items = [
+                f"{html.escape(p)} ⬇︎ {html.escape(_why(m))}, "
+                f"с {_fmt_since(m.get('since'), now)}"
+                for p, m in per_asn[asn].items()
+            ]
+            out.append(f"• {label} — " + "; ".join(items))
+        return out
+
+    def _asn_org(self, asn: str) -> Optional[str]:
+        """Latest as_org GeoIP recorded for this ASN. dpi_metrics is the
+        only table with a populated asn column (hy2_auth_log.asn is
+        NULL on every row — the auth call arrives from the hysteria
+        server, not the client). Best effort: None when unknown."""
+        try:
+            with self.db._connect() as conn:
+                row = conn.execute(
+                    "SELECT as_org FROM dpi_metrics WHERE asn = ? "
+                    "AND as_org IS NOT NULL AND as_org != '' "
+                    "ORDER BY id DESC LIMIT 1", (asn,),
+                ).fetchone()
+            return str(row[0]) if row and row[0] else None
+        except Exception:
+            return None
+
+    def _users_with_asn(self, asn: str) -> Optional[int]:
+        """How many users a per-ASN entry reaches (users.last_asn is set
+        on /sub fetch only — most of the base is still NULL, which is
+        why global demotions exist at all)."""
+        try:
+            with self.db._connect() as conn:
+                return int(conn.execute(
+                    "SELECT COUNT(*) FROM users WHERE UPPER(last_asn) = ?",
+                    (asn,)).fetchone()[0])
+        except Exception:
+            return None
+
+    def _cascade_for_asn(self, asn: str) -> str:
+        from bot.handlers.callbacks.user import MyKeyAnswerHandler as MK
+        now = datetime.utcnow()
+        auto = load_cascade_auto(self.db)
+        own = auto['asn'].get(asn, {})
+        # Global demotions apply to every ASN; the ASN's own entry wins
+        # the label when both name the same protocol.
+        demoted = {p: dict(m, scope='глобально') for p, m in auto['global'].items()}
+        demoted.update({p: dict(m, scope=asn) for p, m in own.items()})
+        base = MK.get_cascade_order(self.db, asn=asn)
+        order = _partition_demoted(base, set(demoted))
+
+        org = self._asn_org(asn)
+        head = f"🔁 <b>Каскад для {html.escape(asn)}</b>"
+        if org:
+            head += f" ({html.escape(org)})"
+        src = ("оператор (cascade_by_asn)" if MK.get_asn_cascade(self.db, asn)
+               else "глобальный (override для ASN не задан)")
+        lines = [head, f"базовый порядок: {src}"]
+        n_users = self._users_with_asn(asn)
+        if n_users is not None:
+            lines.append(f"юзеров с этим ASN: {n_users}")
+        lines.append("")
+        lines.extend(self._order_lines(order, demoted, now, MK))
+        lines.append("")
+        lines.append("авто для этого ASN: "
+                     + (html.escape(", ".join(sorted(own))) if own else "нет"))
+        if auto['global']:
+            lines.append("глобальные авто (действуют и здесь): "
+                         + html.escape(", ".join(sorted(auto['global']))))
+        return "\n".join(lines)
+
+    def _cascade_reset(self) -> str:
+        before = load_cascade_auto(self.db)
+        cleared = [f"{p} (глобально)" for p in before['global']]
+        cleared += [f"{asn}: {p}" for asn, m in sorted(before['asn'].items())
+                    for p in m]
+        admin_id = self._caller_admin_id()
+        how = self._reset_auto_state(admin_id)
+        details = (("cleared: " + ", ".join(cleared)) if cleared
+                   else "nothing was demoted") + f" [{how}]"
+        self.db.log_admin_action(admin_id, 'cascade_auto_reset', None, details)
+        if cleared:
+            lines = ["✅ <b>Авто-понижения сняты</b>",
+                     "снято: " + html.escape(", ".join(cleared))]
+        else:
+            lines = ["ℹ️ <b>Авто-понижений не было</b> — состояние монитора обнулено"]
+        if dpi_monitor_enabled(self.db, self.config):
+            lines.append("монитор включён: если сигнал сохранится, понизит снова "
+                         "через ~20 мин (2 прогона подряд); остановить — /cascade off")
+        else:
+            lines.append("монитор выключен — порядок теперь чисто операторский")
+        return "\n".join(lines)
+
+    def _reset_auto_state(self, admin_id: str) -> str:
+        """Clear both keys. Prefer DPIMonitor.reset() (one definition of
+        "clean"); write empty objects ourselves when the module is
+        missing, its reset raises, or it leaves demotions behind — the
+        undo command must not depend on the code it is undoing.
+        ``DPIMonitor.reset`` writes its own admin_actions row under
+        ``actor`` — it must carry the admin who typed the command, or
+        the audit reads as if the monitor undid itself.
+        Returns which path ran, for the audit row."""
+        try:
+            from bot.services.dpi_monitor import DPIMonitor
+        except ImportError:
+            DPIMonitor = None
+        if DPIMonitor is not None:
+            try:
+                DPIMonitor(self.db, self.config, bot=None).reset(actor=admin_id)
+                after = load_cascade_auto(self.db)
+                if not after['global'] and not after['asn']:
+                    return 'DPIMonitor.reset'
+                logger.warning("/cascade reset: DPIMonitor.reset left demotions "
+                               "behind; clearing keys directly")
+            except Exception as e:
+                logger.warning(f"/cascade reset: DPIMonitor.reset failed ({e}); "
+                               f"clearing keys directly")
+        for key in (CASCADE_AUTO_KEY, DPI_MONITOR_STATE_KEY):
+            self.db.set_setting(key, '{}')
+        return 'direct'
+
+    def _cascade_toggle(self, on: bool) -> str:
+        self.db.set_setting(DPI_MONITOR_ENABLED_KEY, '1' if on else '0')
+        self.db.log_admin_action(self._caller_admin_id(),
+                                 'dpi_monitor_on' if on else 'dpi_monitor_off',
+                                 None, None)
+        if on:
+            return ("▶️ <b>Монитор каскада включён</b> — следующий прогон в течение "
+                    "10 мин; понижение = 2 плохих прогона подряд, восстановление = 6 хороших")
+        auto = load_cascade_auto(self.db)
+        n = len(auto['global']) + sum(len(m) for m in auto['asn'].values())
+        # Pausing stops NEW changes only — the operator must know the
+        # current demotions stay in effect until reset.
+        tail = (f"\n⚠️ действующих авто-понижений: {n} — они остаются, "
+                f"снять: /cascade reset" if n else "\nавто-понижений сейчас нет")
+        return "⏸ <b>Монитор каскада выключен</b> — новых авто-изменений не будет" + tail
+
+    def _caller_admin_id(self) -> str:
+        """The admin who typed the command, for the audit row; falls
+        back to SUPER_ADMIN_ID on paths without a stored update."""
+        upd = getattr(self, '_current_update', None) or {}
+        try:
+            uid = self._get_user_id(upd)
+        except Exception:
+            uid = None
+        return str(uid or getattr(self.config, 'SUPER_ADMIN_ID', '') or 'admin')
 
     # ----- /whoami -----
 

@@ -20,6 +20,10 @@ ADMIN_HELP_TEXT = (
     "• <code>/status</code> — health всех сервисов + CPU/RAM/Disk\n"
     "• <code>/protocols</code> — какой протокол жив/лежит: пробы + аудит "
     "панели + алерты за 6 ч (без LLM, работает и когда агент лежит)\n"
+    "• <code>/cascade</code> — эффективный порядок протоколов + что "
+    "авто-понизил DPIMonitor; <code>/cascade AS31133</code> — для ASN, "
+    "<code>/cascade reset</code> — снять авто, <code>/cascade off</code> / "
+    "<code>on</code> — пауза монитора\n"
     "• <code>/stats</code> — статистика по юзерам / трафику\n"
     "• <code>/onlines</code> — кто онлайн (lastOnline панели, hy2 тоже) + трафик\n"
     "• <code>/whoami</code> — твой id + проверка прав\n"
@@ -119,6 +123,10 @@ class AdminHandlerBase(BaseHandler):
         # Deterministic protocol card — added 2026-09 after the Reality
         # outage that /status could not see (it only pings services).
         '/protocols': 'show_protocols',
+        # DPIMonitor's operator surface — added 2026-09 with the auto
+        # demotion loop (IMPROVEMENT_PLAN A1): an automatic actor the
+        # operator cannot see or undo in one move is worse than none.
+        '/cascade': 'show_cascade',
         '/whoami': 'show_whoami',
         '/onlines': 'show_onlines',
         '/find': 'find_user',

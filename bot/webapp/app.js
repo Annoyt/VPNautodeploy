@@ -998,11 +998,42 @@
                 </div>
             </div>`;
         };
+        // DPIMonitor's auto-demotions (IMPROVEMENT_PLAN A1). The rows
+        // are the RAW operator order this editor saves; users actually
+        // receive auto-demoted protocols at the tail. Rendered as a
+        // read-only note inside the box (so it survives re-renders on
+        // ↑/↓) and never as a row — the save handler collects
+        // .cascade-row only. Undo is /cascade reset in the bot: one
+        // audited path, no endpoint here on purpose.
+        const auto = data.auto || {};
+        const hhmm = iso => (String(iso || '').slice(11, 16) || '?');
+        // evidence = the monitor's human sentence; reason = its rule id
+        // (probe_dark, …) — shown only when evidence is missing.
+        const autoItem = (proto, m) =>
+            `${proto} (${(m && (m.evidence || m.reason)) || '?'}, с ${hhmm(m && m.since)})`;
+        const autoParts = [];
+        Object.entries(auto.global || {}).forEach(([proto, m]) => {
+            autoParts.push(autoItem(proto, m));
+        });
+        Object.entries(auto.asn || {}).forEach(([asn, protos]) => {
+            const items = Object.entries(protos || {}).map(([p, m]) => autoItem(p, m));
+            if (items.length) autoParts.push(`${asn}: ${items.join(', ')}`);
+        });
+        let autoNote = '';
+        if (autoParts.length) {
+            autoNote += `<div class="cascade-hint cascade-auto-note">⚠️ авто-понижены: `
+                + `${esc(autoParts.join('; '))} — юзеры получают их в конце каскада; `
+                + `<code>/cascade reset</code> в боте снимает</div>`;
+        }
+        if (auto.enabled === false) {
+            autoNote += `<div class="cascade-hint cascade-auto-note">⏸ монитор каскада `
+                + `выключен — <code>/cascade on</code> в боте</div>`;
+        }
         let currentCfg = [...cfg];
         const renderAll = () => {
             box.innerHTML = currentCfg
                 .map((entry, i) => renderRow(entry, i, currentCfg.length))
-                .join('');
+                .join('') + autoNote;
             box.querySelectorAll('.cascade-up').forEach(btn => {
                 btn.addEventListener('click', e => {
                     const row = e.target.closest('.cascade-row');
