@@ -1029,11 +1029,43 @@
             autoNote += `<div class="cascade-hint cascade-auto-note">⏸ монитор каскада `
                 + `выключен — <code>/cascade on</code> в боте</div>`;
         }
+        // Lockdown (IMPROVEMENT_PLAN B1): under a whitelist regime the
+        // /sub path projects the cascade onto the fronted-first order
+        // (CF-front ws first, UDP last) BEFORE the demotion partition.
+        // The rows here stay the RAW operator order, so the state is a
+        // banner above them, never a reorder of what gets saved. The
+        // switch lives in the bot (/lockdown on|off|auto): one audited
+        // path, no endpoint here on purpose. A backend without the
+        // block (older image) shows nothing rather than a guess.
+        const lockdown = data.lockdown;
+        let lockBanner = '', lockNote = '';
+        if (lockdown && typeof lockdown === 'object') {
+            if (lockdown.active === true) {
+                // ``order`` is optional (the API may add the operator's
+                // cascade_lockdown override); the literal is the module
+                // default, lockdown.LOCKDOWN_ORDER.
+                const order = (Array.isArray(lockdown.order) && lockdown.order.length)
+                    ? lockdown.order : ['ws', 'stls', 'reality', 'hy2', 'hy2t'];
+                const who = [lockdown.by || '?', lockdown.since ? `с ${hhmm(lockdown.since)}` : '']
+                    .filter(Boolean).join(', ');
+                lockBanner = `<div class="cascade-hint cascade-lockdown-banner" `
+                    + `style="color: var(--red); background: var(--red-dim); `
+                    + `border: 1px solid var(--red); border-radius: var(--radius-sm); `
+                    + `padding: 8px 10px; margin: 0 0 8px 0; font-weight: 600;">`
+                    + `🔒 LOCKDOWN активен (${esc(who)}): порядок ${esc(order.join(', '))}; `
+                    + `DNS через туннель; снять — <code>/lockdown off</code> в боте</div>`;
+            } else {
+                const mode = String(lockdown.mode || 'auto');
+                const how = mode === 'auto' ? 'детектор следит' : 'зафиксирован оператором';
+                lockNote = `<div class="cascade-hint cascade-auto-note">🔒 lockdown: `
+                    + `${esc(mode)} (${how}) — <code>/lockdown</code> в боте</div>`;
+            }
+        }
         let currentCfg = [...cfg];
         const renderAll = () => {
-            box.innerHTML = currentCfg
+            box.innerHTML = lockBanner + currentCfg
                 .map((entry, i) => renderRow(entry, i, currentCfg.length))
-                .join('') + autoNote;
+                .join('') + autoNote + lockNote;
             box.querySelectorAll('.cascade-up').forEach(btn => {
                 btn.addEventListener('click', e => {
                     const row = e.target.closest('.cascade-row');

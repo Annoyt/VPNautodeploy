@@ -2,7 +2,7 @@
 name: vpn-ops
 description: VPN infrastructure ops — Xray nodes, X-UI panel, traffic, client configs, per-protocol liveness, and entry↔exit ingress diagnostics
 type: prompt
-whenToUse: User asks about VPN nodes, server health, client configs, X-UI, traffic, broken keys, which protocol is down (какой протокол не работает / что с reality|hy2|ws|stls), or anything that touches entry/exit ingress, or why the cascade / protocol order changed (каскад, порядок протоколов, почему X в конце)
+whenToUse: User asks about VPN nodes, server health, client configs, X-UI, traffic, broken keys, which protocol is down (какой протокол не работает / что с reality|hy2|ws|stls), or anything that touches entry/exit ingress, or why the cascade / protocol order changed (каскад, порядок протоколов, почему X в конце, почему ws первый, lockdown)
 ---
 
 # Topology (see AGENTS.md for the full table)
@@ -151,7 +151,7 @@ Rules that make or break this repair:
 - UDP-native traffic (Telegram calls) routes via the `calls` selector (Reality/Hy2/Hy2t) — RU-direct TCP with
   a QUIC:443 carve-out is intentional (VK banner), don't "fix" it.
 
-# Cascade is self-tuning (DPIMonitor, since 2026-09-06)
+# Cascade is self-tuning (DPIMonitor + lockdown layer, since 2026-09-06)
 
 The protocol order users get from `/sub`, the key card and `?format=links` is **no longer only the operator's
 setting**. `bot/services/dpi_monitor.py` runs inside the bot every 10 min and moves a protocol to the END of the
@@ -166,7 +166,7 @@ signals. So, BEFORE you "fix" an order that looks wrong:
    docker exec vpn-bot python3 -c "
    import sqlite3
    c = sqlite3.connect('/var/lib/vpn-bot/bot.db')
-   for k in ('cascade_protocol_order','cascade_by_asn','cascade_by_country','cascade_auto','dpi_monitor_state','dpi_monitor_enabled'):
+   for k in ('cascade_protocol_order','cascade_by_asn','cascade_by_country','cascade_auto','dpi_monitor_state','dpi_monitor_enabled','lockdown_mode','cascade_lockdown'):
        r = c.execute('SELECT value FROM app_settings WHERE key = ?', (k,)).fetchone(); print(k, '=', r[0] if r else None)
    "
    ```
@@ -185,6 +185,21 @@ signals. So, BEFORE you "fix" an order that looks wrong:
 4. The operator's `cascade_protocol_order` / `cascade_by_asn` always win on the BASE order; the monitor only
    reorders inside it. "Pin protocol X first regardless of signals" is `/cascade off` **then** `/cascade reset`
    (off only stops NEW changes — demotions already in effect stay until reset), not an edit.
+5. **`ws` first, UDP last, and `cascade_auto` is empty? That is lockdown, not the monitor.** Since 2026-09-06 a
+   second layer sits between the operator's order and the auto-demotions: while
+   `app_settings.lockdown_mode.active` is true, `get_cascade_order` projects the order onto
+   `ws, stls, reality, hy2, hy2t` (CF-front first, UDP last; operator override `cascade_lockdown`) and the
+   sing-box `/sub` sends DNS through the tunnel (route rules, RU-direct included, unchanged). It is flipped by
+   the lockdown detector inside the same DPIMonitor tick — every measured direct protocol
+   (reality / hy2 / hy2t / stls) dark in the probes while `ws` is alive, 2 evaluations ≈ 20 min; back off after
+   12 healthy ones ≈ 2 h, and only if the detector itself turned it on; `/cascade off` pauses the detector
+   too, it rides the monitor's tick — or by the admin (`/lockdown on|off|auto`). **`/lockdown` shows WHY the
+   order is ws-first**: mode / active / since / by /
+   reason / streaks and the effective orders for demo and paid; `lockdown_mode` in the query above is your
+   read-only view; the pager shows `lockdown:active` while it holds. Undo is `/lockdown off` (admin, in
+   Telegram); `/cascade reset` does not touch it; never edit `lockdown_mode` / `cascade_lockdown` by hand and
+   never flip the mode yourself — propose the command and wait for the OK. `ws` dark as well is NOT lockdown —
+   that is an upstream outage, go to `incident-response`.
 
 # Traffic & quotas
 

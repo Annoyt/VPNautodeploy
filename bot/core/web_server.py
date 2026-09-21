@@ -932,6 +932,13 @@ class WebAppServer:
             FALLBACK_ALLOWED_STATUSES,
             FallbackNodeService,
         )
+        from bot.services.lockdown import is_lockdown_active
+        # LOCKDOWN (IMPROVEMENT_PLAN B1/B5): read once per request and
+        # handed to the sing-box builder for the DNS profile; the
+        # cascade order below applies it on its own. Tolerant read —
+        # a broken app_settings row must degrade to the normal
+        # profile, never to a 500 on /sub.
+        lockdown = is_lockdown_active(self.db)
         cascade = MyKeyAnswerHandler.get_cascade_order(
             self.db, user=user, country=country, asn=asn,
         )
@@ -962,7 +969,9 @@ class WebAppServer:
         elif fmt == 'xray':
             config_obj = self.subscription.build_xray_config(user, cascade)
         else:
-            config_obj = self.subscription.build_singbox_config(user, cascade)
+            config_obj = self.subscription.build_singbox_config(
+                user, cascade, lockdown=lockdown,
+            )
 
         # Surface quota/expiry to Hiddify's profile panel via the
         # subscription-userinfo header. Bytes-per-GB matches the units
@@ -2064,13 +2073,18 @@ class WebAppServer:
         bare list of enabled names); ``config`` is the new
         per-protocol on/off list the editor talks to; ``auto`` is
         DPIMonitor's read-only overlay (what it sank to the tail and
-        why) — undo lives in the bot (/cascade reset), not here."""
+        why) — undo lives in the bot (/cascade reset), not here;
+        ``lockdown`` is the whitelist-mode switch (IMPROVEMENT_PLAN B1,
+        bot/services/lockdown.py) — mode/active/since/by/reason plus
+        the order users get while it is active; flipped in the bot
+        (/lockdown on|off|auto), not here."""
         if not self._validate_admin(request):
             return web.json_response({'error': 'Unauthorized'}, status=401)
         from bot.handlers.callbacks.user import MyKeyAnswerHandler
         from bot.services.notifications import NotificationService
         from bot.handlers.admin.ops import (
             load_cascade_auto, load_dpi_monitor_state, dpi_monitor_enabled)
+        from bot.services.lockdown import load_lockdown, load_lockdown_order
         cfg = MyKeyAnswerHandler.get_cascade_config(self.db)
         order = [c['name'] for c in cfg if c.get('enabled')]
         labels = NotificationService.PROTOCOL_LABELS_RU
@@ -2090,6 +2104,9 @@ class WebAppServer:
         # Same tolerant readers as /cascade: bad JSON → empty, never 500.
         auto = load_cascade_auto(self.db)
         last_run = load_dpi_monitor_state(self.db).get('last_run')
+        # Same tolerance for the lockdown key: missing / bad JSON →
+        # "auto, not active", the endpoint never 500s over it.
+        ld = load_lockdown(self.db)
         return web.json_response({
             'config': cfg,
             'order': order,
@@ -2100,6 +2117,17 @@ class WebAppServer:
                 'global': auto['global'],
                 'asn': auto['asn'],
                 'last_run': last_run if isinstance(last_run, str) else None,
+            },
+            'lockdown': {
+                'mode': ld['mode'],
+                'active': bool(ld['active']),
+                'since': ld['since'],
+                'by': ld['by'],
+                'reason': ld['reason'],
+                # The order users receive while active (operator's
+                # cascade_lockdown or the built-in default) — for the
+                # editor's banner text.
+                'order': list(load_lockdown_order(self.db)),
             },
         })
 

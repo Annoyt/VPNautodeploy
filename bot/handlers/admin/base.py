@@ -24,6 +24,9 @@ ADMIN_HELP_TEXT = (
     "авто-понизил DPIMonitor; <code>/cascade AS31133</code> — для ASN, "
     "<code>/cascade reset</code> — снять авто, <code>/cascade off</code> / "
     "<code>on</code> — пауза монитора\n"
+    "• <code>/lockdown</code> — режим белых списков (шатдаун): статус, "
+    "детектор, каскады; <code>/lockdown on</code> / <code>off</code> / "
+    "<code>auto</code> — зафиксировать / вернуть детектору\n"
     "• <code>/stats</code> — статистика по юзерам / трафику\n"
     "• <code>/onlines</code> — кто онлайн (lastOnline панели, hy2 тоже) + трафик\n"
     "• <code>/whoami</code> — твой id + проверка прав\n"
@@ -127,6 +130,10 @@ class AdminHandlerBase(BaseHandler):
         # demotion loop (IMPROVEMENT_PLAN A1): an automatic actor the
         # operator cannot see or undo in one move is worse than none.
         '/cascade': 'show_cascade',
+        # Whitelist / shutdown mode — added 2026-09 (IMPROVEMENT_PLAN
+        # B1): the detector in DPIMonitor's tick raises it on its own;
+        # the operator pins it on/off or hands it back here.
+        '/lockdown': 'show_lockdown',
         '/whoami': 'show_whoami',
         '/onlines': 'show_onlines',
         '/find': 'find_user',

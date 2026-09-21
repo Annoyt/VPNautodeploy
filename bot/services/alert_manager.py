@@ -1260,10 +1260,54 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
             ),
         )])
 
+    def check_lockdown_active():
+        """LOCKDOWN (IMPROVEMENT_PLAN B1, bot/services/lockdown.py) is
+        a standing change to what every user receives — fronted-first
+        cascade, all DNS through the tunnel — and it can be switched on
+        by a probe pattern at 3 a.m. So while it is on, the operator
+        is reminded: critical (forum topic + ACK button) the first
+        cycle, then once per REPEAT_COOLDOWN_S (2 h) until it is off.
+
+        Multi-bucket shape on purpose: ``("lockdown:", [])`` while
+        inactive resets the tracker (the single-Alert shape's ``None``
+        does not), so an off→on later starts from zero again.
+        """
+        try:
+            from bot.services.lockdown import SETTING_KEY, parse_lockdown
+            db_path = getattr(config, 'DB_PATH', None) or '/var/lib/vpn-bot/bot.db'
+            import sqlite3
+            with sqlite3.connect(db_path) as conn:
+                row = conn.execute(
+                    "SELECT value FROM app_settings WHERE key = ?", (SETTING_KEY,),
+                ).fetchone()
+            state = parse_lockdown(row[0] if row else None)
+        except Exception as e:
+            # Same stance as the probe check: a monitoring read failure
+            # is logged where someone will see it, never paged.
+            logger.warning(f"lockdown alert read failed: {e}")
+            return ("lockdown:", [])
+        if not state.get('active'):
+            return ("lockdown:", [])
+        since = str(state.get('since') or '')
+        since_s = f"{since[:10]} {since[11:16]} UTC" if len(since) >= 16 else (since or '—')
+        reason = state.get('reason') or '—'
+        return ("lockdown:", [Alert(
+            key='lockdown:active',
+            severity='critical',
+            min_cycles=1,
+            title=f"LOCKDOWN активен ({state.get('by')}, с {since_s})",
+            detail=(
+                f"Причина: {reason}. Режим: {state.get('mode')}. Юзерам "
+                f"выдаётся каскад CF-фронт → TCP → UDP и весь DNS через "
+                f"туннель. Снять: /lockdown off, статус: /lockdown."
+            ),
+        )])
+
     checks.extend([
         check_cpu, check_ram, check_disk,
         check_opencode, check_xray_reload_sidecar, check_xui_inbounds,
         check_protocol_probe_down,
         check_dpi_short_sessions, check_dpi_handshake_spike, check_dpi_rst_spike,
+        check_lockdown_active,
     ])
     return checks
