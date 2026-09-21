@@ -49,7 +49,17 @@ REPLY = ("ИТОГ: reality лежит 4 д 3 ч; hy2, ws, stls живы; hy2t �
 
 @pytest.fixture
 def db(tmp_path):
-    return Database(str(tmp_path / 'bot.db'))
+    d = Database(str(tmp_path / 'bot.db'))
+    # The DPI follow-up only runs for ASNs we have users on
+    # (AlertManager._asn_has_our_users) — the two DPI tests here are
+    # about the follow-up's routing, not about that gate, so give the
+    # key they use a resident.
+    with d._connect() as conn:
+        conn.execute(
+            "INSERT INTO users (chat_id, username, email, status, last_asn) "
+            "VALUES ('9001', 'seed', 'seed@nekovo.ru', 'demo', 'AS8402')"
+        )
+    return d
 
 
 @pytest.fixture

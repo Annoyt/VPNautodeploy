@@ -372,6 +372,60 @@ class AlertManager:
 
     # ----- agent follow-ups -----
 
+    # How far back a user's footprint still counts as "we have people
+    # here". Mobile carriers move a subscriber between ASNs, so
+    # users.last_asn alone is a snapshot that can be hours stale —
+    # sub_fetches and hy2_auth_log carry the request-time ASN and catch
+    # the case where someone is on that carrier right now under a
+    # different AS number than the one stored on their row.
+    ASN_USER_LOOKBACK_DAYS = 7
+
+    def _asn_has_our_users(self, alert_key: str) -> bool:
+        """Does a DPI alert key point at an ASN any of our users sit on?
+
+        A handshake-fail storm on an ASN where we have subscribers means
+        "our people are being hit". The same storm on an ASN with none of
+        them means "someone is probing us" — a real signal, but a
+        standing condition rather than an event, and one no amount of
+        agent analysis changes. AS31205 (MegaFon) produced 1073 failures
+        and zero successful connections in a day while we had no users on
+        it at all; each fire spent a 10-minute Hermes turn to emit ~100
+        characters, against a two-slot pool on a VPS with ~190 MB free.
+
+        Fails OPEN: an unparseable key or a DB error returns True, so a
+        bug here can only cost us an agent turn, never hide a storm that
+        is actually hitting subscribers.
+        """
+        # dpi_<kind>:<country>:<asn>, e.g. "dpi_hsfail:RU:AS31205".
+        parts = (alert_key or '').split(':')
+        if len(parts) < 3:
+            return True
+        asn = parts[-1].strip()
+        if not asn or asn == '-':
+            return True
+        if self.db is None:
+            return True
+        try:
+            with self.db._connect() as conn:
+                row = conn.execute(
+                    "SELECT 1 FROM users WHERE last_asn = ? LIMIT 1", (asn,)
+                ).fetchone()
+                if row:
+                    return True
+                window = f'-{self.ASN_USER_LOOKBACK_DAYS} days'
+                for table in ('sub_fetches', 'hy2_auth_log'):
+                    row = conn.execute(
+                        f"SELECT 1 FROM {table} WHERE asn = ? "
+                        f"  AND ts >= datetime('now', ?) LIMIT 1",
+                        (asn, window),
+                    ).fetchone()
+                    if row:
+                        return True
+        except Exception as e:
+            logger.warning(f"asn user lookup failed for {alert_key}: {e}")
+            return True
+        return False
+
     def _kick_dpi_agent(self, alert: Alert, alert_db_id: Optional[int]
                         ) -> Optional[threading.Thread]:
         """DPI-analysis follow-up: dashboard-only (stored against the
@@ -389,8 +443,17 @@ class AlertManager:
         ``REPEAT_COOLDOWN_S`` if the condition persists, which for a
         dashboard-only annotation is the right amount of trying.
         Returns the started thread, or None when nothing was started
-        (agent not configured / key in flight / no slot). Never raises.
+        (agent not configured / no users on the ASN / key in flight /
+        no slot). Never raises.
         """
+        # Nobody of ours on that ASN => nothing for the agent to diagnose.
+        # The alert row is already persisted and still shows in the
+        # dashboard; we only decline to spend a 10-min Hermes turn on it.
+        if not self._asn_has_our_users(alert.key):
+            logger.info(
+                f"dpi agent skipped for {alert.key}: no users on that ASN"
+            )
+            return None
         # 600s (10 min) gives the agent room to finish the multi-step
         # skill: read dpi_metrics rows + grep error.log for the same
         # hour, compare to 7d baseline, render HTML output.
