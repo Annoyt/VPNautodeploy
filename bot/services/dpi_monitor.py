@@ -99,6 +99,9 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
+# LOCKDOWN detector (IMPROVEMENT_PLAN B1) rides this tick — see _run_lockdown.
+from bot.services import lockdown as _lockdown
+
 logger = logging.getLogger(__name__)
 
 
@@ -443,6 +446,10 @@ class DPIMonitor:
         self.db = db
         self.config = config
         self.bot = bot
+        # The LOCKDOWN detector's decision of the LAST run_once: None or
+        # a lockdown.Event ('auto_on' / 'auto_off'). In dry_run it is the
+        # event that WOULD have been applied.
+        self.lockdown_event: Optional[_lockdown.Event] = None
 
     # ---- enable flag -------------------------------------------------------
 
@@ -913,9 +920,13 @@ class DPIMonitor:
             self._notify(changes)
 
     def _notify(self, changes: List[Change]) -> None:
+        self._send_topic(format_changes_html(changes))
+
+    def _send_topic(self, text: str) -> None:
         """Forum topic only (TOPIC_AI in FORUM_GROUP_ID) — never the
         admin's PM (feedback_no_admin_pm_when_group). Silently skipped
-        without a bot (tests, manual runs) or without a group."""
+        without a bot (tests, manual runs) or without a group. Shared
+        by the cascade message and the LOCKDOWN message."""
         if self.bot is None:
             return
         group = getattr(self.config, 'FORUM_GROUP_ID', None)
@@ -924,7 +935,7 @@ class DPIMonitor:
             return
         kwargs = {
             'chat_id': group,
-            'text': format_changes_html(changes),
+            'text': text,
             'parse_mode': 'HTML',
         }
         topic = getattr(self.config, 'TOPIC_AI', 0) or 0
@@ -935,13 +946,86 @@ class DPIMonitor:
         except Exception as e:
             logger.warning(f"dpi_monitor: topic send failed: {e}")
 
+    # ---- LOCKDOWN detector (IMPROVEMENT_PLAN B1) ----------------------------
+
+    def _run_lockdown(self, signals: dict, now: datetime, *, dry_run: bool) -> None:
+        """Feed the probe signals THIS run already collected to
+        ``lockdown.evaluate_lockdown`` — no second SQL pass, same
+        10-min tick, same all-or-nothing view of the probe table.
+
+        Why it lives here and not in its own job: the signature is a
+        pattern ACROSS the probe rows (every direct protocol dark, ws
+        alive), and the monitor is the one place that already has
+        those rows classified per the LIVENESS RULE. Two readers of
+        outbound_health with two notions of "dark" would disagree at
+        exactly the moment it matters.
+
+        Freezes (no count, no flip): probe pipeline stale; probe
+        collector failed (PROBE_RULES in ``signals['unknown']`` — "no
+        data" is never "healthy", the same rule the cascade uses);
+        ``lockdown_mode`` unreadable (a locked read taken for "missing"
+        would evaluate from defaults and persist "not active" over a
+        live lockdown — the same hazard ``_read_setting`` guards for
+        the cascade state).
+
+        Writes only when the state changed (streaks or a flip); on an
+        event: ``lockdown_mode`` first — a flip that was audited and
+        announced but never landed is a lie to the operator — then one
+        admin_actions row and one topic message. ``dry_run`` computes
+        (``self.lockdown_event``) and touches nothing.
+        """
+        self.lockdown_event = None
+        try:
+            raw = self._read_setting(_lockdown.SETTING_KEY)
+        except StateUnreadable as e:
+            logger.warning(f"dpi_monitor: app_settings[{_lockdown.SETTING_KEY}] unreadable "
+                           f"({e}) — lockdown detector skipped this run")
+            return
+        lstate = _lockdown.parse_lockdown(raw)
+        probe = dict((signals or {}).get('probe') or {})
+        if set((signals or {}).get('unknown') or ()) & PROBE_RULES:
+            probe['stale'] = True
+        new_lstate, event = _lockdown.evaluate_lockdown(probe, lstate, now)
+        self.lockdown_event = event
+        if dry_run:
+            return
+        if event is None and new_lstate == lstate:
+            return
+        if not _lockdown.save_lockdown(self.db, new_lstate):
+            logger.error(f"dpi_monitor: write of app_settings[{_lockdown.SETTING_KEY}] failed"
+                         + (f" — lockdown {event.kind} NOT applied" if event else ""))
+            self.lockdown_event = None
+            return
+        if event is None:
+            return
+        action = (_lockdown.ACTION_AUTO_ON if event.kind == _lockdown.EVENT_AUTO_ON
+                  else _lockdown.ACTION_AUTO_OFF)
+        try:
+            self.db.log_admin_action(
+                _lockdown.ACTOR, action,
+                target_id=_lockdown.AUDIT_TARGET, details=event.evidence,
+            )
+        except Exception as e:
+            logger.warning(f"dpi_monitor: audit write failed for lockdown {event.kind}: {e}")
+        self._send_topic(_lockdown.format_lockdown_html(
+            event, order=_lockdown.load_lockdown_order(self.db)))
+        logger.warning(f"dpi_monitor: LOCKDOWN {event.kind} — {event.evidence}")
+
     # ---- entry point ---------------------------------------------------------
 
     def run_once(self, dry_run: bool = False,
                  now: Optional[datetime] = None) -> List[Change]:
         """One evaluation. ``dry_run`` evaluates and returns the changes
         WITHOUT writing state, auditing or messaging. ``now`` is a test
-        seam; the scheduler passes nothing."""
+        seam; the scheduler passes nothing.
+
+        The LOCKDOWN detector runs at the end of the same tick on the
+        same signals (``_run_lockdown``); its verdict is left in
+        ``self.lockdown_event``. It does NOT run while the monitor is
+        disabled (``/cascade off``) — the operator who paused the
+        monitor has ``/lockdown on`` at hand.
+        """
+        self.lockdown_event = None
         if not self.is_enabled():
             logger.info("dpi_monitor: disabled (dpi_monitor_enabled=0) — evaluation skipped")
             return []
@@ -955,12 +1039,19 @@ class DPIMonitor:
                            f"state and cascade_auto left untouched")
             return []
         new_state, changes = self.evaluate(signals, state, now)
-        if dry_run:
-            return changes
-        self.apply_changes(changes, new_state, now)
-        if changes:
-            logger.info("dpi_monitor: applied " + '; '.join(
-                f"{c.action} {c.key} ({c.reason})" for c in changes))
-        else:
-            logger.debug(f"dpi_monitor: run {new_state['runs']}, no changes")
+        if not dry_run:
+            self.apply_changes(changes, new_state, now)
+            if changes:
+                logger.info("dpi_monitor: applied " + '; '.join(
+                    f"{c.action} {c.key} ({c.reason})" for c in changes))
+            else:
+                logger.debug(f"dpi_monitor: run {new_state['runs']}, no changes")
+        # After the cascade work, so a lockdown flip never blocks a
+        # demotion (and a failed cascade write aborts before it: the
+        # tick is retried whole).
+        try:
+            self._run_lockdown(signals, now, dry_run=dry_run)
+        except Exception as e:      # the detector must never cost the cascade its run
+            logger.exception(f"dpi_monitor: lockdown detector failed: {e}")
+            self.lockdown_event = None
         return changes

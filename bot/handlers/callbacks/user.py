@@ -9,6 +9,9 @@ from typing import TYPE_CHECKING, Optional
 from bot.config import Platform, UserState, BYTES_PER_GB
 from bot.core.state_machine import StateMachine
 from bot.handlers.callbacks.base import BaseCallbackHandler
+from bot.services.lockdown import (
+    apply_lockdown_order, is_lockdown_active, load_lockdown_order,
+)
 from bot.services.notifications import NotificationService
 from bot.services.vpn import VPNService
 from bot.services.account_verification import AccountVerificationService
@@ -834,6 +837,7 @@ class MyKeyAnswerHandler(BaseCallbackHandler):
         asn: Optional[str] = None,
         *,
         apply_auto: bool = True,
+        apply_lockdown: bool = True,
     ) -> tuple:
         """Effective rotation: enabled-only protocols filtered by tier
         and (if known) ASN/country tuned.
@@ -844,6 +848,14 @@ class MyKeyAnswerHandler(BaseCallbackHandler):
         2. Country override (``cascade_by_country`` or hardcoded
            ``COUNTRY_CASCADE_DEFAULTS``) — broad region default.
         3. Global enabled cascade (``cascade_protocol_order``).
+
+        Then LOCKDOWN (IMPROVEMENT_PLAN B1, ``bot/services/lockdown.py``):
+        while ``lockdown_mode.active`` the base order is projected onto
+        the lockdown order (CF-fronted ws first, then TCP-direct, UDP
+        last — under a whitelist every direct-to-entry transport dies
+        together and only the fronted one survives). Same set, same
+        enabled flags, only the order; ``apply_lockdown=False`` skips
+        it (the dashboard editor shows the saved order).
 
         Then DPIMonitor's auto-demotions (``cascade_auto``, global ∪ the
         effective ASN's) are applied as a STABLE PARTITION: demoted
@@ -887,6 +899,15 @@ class MyKeyAnswerHandler(BaseCallbackHandler):
                     ordered.append(n); seen.add(n)
         else:
             ordered = enabled_default_order
+
+        # LOCKDOWN layer: after the base order (an ASN override still
+        # decides WHAT is in the set), before the monitor's partition
+        # (a protocol the probes see dark still sinks to the tail of
+        # the lockdown order) and before the tier filter (demo gets
+        # ws, stls, hy2 in that order). The read is tolerant — /sub
+        # and the key card run through here.
+        if apply_lockdown and is_lockdown_active(db):
+            ordered = apply_lockdown_order(ordered, load_lockdown_order(db))
 
         # DPIMonitor's verdicts: stable partition, demoted to the tail.
         # Reads happen here (not earlier) so the base order above is

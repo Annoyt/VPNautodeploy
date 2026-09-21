@@ -7,6 +7,8 @@ starting with abc", "set @ivan's quota to 50", "which protocol is dead".
 """
 
 import html
+import importlib
+import inspect
 import json
 import logging
 import os
@@ -16,6 +18,7 @@ import sys
 import threading
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Optional
 
 from bot.config.constants import BYTES_PER_GB
@@ -238,6 +241,169 @@ def _partition_demoted(order, demoted) -> list:
     order = list(order)
     return ([p for p in order if p not in demoted]
             + [p for p in order if p in demoted])
+
+
+# ----- /lockdown helpers -----
+# Whitelist / shutdown mode (IMPROVEMENT_PLAN B1+B5). Owned by
+# bot/services/lockdown.py; the key layout is mirrored here so the
+# operator's switch keeps working with that module missing or broken —
+# the command that turns an emergency mode on and off must not depend
+# on the code it controls (same stance as /cascade reset vs DPIMonitor).
+#   lockdown_mode  {"mode": "auto"|"on"|"off", "active": bool,
+#                   "since": iso|null,
+#                   "by": "admin:<id>"|"auto:probe_signature"|"system",
+#                   "reason": str, "streak_on": int, "streak_off": int,
+#                   "last_change": iso|null}
+#                  mode = who decides (auto = the probe-signature detector
+#                  run from DPIMonitor's 10-min tick; on/off = pinned by
+#                  the operator — the detector keeps counting but never
+#                  flips); active = what get_cascade_order and /sub act
+#                  on. Missing / bad JSON = mode auto, inactive.
+#   cascade_lockdown  optional JSON list — the operator's own lockdown
+#                  order; unknown names dropped, empty = LOCKDOWN_ORDER.
+LOCKDOWN_MODE_KEY = 'lockdown_mode'
+LOCKDOWN_ORDER_KEY = 'cascade_lockdown'
+LOCKDOWN_MODES = ('auto', 'on', 'off')
+# Mirror of lockdown.LOCKDOWN_ORDER: CF-fronted first (Cloudflare
+# survives a whitelist, our entry IP does not), TCP-direct next, UDP
+# last (UDP dies first under throttling). Used only when the module is
+# not importable.
+LOCKDOWN_ORDER_DEFAULT = ('ws', 'stls', 'reality', 'hy2', 'hy2t')
+# Detector hysteresis (lockdown.evaluate_lockdown), shown on the card
+# so the operator reads "1/2" as "one more bad tick and it flips":
+# 2 consecutive 10-min evaluations with the signature → on, 12 healthy
+# ones (~2 h) → off.
+LOCKDOWN_ON_AFTER = 2
+LOCKDOWN_OFF_AFTER = 12
+_LOCKDOWN_CONTRACT = ('load_lockdown', 'set_mode', 'is_lockdown_active',
+                      'LOCKDOWN_ORDER', 'apply_lockdown_order')
+
+
+def _lockdown_module():
+    """bot.services.lockdown when importable AND complete (every name
+    of _LOCKDOWN_CONTRACT present), else None → the direct-key path."""
+    try:
+        mod = importlib.import_module('bot.services.lockdown')
+    except ImportError:
+        return None
+    if not all(hasattr(mod, n) for n in _LOCKDOWN_CONTRACT):
+        logger.warning("bot.services.lockdown lacks part of the contract; "
+                       "/lockdown reads/writes the key directly")
+        return None
+    return mod
+
+
+def _lockdown_default_state() -> dict:
+    return {'mode': 'auto', 'active': False, 'since': None, 'by': 'system',
+            'reason': '', 'streak_on': 0, 'streak_off': 0, 'last_change': None}
+
+
+def _normalize_lockdown(raw) -> dict:
+    """Coerce whatever is in the key (hand-edits included) to the
+    documented shape: unknown mode → auto, a string ``active`` parsed
+    like a flag, streaks → non-negative ints. Never raises."""
+    st = _lockdown_default_state()
+    if not isinstance(raw, dict):
+        return st
+    mode = str(raw.get('mode') or '').strip().lower()
+    if mode in LOCKDOWN_MODES:
+        st['mode'] = mode
+    active = raw.get('active')
+    if isinstance(active, str):
+        active = active.strip().lower() in ('1', 'true', 'on', 'yes')
+    st['active'] = bool(active)
+    for k in ('since', 'last_change'):
+        st[k] = str(raw[k]) if raw.get(k) else None
+    st['by'] = str(raw.get('by') or 'system')
+    st['reason'] = str(raw.get('reason') or '')
+    for k in ('streak_on', 'streak_off'):
+        try:
+            st[k] = max(0, int(raw.get(k) or 0))
+        except (TypeError, ValueError):
+            st[k] = 0
+    return st
+
+
+def load_lockdown_state(db) -> dict:
+    """Normalised ``lockdown_mode``: the module's reader when present
+    (one definition of the defaults), the key itself otherwise. Never
+    raises — the card must render during the very incident it is for."""
+    mod = _lockdown_module()
+    if mod is not None:
+        try:
+            return _normalize_lockdown(mod.load_lockdown(db))
+        except Exception as e:
+            logger.warning(f"lockdown.load_lockdown failed ({e}); reading the key directly")
+    return _normalize_lockdown(_load_json_dict(db, LOCKDOWN_MODE_KEY))
+
+
+def set_lockdown_mode(db, mode: str, *, by: str, reason: str) -> None:
+    """Persist the operator's decision. Prefers lockdown.set_mode (one
+    transition table); the writer below is that table for the
+    module-less path — keep the two identical:
+      on   → active now; ``since`` kept when already active (the
+             lockdown has been in effect since then — only the owner
+             changes), else now; by/reason = the operator
+      off  → inactive, ``since`` cleared; by/reason = the operator
+      auto → only ``mode`` moves. active/since/by/reason stay: the
+             detector lifts only what it raised itself (``by`` =
+             ``auto:…``), so re-affirming auto over an auto-raised
+             lockdown must not re-own it as the operator's — that
+             would silently pin it until /lockdown off.
+    Streaks are never touched here (they are the detector's). The
+    caller re-reads the key to confirm the write landed."""
+    mod = _lockdown_module()
+    if mod is not None:
+        try:
+            mod.set_mode(db, mode, by=by, reason=reason)
+            return
+        except Exception as e:
+            logger.warning(f"lockdown.set_mode failed ({e}); writing the key directly")
+    st = _normalize_lockdown(_load_json_dict(db, LOCKDOWN_MODE_KEY))
+    now = datetime.utcnow().replace(microsecond=0).isoformat()
+    st['mode'] = mode
+    if mode == 'on':
+        if not st['active']:
+            st['since'] = now
+        st['active'] = True
+    elif mode == 'off':
+        st['active'] = False
+        st['since'] = None
+    if mode != 'auto':
+        st['by'] = by
+        st['reason'] = reason
+    st['last_change'] = now
+    db.set_setting(LOCKDOWN_MODE_KEY, json.dumps(st, ensure_ascii=False))
+
+
+def lockdown_order_preview(db, known) -> tuple:
+    """``(order, is_override)`` — what lockdown puts on top: the
+    operator's ``cascade_lockdown`` list projected onto ``known``
+    protocol names, else the module's LOCKDOWN_ORDER (the mirror
+    constant without the module)."""
+    mod = _lockdown_module()
+    default = tuple(getattr(mod, 'LOCKDOWN_ORDER', None) or LOCKDOWN_ORDER_DEFAULT)
+    try:
+        raw = db.get_setting(LOCKDOWN_ORDER_KEY)
+        parsed = json.loads(raw) if raw else None
+    except Exception:
+        parsed = None
+    if isinstance(parsed, list):
+        seen, out = set(), []
+        for p in parsed:
+            if isinstance(p, str) and p in known and p not in seen:
+                out.append(p)
+                seen.add(p)
+        if out:
+            return tuple(out), True
+    return default, False
+
+
+def _project_lockdown(order, top) -> list:
+    """The stable projection lockdown applies on the /sub path: ``top``
+    protocols first in that order, the rest in their existing order."""
+    order = list(order)
+    return [p for p in top if p in order] + [p for p in order if p not in top]
 
 
 class AdminOpsMixin(AdminHandlerBase):
@@ -889,6 +1055,176 @@ class AdminOpsMixin(AdminHandlerBase):
             uid = None
         return str(uid or getattr(self.config, 'SUPER_ADMIN_ID', '') or 'admin')
 
+    # ----- /lockdown -----
+
+    LOCKDOWN_USAGE = (
+        "🔒 <b>/lockdown</b> — режим белых списков (региональный шатдаун)\n"
+        "• <code>/lockdown</code> — режим, статус, детектор, эффективные каскады\n"
+        "• <code>/lockdown on</code> — включить и зафиксировать (детектор не снимет)\n"
+        "• <code>/lockdown off</code> — снять и зафиксировать (детектор не включит)\n"
+        "• <code>/lockdown auto</code> — вернуть решение детектору"
+    )
+    LOCKDOWN_MANUAL_REASON = {
+        'on': 'включено оператором (/lockdown on)',
+        'off': 'снято оператором (/lockdown off)',
+        'auto': 'решение возвращено детектору (/lockdown auto)',
+    }
+
+    def show_lockdown(self, chat_id: str, args: list) -> None:
+        """Operator surface of the whitelist / shutdown mode
+        (IMPROVEMENT_PLAN B1+B5). Under a regional whitelist only
+        allowed destinations pass: direct connections to our entry IP
+        die, the Cloudflare-fronted path (ws) survives. Lockdown flips
+        the user-facing cascade to fronted-first (get_cascade_order)
+        and sends every DNS lookup through the tunnel (/sub sing-box
+        profile). DPIMonitor's detector raises it on its own from the
+        probe signature (all direct protocols dark, ws alive); this is
+        where the operator sees that decision and overrides it in one
+        move:
+
+          /lockdown        mode, status, detector streaks, effective cascades
+          /lockdown on     pin active (the detector will not lift it)
+          /lockdown off    pin inactive (the detector will not raise it)
+          /lockdown auto   hand the decision back to the detector
+
+        Pure app_settings reads/writes on the polling thread — no
+        subprocess, no LLM. Works with bot.services.lockdown missing
+        (same JSON, written here): the switch of an emergency mode must
+        not depend on the code it switches, and the 2026-09-01 flow-wipe
+        ran four days for want of a one-command view and undo.
+        """
+        sub = (args[0] if args else '').strip().lower()
+        try:
+            if not sub:
+                text = self._lockdown_overview()
+            elif sub in LOCKDOWN_MODES:
+                text = self._lockdown_set(sub)
+            else:
+                text = self.LOCKDOWN_USAGE
+        except Exception as e:      # must always answer — this is the override path
+            logger.exception("/lockdown failed")
+            text = f"❌ /lockdown: {html.escape(str(e))[:200]}"
+        self._send(chat_id=chat_id, text=text, parse_mode='HTML')
+
+    def _lockdown_overview(self) -> str:
+        from bot.handlers.callbacks.user import MyKeyAnswerHandler as MK
+        now = datetime.utcnow()
+        st = load_lockdown_state(self.db)
+        lines = ["🔒 <b>Lockdown</b> — режим белых списков (шатдаун)",
+                 self._lockdown_status_line(st, now)]
+        if st['reason']:
+            lines.append(f"причина: {html.escape(st['reason'])}")
+        lines.append(self._lockdown_detector_line(st, now))
+        if st['active'] and st['mode'] == 'auto' and not st['by'].startswith('auto:'):
+            lines.append("⚠️ включён вручную при режиме auto — детектор сам не снимет, "
+                         "только /lockdown off")
+        lines.append("")
+        head = "<b>Эффективный каскад сейчас</b>"
+        if st['active']:
+            head += " (lockdown: CF-фронт первым, DNS через туннель)"
+        lines.append(head)
+        lines.extend(self._lockdown_order_lines(
+            self._lockdown_effective_orders(MK, st['active'])))
+        if not st['active']:
+            top, override = lockdown_order_preview(self.db, MK.PROTOCOL_METHOD_MAP)
+            lines.append("при включении наверх: " + html.escape(", ".join(top))
+                         + (" (override cascade_lockdown)" if override else ""))
+        lines.append("")
+        lines.append("<i>/lockdown on · /lockdown off · /lockdown auto · "
+                     "оповестить юзеров: /broadcast</i>")
+        return "\n".join(lines)
+
+    def _lockdown_status_line(self, st: dict, now: datetime) -> str:
+        mode_txt = {
+            'auto': 'auto (решает детектор)',
+            'on': 'on (зафиксирован оператором)',
+            'off': 'off (зафиксирован оператором)',
+        }[st['mode']]
+        if st['active']:
+            status = (f"🔴 АКТИВЕН с {_fmt_since(st['since'], now)} "
+                      f"({html.escape(st['by'])})")
+        else:
+            status = "⚪️ не активен"
+        return f"режим: {mode_txt} · статус: {status}"
+
+    def _lockdown_detector_line(self, st: dict, now: datetime) -> str:
+        last = st['last_change']
+        return (f"детектор: сигнатура шатдауна {st['streak_on']}/{LOCKDOWN_ON_AFTER} "
+                f"прогонов подряд · здоровых {st['streak_off']}/{LOCKDOWN_OFF_AFTER} · "
+                f"последнее изменение: {_fmt_since(last, now) if last else 'не было'}")
+
+    def _lockdown_effective_orders(self, MK, active: bool) -> dict:
+        """What users of each tier receive right now: get_cascade_order
+        with a stub user (status only; RU, ASN unknown — the common
+        case), i.e. the exact /sub pipeline including the tier filter."""
+        # Deploy-window guard: while get_cascade_order predates the
+        # lockdown layer (no ``apply_lockdown`` kwarg yet) the card
+        # would read "АКТИВЕН" over an unchanged order — project here
+        # so it shows the order lockdown imposes instead of
+        # contradicting itself. Dead once both halves are deployed.
+        layered = 'apply_lockdown' in inspect.signature(MK.get_cascade_order).parameters
+        top = lockdown_order_preview(self.db, MK.PROTOCOL_METHOD_MAP)[0]
+        out = {}
+        for tier in ('paid', 'demo'):
+            stub = SimpleNamespace(status=tier, last_asn=None, last_country='RU')
+            order = list(MK.get_cascade_order(self.db, user=stub))
+            if active and not layered:
+                order = _project_lockdown(order, top)
+            out[tier] = order
+        return out
+
+    @staticmethod
+    def _lockdown_order_lines(orders: dict) -> list:
+        return [f"• {tier}: {html.escape(' → '.join(order)) if order else '—'}"
+                for tier, order in orders.items()]
+
+    def _lockdown_set(self, mode: str) -> str:
+        from bot.handlers.callbacks.user import MyKeyAnswerHandler as MK
+        admin_id = self._caller_admin_id()
+        before = load_lockdown_state(self.db)
+        set_lockdown_mode(self.db, mode, by=f"admin:{admin_id}",
+                          reason=self.LOCKDOWN_MANUAL_REASON[mode])
+        after = load_lockdown_state(self.db)
+        if after['mode'] != mode:
+            # A swallowed sqlite error (set_setting returns False) or a
+            # module that ignored us — the operator must not walk away
+            # believing the mode flipped.
+            raise RuntimeError(f"lockdown_mode не записался (режим остался {after['mode']})")
+
+        def _fmt(s: dict) -> str:
+            return f"{s['mode']}/{'active' if s['active'] else 'inactive'}"
+        self.db.log_admin_action(admin_id, 'lockdown_set', mode,
+                                 f"{_fmt(before)} -> {_fmt(after)}")
+
+        order_lines = self._lockdown_order_lines(
+            self._lockdown_effective_orders(MK, after['active']))
+        if mode == 'on':
+            head = ("🔒 <b>LOCKDOWN включён оператором</b>" if not before['active']
+                    else "🔒 <b>LOCKDOWN зафиксирован оператором</b> "
+                         f"(был активен: {html.escape(before['by'])})")
+            lines = [head, "каскад теперь (CF-фронт первым):", *order_lines,
+                     "DNS клиентов — через туннель; клиенты подтянут /sub сами "
+                     "(sing-box ≈ 6 ч), urltest и так обходит мёртвые outbound-ы",
+                     "детектор не снимет сам — снять: /lockdown off · "
+                     "вернуть авто: /lockdown auto",
+                     "оповестить юзеров: /broadcast"]
+        elif mode == 'off':
+            head = ("🔓 <b>LOCKDOWN снят оператором</b>" if before['active']
+                    else "ℹ️ <b>Lockdown не был активен</b> — зафиксирован off")
+            lines = [head, "каскад теперь:", *order_lines,
+                     "детектор не включит сам, пока режим off — "
+                     "вернуть авто: /lockdown auto"]
+        else:
+            lines = ["🔁 <b>Lockdown: auto</b> — решает детектор "
+                     f"(сигнатура {LOCKDOWN_ON_AFTER} прогона подряд → включит; "
+                     f"{LOCKDOWN_OFF_AFTER} здоровых → снимет)",
+                     "сейчас: " + ("🔴 активен" if after['active'] else "⚪️ не активен")]
+            if after['active'] and not after['by'].startswith('auto:'):
+                lines.append("⚠️ активен по решению оператора — детектор сам не снимет, "
+                             "только /lockdown off")
+            lines += ["каскад сейчас:", *order_lines]
+        return "\n".join(lines)
+
     # ----- /whoami -----
 
     def show_whoami(self, chat_id: str, args: list) -> None:
@@ -909,6 +1245,77 @@ class AdminOpsMixin(AdminHandlerBase):
 
     # ----- /onlines -----
 
+    # How stale a presence row may be and still count as "right now".
+    # The exit reporter ticks every 5 min, so a fresh row can already
+    # be that old; 12 min means one missed tick doesn't blank the
+    # column, while a user who actually left ages out within ~2 ticks.
+    PRESENCE_WINDOW_MIN = 12
+
+    # Short labels for the protocol column. Keys are the normalised
+    # proto names web_server._EXIT_TAG_PROTO emits, plus 'hy2'.
+    _PROTO_LABEL = {
+        'reality': 'Reality',
+        'cf-ws': 'WS',
+        'ss2022': 'ShadowTLS',
+        'xhttp': 'XHTTP',
+        'hy2': 'Hy2',
+        'hy2t': 'Hy2-Turbo',
+    }
+
+    def _protocol_by_email(self) -> dict:
+        """email → protocol label, for the /onlines protocol column.
+
+        Two feeds, because no single source knows every transport:
+
+        - ``user_presence`` — the xray inbounds (Reality / WS /
+          ShadowTLS / XHTTP). Only the EXIT node's access.log carries
+          the inbound tag, so this arrives via its 5-min report. The
+          panel can't substitute: client_traffics is UNIQUE(email), so
+          lastOnline and up/down are shared across inbounds and
+          attribute a user to all of them at once.
+        - ``hy2_auth_log`` — Hysteria2 is a separate binary that never
+          writes to that log. Its auth callback fires on connect, so a
+          recent row means "came up on hy2". It does NOT repeat during
+          a long quiet session, so an old row ages out and the user
+          reads as unknown protocol rather than as offline.
+
+        Returns ``{}`` on any DB error — the caller renders '—' and the
+        rest of /onlines still works.
+        """
+        out: dict = {}
+        window = f'-{self.PRESENCE_WINDOW_MIN} minutes'
+        try:
+            with self.db._connect() as conn:
+                for email, proto in conn.execute(
+                    "SELECT email, proto FROM user_presence "
+                    "WHERE datetime(seen_at) >= datetime('now', ?)",
+                    (window,),
+                ):
+                    if email and proto:
+                        out[email] = self._PROTO_LABEL.get(proto, proto)
+
+                # hy2 overrides an xray row: a user can hold both (the
+                # sing-box config keeps every outbound alive), but UDP
+                # and calls only ride hy2, so that's the interesting one.
+                rows = conn.execute(
+                    "SELECT DISTINCT chat_id FROM hy2_auth_log "
+                    "WHERE decision IN ('allow', 'ok') "
+                    "  AND ts >= datetime('now', ?)",
+                    (window,),
+                ).fetchall()
+                if rows:
+                    ids = {str(r[0]) for r in rows if r[0] is not None}
+                    for cid, email in conn.execute(
+                        "SELECT chat_id, email FROM users "
+                        "WHERE email IS NOT NULL AND email != ''"
+                    ):
+                        if str(cid) in ids and email:
+                            out[email] = self._PROTO_LABEL['hy2']
+        except Exception as e:
+            logger.warning(f"/onlines: presence lookup failed: {e}")
+            return {}
+        return out
+
     def show_onlines(self, chat_id: str, args: list) -> None:
         """Live snapshot of who's connected right now.
 
@@ -925,6 +1332,7 @@ class AdminOpsMixin(AdminHandlerBase):
             'xui_api': '✗',
             'tcp_stats': '✗',
             'geoip': '✗',
+            'presence': '— (not checked)',
         }
         source_errors = {}
 
@@ -1043,6 +1451,8 @@ class AdminOpsMixin(AdminHandlerBase):
                 f"• X-UI API: {source_status['xui_api']}",
                 f"• TCP stats: {source_status['tcp_stats']}",
                 f"• GeoIP: {source_status['geoip']}",
+                f"• Протокол (presence): "
+                f"{'✓' if self._protocol_by_email() else '— (нет свежих данных)'}",
             ]
 
             # Add error details if available
@@ -1083,6 +1493,10 @@ class AdminOpsMixin(AdminHandlerBase):
                 traffic_by_email = xui.get_all_traffic() or {}
         except Exception as e:
             logger.warning(f"/onlines: traffic fetch failed: {e}")
+
+        # Which transport each user is on right now.
+        proto_by_email = self._protocol_by_email()
+        source_status['presence'] = '✓' if proto_by_email else '— (no data)'
 
         lines = [f"🟢 <b>Сейчас онлайн: {len(emails)}</b>"]
 
@@ -1133,8 +1547,10 @@ class AdminOpsMixin(AdminHandlerBase):
                 f"{consumed:.2f}/{quota} GB" if quota
                 else f"{consumed:.2f} GB"
             )
+            proto_str = proto_by_email.get(email, '—')
             lines.append(
                 f"• {uname}{sharing_marker}{seen_str} "
+                f"· 🔐 {proto_str} "
                 f"· 🔢 {ip_count}/{limit} IP "
                 f"· 📶 {rtt_str} "
                 f"· 📊 {traffic_str}\n"

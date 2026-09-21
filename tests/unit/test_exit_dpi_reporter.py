@@ -57,6 +57,53 @@ REJECT_LINES = [
 ]
 
 
+class TestParsePresence:
+    """parse_presence — per-user "which inbound are you on right now".
+
+    This is the only feed that can answer it: the panel keys
+    client_traffics by email alone, so its lastOnline/up/down are
+    shared across every inbound a user exists on.
+    """
+
+    def test_maps_email_to_its_inbound_tag(self):
+        out = {p['email']: p['tag'] for p in reporter.parse_presence(ACCESS_LINES)}
+        assert out['user_nia1967nia_208560413@nekovo.ru'] == 'inbound-2053'
+        assert out['user_direct_42@nekovo.ru'] == 'inbound-8444'
+
+    def test_probe_and_api_traffic_excluded(self):
+        emails = {p['email'] for p in reporter.parse_presence(ACCESS_LINES)}
+        assert not any(e.startswith('probe') for e in emails)
+        # the api line carries no email at all
+        assert all(e for e in emails)
+
+    def test_latest_tag_wins_when_user_switches_inbound(self):
+        """A user moving transports must report the NEW one — that's the
+        whole point of the column."""
+        lines = [
+            "2026/08/19 21:00:00.000000 from 130.49.146.10:1 accepted "
+            "tcp:example.com:443 [inbound-2053 >> direct] email: u@x",
+            "2026/08/19 21:00:05.000000 from 130.49.146.10:2 accepted "
+            "tcp:example.com:443 [inbound-443 >> direct] email: u@x",
+        ]
+        out = reporter.parse_presence(lines)
+        assert len(out) == 1
+        assert out[0]['tag'] == 'inbound-443'
+        # count restarts on the switch rather than carrying the old tag's
+        assert out[0]['conns'] == 1
+
+    def test_conns_accumulate_on_the_same_inbound(self):
+        lines = [
+            "2026/08/19 21:00:0%d.000000 from 130.49.146.10:%d accepted "
+            "tcp:example.com:443 [inbound-2053 >> direct] email: u@x" % (i, i)
+            for i in range(3)
+        ]
+        out = reporter.parse_presence(lines)
+        assert out[0]['conns'] == 3
+
+    def test_empty_input_is_empty_output(self):
+        assert reporter.parse_presence([]) == []
+
+
 class TestParseAccess:
     def test_aggregates_per_inbound_tag(self):
         out = {a['tag']: a for a in reporter.parse_access(ACCESS_LINES)}

@@ -2,7 +2,7 @@
 name: incident-response
 description: Runbook for mass outages — prod down, en-masse client disconnects. Order of triage, who to notify, how to roll back.
 type: prompt
-whenToUse: User reports a mass outage (лежит, не работает у всех, массово отваливаются, прод down, outage, срочно) or anything implying an incident affecting many users at once
+whenToUse: User reports a mass outage (лежит, не работает у всех, массово отваливаются, прод down, outage, срочно), a suspected whitelist / shutdown (белые списки, шатдаун, lockdown, только ws работает), or anything implying an incident affecting many users at once
 ---
 
 You run on **entry**; the bot is local, xray + 3x-ui are on **exit** (`ssh exit-node`). Shorthand:
@@ -21,8 +21,23 @@ Its **ИТОГ** decides which runbook you are in — read it before touching an
   cert outgrew the 8192-B buffer). Ports, containers and iptables will all look fine — they did for four days in
   2026-09. Go to **`vpn-ops`** (STEP 0 + Reality section) and verify the suspects the healthcheck printed, in
   order. Same routing for a `protocol_down:<tag>` alert.
-- **All protocols dead at once** → upstream, ONE incident: the probe-proxy sidecar on entry, the entry→exit
-  link, or the exit host itself. Stay in this runbook, triage below. Same for `protocol_down:all`.
+- **All direct protocols dead at once** → look at **`ws` before anything else** — it decides between two
+  incidents that look identical from the servers' side:
+  - **`ws` alive, every direct protocol (reality / hy2 / hy2t / stls) dark** → NOT upstream, and nothing to fix
+    on exit: this is the **whitelist / shutdown signature**. The probe runs from entry, a RU VPS; under a
+    whitelist the entry→exit hop to a foreign IP dies while entry→Cloudflare→exit keeps working. The bot's
+    lockdown detector (inside DPIMonitor, every 10 min) flips `lockdown_mode` on after 2 such evaluations
+    (~20 min): the AI topic gets «LOCKDOWN включён автоматически…», the pager gets `lockdown:active`, the
+    cascade becomes `ws, stls, reality, hy2, hy2t` and the sing-box `/sub` sends DNS through the tunnel. Have
+    the admin check **`/lockdown`** (you read `app_settings.lockdown_mode`, read-only — the query is in
+    `vpn-ops`). If `active` is still false ~20 min in (mode `off`, probes stale, only one direct protocol
+    probed, or the monitor paused by `/cascade off` — the detector rides its tick) → propose
+    **`/lockdown on`** — the admin runs it, not you. Do NOT restart xray / 3x-ui / the
+    sidecar: the servers are fine, the network around them is not. Users are NOT broadcast automatically —
+    offer the broadcast below («включён устойчивый режим, обновите подписку»), send only on the admin's OK.
+  - **Everything dark, `ws` included** → upstream, ONE incident: the probe-proxy sidecar on entry, the
+    entry→exit link, or the exit host itself. Stay in this runbook, triage below. Same for
+    `protocol_down:all` (the lockdown detector deliberately stays silent here — a dark `ws` is not a whitelist).
 - **`Пробы не пишутся` / `protocol_down:probe_pipeline`** → the bot's HealthChecker stopped writing rows. You are
   BLIND, not necessarily down: check the bot container and probe-proxy first, then ask users.
 - **Healthcheck all green, users still complain** → the break is between users and entry (ASN-level blocking,
@@ -48,7 +63,7 @@ If only 1-2 users complain → user-specific, use `vpn-ops`. If half+ complain �
 # Triage order (do NOT skip steps — stop at the first failure, fix, re-test)
 
 ```
-0. Healthcheck ИТОГ           python3 /opt/vpn-bot/scripts/protocol_healthcheck.py    # one dark → vpn-ops; all dark → go on
+0. Healthcheck ИТОГ           python3 /opt/vpn-bot/scripts/protocol_healthcheck.py    # one dark → vpn-ops; direct dark + ws alive → /lockdown; all dark → go on
 ```
 
 Steps 1–9 are the **manual fallback**: run them only if the healthcheck cannot assess (exit 2 — its `Слои:` line
@@ -88,6 +103,10 @@ curl -s -X POST "http://127.0.0.1:8080/api/admin/broadcast?admin_token=$TOKEN" \
 
 **Never broadcast without the user's explicit "OK, отправляй".** ~80 paid users get it per send.
 
+Under lockdown the text differs and it is still manual: the bot never broadcasts by itself when it flips
+lockdown on (sing-box clients re-read `/sub` within ~6 h and urltest already skips dead outbounds). If the
+admin wants it faster, the message is «Включён устойчивый режим — обновите подписку», and it is their call.
+
 # Rollback paths (least → most destructive)
 
 1. **Restart the bot container** — fixes ~half of stuck-state / memory-leak incidents:
@@ -108,7 +127,8 @@ curl -s -X POST "http://127.0.0.1:8080/api/admin/broadcast?admin_token=$TOKEN" \
 | Symptom | Most likely cause | First check |
 |---|---|---|
 | ONE protocol dark in the healthcheck / `protocol_down:<tag>`, every port green | per-client field wiped in the panel (`flow` on Reality — 2026-09-01), dest cert > 8192 B, hy2 hop-ports drift | `python3 /opt/vpn-bot/scripts/protocol_healthcheck.py` → its suspects → `vpn-ops` |
-| ALL protocols dark / `protocol_down:all` | probe-proxy sidecar on entry, entry→exit link, or the exit host | `docker ps \| grep probe-proxy; ssh exit-node uptime` |
+| reality / hy2 / hy2t / stls dark, **`ws` alive** | whitelist / shutdown regime — the lockdown signature, not a server fault (entry→exit foreign hop cut, entry→CF→exit alive) | `/lockdown` (admin) — the detector should have flipped it within ~20 min; if not, propose `/lockdown on`; never restart anything |
+| ALL protocols dark / `protocol_down:all` (`ws` too) | probe-proxy sidecar on entry, entry→exit link, or the exit host | `docker ps \| grep probe-proxy; ssh exit-node uptime` |
 | `protocol_down:probe_pipeline` ("Пробы не пишутся") | HealthChecker job dead in the bot — you are blind, not down | `$DC logs vpn-bot --tail 200 \| grep -i health` |
 | All users down, xray container down on exit | OOM / restart loop on the 929 MB exit | `ssh exit-node 'dmesg -T \| tail; docker ps -a \| grep 3x-ui'` |
 | New keys "fail to connect", old ones work | `sid`/`pbk` env passthrough broken | `$DC exec -T vpn-bot env \| grep -E 'SID_VALUE\|REALITY'` |

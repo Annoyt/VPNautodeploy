@@ -694,6 +694,8 @@ class WebAppServer:
         except Exception:
             return web.json_response({'ok': False}, status=400)
 
+        await asyncio.to_thread(self._store_presence, payload or {})
+
         rows = await asyncio.to_thread(self._dpi_exit_rows, payload or {})
         if rows:
             try:
@@ -711,6 +713,56 @@ class WebAppServer:
                 logger.warning(f"dpi_exit_report: insert failed: {e}")
                 return web.json_response({'ok': False}, status=500)
         return web.json_response({'ok': True, 'rows': len(rows)})
+
+    def _store_presence(self, payload: dict) -> int:
+        """Upsert the exit report's per-user inbound tags.
+
+        Powers /onlines' protocol column. Kept separate from the
+        dpi_metrics write so a malformed presence block can never cost
+        us the heatmap rows — the exit reporter only advances its log
+        offsets on a 2xx, and dropping this feed silently would be
+        worse than showing no protocol at all.
+        """
+        presence = payload.get('presence') or []
+        if not isinstance(presence, list):
+            return 0
+        from datetime import datetime
+        ts = datetime.utcnow().isoformat()
+        rows = []
+        for item in presence:
+            if not isinstance(item, dict):
+                continue
+            email = (item.get('email') or '').strip()
+            tag = (item.get('tag') or '').strip()
+            if not email or not tag:
+                continue
+            try:
+                conns = int(item.get('conns') or 0)
+            except (TypeError, ValueError):
+                conns = 0
+            # Unknown tags pass through raw, same as the heatmap does,
+            # so a newly added inbound is visible before we name it.
+            rows.append(
+                (email, tag, self._EXIT_TAG_PROTO.get(tag, tag), conns, ts)
+            )
+        if not rows:
+            return 0
+        try:
+            with self.db._connect() as conn:
+                conn.executemany(
+                    "INSERT INTO user_presence "
+                    "(email, inbound_tag, proto, conns, seen_at) "
+                    "VALUES (?, ?, ?, ?, ?) "
+                    "ON CONFLICT(email) DO UPDATE SET "
+                    "inbound_tag=excluded.inbound_tag, "
+                    "proto=excluded.proto, conns=excluded.conns, "
+                    "seen_at=excluded.seen_at",
+                    rows,
+                )
+        except Exception as e:
+            logger.warning(f"dpi_exit_report: presence upsert failed: {e}")
+            return 0
+        return len(rows)
 
     def _dpi_exit_rows(self, payload: dict) -> list:
         """Geo-bucket the exit report into dpi_metrics row tuples."""
@@ -932,6 +984,13 @@ class WebAppServer:
             FALLBACK_ALLOWED_STATUSES,
             FallbackNodeService,
         )
+        from bot.services.lockdown import is_lockdown_active
+        # LOCKDOWN (IMPROVEMENT_PLAN B1/B5): read once per request and
+        # handed to the sing-box builder for the DNS profile; the
+        # cascade order below applies it on its own. Tolerant read —
+        # a broken app_settings row must degrade to the normal
+        # profile, never to a 500 on /sub.
+        lockdown = is_lockdown_active(self.db)
         cascade = MyKeyAnswerHandler.get_cascade_order(
             self.db, user=user, country=country, asn=asn,
         )
@@ -962,7 +1021,9 @@ class WebAppServer:
         elif fmt == 'xray':
             config_obj = self.subscription.build_xray_config(user, cascade)
         else:
-            config_obj = self.subscription.build_singbox_config(user, cascade)
+            config_obj = self.subscription.build_singbox_config(
+                user, cascade, lockdown=lockdown,
+            )
 
         # Surface quota/expiry to Hiddify's profile panel via the
         # subscription-userinfo header. Bytes-per-GB matches the units
@@ -2064,13 +2125,18 @@ class WebAppServer:
         bare list of enabled names); ``config`` is the new
         per-protocol on/off list the editor talks to; ``auto`` is
         DPIMonitor's read-only overlay (what it sank to the tail and
-        why) — undo lives in the bot (/cascade reset), not here."""
+        why) — undo lives in the bot (/cascade reset), not here;
+        ``lockdown`` is the whitelist-mode switch (IMPROVEMENT_PLAN B1,
+        bot/services/lockdown.py) — mode/active/since/by/reason plus
+        the order users get while it is active; flipped in the bot
+        (/lockdown on|off|auto), not here."""
         if not self._validate_admin(request):
             return web.json_response({'error': 'Unauthorized'}, status=401)
         from bot.handlers.callbacks.user import MyKeyAnswerHandler
         from bot.services.notifications import NotificationService
         from bot.handlers.admin.ops import (
             load_cascade_auto, load_dpi_monitor_state, dpi_monitor_enabled)
+        from bot.services.lockdown import load_lockdown, load_lockdown_order
         cfg = MyKeyAnswerHandler.get_cascade_config(self.db)
         order = [c['name'] for c in cfg if c.get('enabled')]
         labels = NotificationService.PROTOCOL_LABELS_RU
@@ -2090,6 +2156,9 @@ class WebAppServer:
         # Same tolerant readers as /cascade: bad JSON → empty, never 500.
         auto = load_cascade_auto(self.db)
         last_run = load_dpi_monitor_state(self.db).get('last_run')
+        # Same tolerance for the lockdown key: missing / bad JSON →
+        # "auto, not active", the endpoint never 500s over it.
+        ld = load_lockdown(self.db)
         return web.json_response({
             'config': cfg,
             'order': order,
@@ -2100,6 +2169,17 @@ class WebAppServer:
                 'global': auto['global'],
                 'asn': auto['asn'],
                 'last_run': last_run if isinstance(last_run, str) else None,
+            },
+            'lockdown': {
+                'mode': ld['mode'],
+                'active': bool(ld['active']),
+                'since': ld['since'],
+                'by': ld['by'],
+                'reason': ld['reason'],
+                # The order users receive while active (operator's
+                # cascade_lockdown or the built-in default) — for the
+                # editor's banner text.
+                'order': list(load_lockdown_order(self.db)),
             },
         })
 

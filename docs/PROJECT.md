@@ -2,7 +2,7 @@
 
 **Last updated: 2026-09-06.** Этот файл — человекочитаемый обзор «как всё
 устроено сейчас». Парный документ — **AGENTS.md** в корне: гайд для агентов,
-секция Deployment и хроника граблей (§8–29) — при конфликте прав AGENTS.md.
+секция Deployment и хроника граблей (§8–30) — при конфликте прав AGENTS.md.
 Живая операционная память — в memory-файлах агентских сессий.
 
 ---
@@ -40,6 +40,22 @@
 - **VMess + WS/httpupgrade** — CF-fronted инбаунды (через локальный 3x-ui entry).
 - Роутинг клиента: RU-направления — direct (+ QUIC:443 carve-out для VK),
   весь UDP — через UDP-нативный селектор `calls` (звонки работают и у freemium).
+- **Lockdown-режим** (с 2026-09-06; сценарий белых списков / шатдауна, когда
+  прямые коннекты к entry-IP умирают, а CF-фронт живёт): каскад
+  `ws, stls, reality, hy2, hy2t` — CF-фронт первым, TCP-direct дальше, UDP
+  последним (операторский override `app_settings.cascade_lockdown`) — плюс
+  **DNS через туннель** в sing-box-подписке (в dns-правилах остаётся только
+  clash `Direct → local`, `final = remote`; route-правила и RU-direct не
+  трогаются намеренно — разрешённые RU-сайты должны продолжать работать).
+  Слой стоит между операторским порядком и авто-понижениями DPIMonitor,
+  тир-фильтр последний ⇒ demo под lockdown = `ws, stls, hy2`. Включается
+  **автодетектом из проб** внутри тика DPIMonitor (все измеренные прямые
+  протоколы темны, `ws` жив; 2 оценки ≈ 20 мин → вкл, 12 здоровых ≈ 2 ч →
+  выкл, но снимает автомат только то, что включил сам) или руками
+  `/lockdown on|off|auto`; пока активен — критикал `lockdown:active`
+  (напоминание каждые 2 ч). Юзеров автоматически не оповещаем (sing-box
+  перечитывает `/sub` за ~6 ч; при нужде `/broadcast`), SNI не переключаем
+  (это shadow-tls + HAProxy + панель в lockstep, IMPROVEMENT_PLAN B2).
 
 **Тиры:** демо = freemium **10 ГБ/мес навсегда** (`subscription_expiry IS NULL` —
 это норма), продлевается месячной джобой; paid = **100 ГБ/мес до даты**
@@ -88,7 +104,7 @@ bot/
 | `email_requests` | входящие заявки с почты | дедуп по Message-ID |
 | `ai_sessions` | сессии /ai | ключи `pm:<id>` / `topic:<id>:<thread>` |
 | `dpi_metrics` | 5-мин срезы DPI-сигналов | `asn` с префиксом `AS`; country `*GLOBAL*`/`*TUNNEL*` |
-| `app_settings` | key/value тюнинги | `cascade_protocol_order` / `cascade_by_asn` / `cascade_by_country` — операторские; `cascade_auto` + `dpi_monitor_state` пишет ТОЛЬКО DPIMonitor — руками не править, откат одной командой `/cascade reset` |
+| `app_settings` | key/value тюнинги | `cascade_protocol_order` / `cascade_by_asn` / `cascade_by_country` — операторские; `cascade_auto` + `dpi_monitor_state` пишет ТОЛЬКО DPIMonitor — руками не править, откат одной командой `/cascade reset`; `lockdown_mode` (режим/active/since/by/стрики детектора) пишут детектор внутри DPIMonitor и `/lockdown` — руками не править, откат `/cascade reset` его НЕ трогает, снимать `/lockdown off`; `cascade_lockdown` — операторский порядок под lockdown (JSON-список) |
 | `admin_actions`, `notification_log`, `tickets`, `ticket_messages`, `message_map`, `nodes` | аудит/дедуп/саппорт/ноды | |
 
 **Учёт трафика:** источник правды — `client_traffics` панели exit (все
@@ -120,7 +136,11 @@ xray-протоколы в одну строку на email; UNIQUE(email) ⇒ �
 у алерта `protocol_down`), `/cascade` (действующий порядок каскада с тегами
 тиров + авто-понижения DPIMonitor с since/reason и per-ASN записями;
 `/cascade AS31133` — порядок для ASN, `/cascade reset` — снять все
-авто-понижения, `/cascade on|off` — монитор), `/ai <вопрос>` (Hermes-агент).
+авто-понижения, `/cascade on|off` — монитор), `/lockdown` (режим lockdown:
+mode/active/since/by/reason, стрики детектора, эффективные порядки demo и
+paid; `/lockdown on` — включить и зафиксировать, `/lockdown off` — снять,
+`/lockdown auto` — вернуть руль детектору; каждая смена — `admin_actions`
+`lockdown_set`), `/ai <вопрос>` (Hermes-агент).
 PM-fallback при выключенном форуме.
 
 **Дашборд** `https://<dashboard-host>:9443/?admin_token=…` (HMAC-токен из
@@ -187,6 +207,27 @@ OpenRouter по `/api/v1/key` > $0.001 между запусками = крит�
   (решают базовый порядок, авто только переставляет внутри него). Каждая смена
   — строка в `admin_actions` + пост в топик AI; `/cascade` показывает, что и
   почему понижено, `/cascade reset` снимает всё одной командой.
+- **Lockdown-детект (с 2026-09-06, IMPROVEMENT_PLAN B1+B5)** — на том же тике
+  DPIMonitor и на тех же уже собранных probe-сигналах (второго SQL-прохода
+  нет), чистый `evaluate_lockdown` в `services/lockdown.py`. **Сигнатура
+  шатдауна:** измерено ≥2 прямых протокола (`reality`/`hy2`/`hy2t`/`stls`) и
+  все они DARK, а `ws` измерен и жив — потому что зонд стоит на entry (RU VPS):
+  под whitelist умирает хоп entry→exit на иностранный IP, а
+  entry→Cloudflare→exit живёт. Если тёмен и `ws` — это апстрим
+  (probe-proxy / линк / exit, уже пейджит `protocol_down:all`), не lockdown:
+  стрики не трогаются. Гистерезис: `streak_on` 2 → `auto_on`; `streak_off`
+  (≥2 прямых живы) 12 → `auto_off`, только если `by` начинается с `auto:`;
+  пробы старше 45 мин или упавший сборщик → стрики заморожены; при `mode`
+  `on`/`off` детектор считает, но `active` не переключает; `/cascade off`
+  (монитор выключен) останавливает и детектор — остаётся ручной
+  `/lockdown on`. Событие →
+  `app_settings.lockdown_mode` + `admin_actions('dpi_monitor',
+  'lockdown_auto_on|off')` + одно сообщение в топик AI («Снять: /lockdown off.
+  Зафиксировать: /lockdown on. Оповестить юзеров: /broadcast»). Пока
+  `active` — критикал `lockdown:active` (min_cycles 1, напоминание каждые 2 ч,
+  гаснет сам при снятии; агента, в отличие от `protocol_down:*`, не зовёт).
+  Дашборд: `GET /api/admin/cascade_order` → `lockdown {mode, active, since,
+  by, reason}`, красный баннер в редакторе каскада.
 
 ## 8. Тесты — 4 уровня
 
@@ -224,9 +265,11 @@ git commit …                     # штамп берётся из HEAD
 
 ## 10. Статус и планы
 
-Активный roadmap — `docs/IMPROVEMENT_PLAN.md` (lockdown-режим, CI, охват
-фидбэк-петли A1.2 — сама петля замкнута DPIMonitor'ом 2026-09-06). Multi-node cluster-код (`bot/core/cluster/`) написан, но в
+Активный roadmap — `docs/IMPROVEMENT_PLAN.md` (последний P0 — CI; lockdown-режим
+B1/B5 закрыт 2026-09-06, остаток по белым спискам — B2 whitelisted-SNI и B3
+второй CDN; охват фидбэк-петли A1.2 — сама петля замкнута DPIMonitor'ом
+2026-09-06). Multi-node cluster-код (`bot/core/cluster/`) написан, но в
 проде один exit + DE-резерв; авто-провижн нод через API провайдера — «когда-нибудь»
 (у AdminVPS API есть, у BitCloud нет).
 
-Хронология всех инцидентов и решений: AGENTS.md §8–29.
+Хронология всех инцидентов и решений: AGENTS.md §8–30.

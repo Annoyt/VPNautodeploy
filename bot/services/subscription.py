@@ -379,6 +379,8 @@ class SubscriptionService:
         self,
         user,
         enabled_protocols: Tuple[str, ...],
+        *,
+        lockdown: bool = False,
     ) -> dict:
         """Build a complete sing-box JSON config.
 
@@ -388,6 +390,14 @@ class SubscriptionService:
 
         For ``lang='en'`` users, adds a RU-exit outbound so they can
         access RU-geo-blocked content (VK/Yandex/etc) from abroad.
+
+        ``lockdown`` (IMPROVEMENT_PLAN B5, ``bot/services/lockdown.py``)
+        switches ONLY the DNS profile: every lookup through the tunnel,
+        the local resolver kept for Clash "Direct" mode alone. Route
+        rules, outbounds and the cascade order are the caller's and
+        stay as they are — the order is already lockdown-projected by
+        ``get_cascade_order``. This service has no db; the flag is read
+        once per request by the /sub handler.
         """
         outbounds: List[dict] = []
         proxy_tags: List[str] = []
@@ -498,6 +508,38 @@ class SubscriptionService:
                 outbounds.append(ru_exit)
                 ru_exit_tag = ru_exit['tag']
 
+        if lockdown:
+            # LOCKDOWN (B5): under a whitelist the ISP resolver is the
+            # first thing poisoned or NXDOMAIN'd, and a poisoned answer
+            # for the CF host takes down the one transport that still
+            # works — so EVERY lookup rides the tunnel, RU domains
+            # included (the Yandex "foreign DNS = VPN" banner is a
+            # price worth paying while the alternative is no DNS at
+            # all). Only the user's explicit Clash "Direct" mode keeps
+            # the local resolver. Route rules are untouched on purpose:
+            # the RU-direct TCP bypass is what keeps whitelisted sites
+            # working, the UDP/calls path is unchanged.
+            dns_rules = [
+                {'clash_mode': 'Direct', 'server': 'local'},
+            ]
+            dns_final = 'remote'
+        else:
+            dns_rules = [
+                {'clash_mode': 'Direct', 'server': 'local'},
+                {'clash_mode': 'Global', 'server': 'remote'},
+                # Domains explicitly routed to proxy below need
+                # remote-resolved DNS too — otherwise the resolver
+                # would leak the lookup to the local ISP before the
+                # rule kicks in.
+                {'rule_set': self._PROXY_RULE_SET_TAGS, 'server': 'remote'},
+                # Russian domestic — resolve locally for speed and
+                # so user's ISP DNS treats them as native traffic.
+                {'rule_set': self._DIRECT_RULE_SET_TAGS, 'server': 'local'},
+            ]
+            # Default to local DNS to avoid foreign-DNS detection
+            # by services like Yandex that treat non-RU DNS as VPN.
+            dns_final = 'local'
+
         return {
             'log': {'level': 'warn'},
             'dns': {
@@ -509,21 +551,8 @@ class SubscriptionService:
                     },
                     {'tag': 'local', 'address': 'local', 'detour': 'direct'},
                 ],
-                'rules': [
-                    {'clash_mode': 'Direct', 'server': 'local'},
-                    {'clash_mode': 'Global', 'server': 'remote'},
-                    # Domains explicitly routed to proxy below need
-                    # remote-resolved DNS too — otherwise the resolver
-                    # would leak the lookup to the local ISP before the
-                    # rule kicks in.
-                    {'rule_set': self._PROXY_RULE_SET_TAGS, 'server': 'remote'},
-                    # Russian domestic — resolve locally for speed and
-                    # so user's ISP DNS treats them as native traffic.
-                    {'rule_set': self._DIRECT_RULE_SET_TAGS, 'server': 'local'},
-                ],
-                # Default to local DNS to avoid foreign-DNS detection
-                # by services like Yandex that treat non-RU DNS as VPN.
-                'final': 'local',
+                'rules': dns_rules,
+                'final': dns_final,
             },
             'outbounds': outbounds,
             'route': {
