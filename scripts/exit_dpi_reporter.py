@@ -161,6 +161,43 @@ def parse_access(lines) -> list:
     ]
 
 
+def parse_presence(lines) -> list:
+    """Per-email: the inbound tag each user was last seen on.
+
+    Feeds /onlines' "which protocol is this user on right now".
+    Xray's access.log is the only place that knows it — the panel
+    keys client_traffics by email alone (UNIQUE(email)), so both
+    lastOnline and up/down are shared across inbounds and can't
+    attribute a user to one. Hysteria2 is a separate binary and never
+    lands here; the bot fills hy2 in from hy2_auth_log instead.
+
+    Lines arrive in chronological order, so the last tag seen for an
+    email wins — that's the transport it's using now. ``conns`` is
+    how many accepts it made this window, which reads as activity.
+    """
+    per_email: dict = {}
+    for line in lines:
+        m = ACCESS_RE.search(line)
+        if not m:
+            continue
+        ip, tag, email = m.group(1), m.group(2), m.group(3) or ""
+        if not email or tag == "api" or ip.startswith("127."):
+            continue
+        if email.startswith("probe"):
+            continue
+        rec = per_email.get(email)
+        if rec is None or rec["tag"] != tag:
+            # New user, or they moved to a different inbound: the
+            # later tag is the live one, so restart the count.
+            per_email[email] = {"tag": tag, "conns": 1}
+        else:
+            rec["conns"] += 1
+    return [
+        {"email": email, "tag": rec["tag"], "conns": rec["conns"]}
+        for email, rec in per_email.items()
+    ]
+
+
 def parse_rejects(lines) -> list:
     """Aggregate reject/probe events per (kind, reason) with IP counts."""
     buckets: dict = {}
@@ -232,16 +269,19 @@ def run_once() -> int:
     error_lines, error_off = read_new_lines(error_path, state, "error")
 
     access = parse_access(access_lines)
+    presence = parse_presence(access_lines)
     rejects = parse_rejects(error_lines)
 
-    if not access and not rejects:
+    if not access and not rejects and not presence:
         # Nothing to say (or first-run baseline) — just persist offsets.
         state.update({"access": access_off, "error": error_off})
         _save_state(state)
         logger.info("no new events")
         return 0
 
-    ok = post_report({"access": access, "rejects": rejects})
+    ok = post_report(
+        {"access": access, "rejects": rejects, "presence": presence}
+    )
     if not ok:
         # Leave offsets untouched: the same window is retried next tick.
         return 1
@@ -249,7 +289,8 @@ def run_once() -> int:
     _save_state(state)
     logger.info(
         f"reported {sum(a['conns'] for a in access)} conns / "
-        f"{sum(r['count'] for r in rejects)} rejects"
+        f"{sum(r['count'] for r in rejects)} rejects / "
+        f"{len(presence)} present users"
     )
     return 0
 

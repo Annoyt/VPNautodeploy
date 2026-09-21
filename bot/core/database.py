@@ -594,6 +594,26 @@ class Database:
                     "CREATE INDEX IF NOT EXISTS idx_hy2_auth_log_ts "
                     "ON hy2_auth_log(ts)"
                 )
+                # Which transport each user is on right now. Fed by the
+                # exit node's 5-min report (scripts/exit_dpi_reporter.py)
+                # because only the exit xray's access.log carries the
+                # inbound tag — the panel keys client_traffics by email
+                # alone, so lastOnline/up/down are shared across inbounds
+                # and cannot attribute a user to one. Hy2 users never
+                # appear here (separate binary); /onlines fills those in
+                # from hy2_auth_log. One row per email, last write wins.
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS user_presence ("
+                    "email TEXT PRIMARY KEY, "
+                    "inbound_tag TEXT, "
+                    "proto TEXT, "
+                    "conns INTEGER DEFAULT 0, "
+                    "seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_user_presence_seen "
+                    "ON user_presence(seen_at)"
+                )
                 conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_hy2_auth_log_chat_ts "
                     "ON hy2_auth_log(chat_id, ts)"

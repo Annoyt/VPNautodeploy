@@ -1245,6 +1245,77 @@ class AdminOpsMixin(AdminHandlerBase):
 
     # ----- /onlines -----
 
+    # How stale a presence row may be and still count as "right now".
+    # The exit reporter ticks every 5 min, so a fresh row can already
+    # be that old; 12 min means one missed tick doesn't blank the
+    # column, while a user who actually left ages out within ~2 ticks.
+    PRESENCE_WINDOW_MIN = 12
+
+    # Short labels for the protocol column. Keys are the normalised
+    # proto names web_server._EXIT_TAG_PROTO emits, plus 'hy2'.
+    _PROTO_LABEL = {
+        'reality': 'Reality',
+        'cf-ws': 'WS',
+        'ss2022': 'ShadowTLS',
+        'xhttp': 'XHTTP',
+        'hy2': 'Hy2',
+        'hy2t': 'Hy2-Turbo',
+    }
+
+    def _protocol_by_email(self) -> dict:
+        """email → protocol label, for the /onlines protocol column.
+
+        Two feeds, because no single source knows every transport:
+
+        - ``user_presence`` — the xray inbounds (Reality / WS /
+          ShadowTLS / XHTTP). Only the EXIT node's access.log carries
+          the inbound tag, so this arrives via its 5-min report. The
+          panel can't substitute: client_traffics is UNIQUE(email), so
+          lastOnline and up/down are shared across inbounds and
+          attribute a user to all of them at once.
+        - ``hy2_auth_log`` — Hysteria2 is a separate binary that never
+          writes to that log. Its auth callback fires on connect, so a
+          recent row means "came up on hy2". It does NOT repeat during
+          a long quiet session, so an old row ages out and the user
+          reads as unknown protocol rather than as offline.
+
+        Returns ``{}`` on any DB error — the caller renders '—' and the
+        rest of /onlines still works.
+        """
+        out: dict = {}
+        window = f'-{self.PRESENCE_WINDOW_MIN} minutes'
+        try:
+            with self.db._connect() as conn:
+                for email, proto in conn.execute(
+                    "SELECT email, proto FROM user_presence "
+                    "WHERE datetime(seen_at) >= datetime('now', ?)",
+                    (window,),
+                ):
+                    if email and proto:
+                        out[email] = self._PROTO_LABEL.get(proto, proto)
+
+                # hy2 overrides an xray row: a user can hold both (the
+                # sing-box config keeps every outbound alive), but UDP
+                # and calls only ride hy2, so that's the interesting one.
+                rows = conn.execute(
+                    "SELECT DISTINCT chat_id FROM hy2_auth_log "
+                    "WHERE decision IN ('allow', 'ok') "
+                    "  AND ts >= datetime('now', ?)",
+                    (window,),
+                ).fetchall()
+                if rows:
+                    ids = {str(r[0]) for r in rows if r[0] is not None}
+                    for cid, email in conn.execute(
+                        "SELECT chat_id, email FROM users "
+                        "WHERE email IS NOT NULL AND email != ''"
+                    ):
+                        if str(cid) in ids and email:
+                            out[email] = self._PROTO_LABEL['hy2']
+        except Exception as e:
+            logger.warning(f"/onlines: presence lookup failed: {e}")
+            return {}
+        return out
+
     def show_onlines(self, chat_id: str, args: list) -> None:
         """Live snapshot of who's connected right now.
 
@@ -1261,6 +1332,7 @@ class AdminOpsMixin(AdminHandlerBase):
             'xui_api': '✗',
             'tcp_stats': '✗',
             'geoip': '✗',
+            'presence': '— (not checked)',
         }
         source_errors = {}
 
@@ -1379,6 +1451,8 @@ class AdminOpsMixin(AdminHandlerBase):
                 f"• X-UI API: {source_status['xui_api']}",
                 f"• TCP stats: {source_status['tcp_stats']}",
                 f"• GeoIP: {source_status['geoip']}",
+                f"• Протокол (presence): "
+                f"{'✓' if self._protocol_by_email() else '— (нет свежих данных)'}",
             ]
 
             # Add error details if available
@@ -1419,6 +1493,10 @@ class AdminOpsMixin(AdminHandlerBase):
                 traffic_by_email = xui.get_all_traffic() or {}
         except Exception as e:
             logger.warning(f"/onlines: traffic fetch failed: {e}")
+
+        # Which transport each user is on right now.
+        proto_by_email = self._protocol_by_email()
+        source_status['presence'] = '✓' if proto_by_email else '— (no data)'
 
         lines = [f"🟢 <b>Сейчас онлайн: {len(emails)}</b>"]
 
@@ -1469,8 +1547,10 @@ class AdminOpsMixin(AdminHandlerBase):
                 f"{consumed:.2f}/{quota} GB" if quota
                 else f"{consumed:.2f} GB"
             )
+            proto_str = proto_by_email.get(email, '—')
             lines.append(
                 f"• {uname}{sharing_marker}{seen_str} "
+                f"· 🔐 {proto_str} "
                 f"· 🔢 {ip_count}/{limit} IP "
                 f"· 📶 {rtt_str} "
                 f"· 📊 {traffic_str}\n"

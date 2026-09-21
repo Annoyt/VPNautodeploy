@@ -28,7 +28,8 @@ ADMIN_HELP_TEXT = (
     "детектор, каскады; <code>/lockdown on</code> / <code>off</code> / "
     "<code>auto</code> — зафиксировать / вернуть детектору\n"
     "• <code>/stats</code> — статистика по юзерам / трафику\n"
-    "• <code>/onlines</code> — кто онлайн (lastOnline панели, hy2 тоже) + трафик\n"
+    "• <code>/onlines</code> — кто онлайн (lastOnline панели, hy2 тоже), "
+    "на каком протоколе + трафик\n"
     "• <code>/whoami</code> — твой id + проверка прав\n"
     "• <code>/topics</code> — текущие forum topic IDs\n\n"
 

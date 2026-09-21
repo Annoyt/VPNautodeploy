@@ -694,6 +694,8 @@ class WebAppServer:
         except Exception:
             return web.json_response({'ok': False}, status=400)
 
+        await asyncio.to_thread(self._store_presence, payload or {})
+
         rows = await asyncio.to_thread(self._dpi_exit_rows, payload or {})
         if rows:
             try:
@@ -711,6 +713,56 @@ class WebAppServer:
                 logger.warning(f"dpi_exit_report: insert failed: {e}")
                 return web.json_response({'ok': False}, status=500)
         return web.json_response({'ok': True, 'rows': len(rows)})
+
+    def _store_presence(self, payload: dict) -> int:
+        """Upsert the exit report's per-user inbound tags.
+
+        Powers /onlines' protocol column. Kept separate from the
+        dpi_metrics write so a malformed presence block can never cost
+        us the heatmap rows — the exit reporter only advances its log
+        offsets on a 2xx, and dropping this feed silently would be
+        worse than showing no protocol at all.
+        """
+        presence = payload.get('presence') or []
+        if not isinstance(presence, list):
+            return 0
+        from datetime import datetime
+        ts = datetime.utcnow().isoformat()
+        rows = []
+        for item in presence:
+            if not isinstance(item, dict):
+                continue
+            email = (item.get('email') or '').strip()
+            tag = (item.get('tag') or '').strip()
+            if not email or not tag:
+                continue
+            try:
+                conns = int(item.get('conns') or 0)
+            except (TypeError, ValueError):
+                conns = 0
+            # Unknown tags pass through raw, same as the heatmap does,
+            # so a newly added inbound is visible before we name it.
+            rows.append(
+                (email, tag, self._EXIT_TAG_PROTO.get(tag, tag), conns, ts)
+            )
+        if not rows:
+            return 0
+        try:
+            with self.db._connect() as conn:
+                conn.executemany(
+                    "INSERT INTO user_presence "
+                    "(email, inbound_tag, proto, conns, seen_at) "
+                    "VALUES (?, ?, ?, ?, ?) "
+                    "ON CONFLICT(email) DO UPDATE SET "
+                    "inbound_tag=excluded.inbound_tag, "
+                    "proto=excluded.proto, conns=excluded.conns, "
+                    "seen_at=excluded.seen_at",
+                    rows,
+                )
+        except Exception as e:
+            logger.warning(f"dpi_exit_report: presence upsert failed: {e}")
+            return 0
+        return len(rows)
 
     def _dpi_exit_rows(self, payload: dict) -> list:
         """Geo-bucket the exit report into dpi_metrics row tuples."""
