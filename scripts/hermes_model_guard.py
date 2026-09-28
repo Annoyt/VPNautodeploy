@@ -38,6 +38,17 @@ This oneshot (systemd timer, every 30 min) closes that gap. In order:
      chain is thinner than the operator thinks. Fired on the transition
      only (state.json remembers the last classification), otherwise a
      deliberately-kept paid fallback would nag every 6 h forever.
+  e) AUXILIARY models — config.yaml auxiliary.<task>.model (and each
+     task's fallback_chain) — are priced the same way. Hermes calls them
+     for side tasks (compression, smart-approval, curator, vision) outside
+     the chain above; left unpinned they fall back to a model HARDCODED in
+     Hermes (google/gemini-3-flash-preview, paid). From 2026-09-07 to -28
+     that billed the key 22 times while (b) reported every model free,
+     because a text-only primary sends every image there. Paid -> CRITICAL,
+     missing -> WARNING (a pinned task on a dead id fails closed), both on
+     the transition only, like (d). Never auto-fixed: which side-task model
+     is good enough is the operator's call. When money moves and vision is
+     unpinned, the usage message names that as the likeliest source.
 
 Notifications go to the forum topic TOPIC_AI in FORUM_GROUP_ID with
 BOT_TOKEN from /opt/vpn-bot/.env, through that file's HTTPS_PROXY
@@ -223,6 +234,8 @@ class Notification:
 class Plan:
     primary: Optional[ModelStatus] = None
     fallbacks: List[ModelStatus] = field(default_factory=list)
+    # (label, status) — label is "vision" or "vision.fallback_chain[0]"
+    auxiliary: List[Tuple[str, ModelStatus]] = field(default_factory=list)
     usage_delta: Optional[float] = None
     actions: List[str] = field(default_factory=list)
     notifications: List[Notification] = field(default_factory=list)
@@ -233,8 +246,11 @@ class Plan:
         return any(n.severity == CRITICAL for n in self.notifications)
 
     def model_states(self) -> Dict[str, str]:
+        # One id can sit in several roles (the primary is usually also the
+        # text auxiliary model); it has one price, so one state.
         out = {}
-        for st in ([self.primary] if self.primary else []) + self.fallbacks:
+        chain = ([self.primary] if self.primary else []) + self.fallbacks
+        for st in chain + [st for _, st in self.auxiliary]:
             out[st.model] = st.state
         return out
 
@@ -286,14 +302,88 @@ def config_models(config: dict) -> Tuple[dict, List[dict]]:
     return model, fallbacks
 
 
+# Providers whose ids live in OpenRouter's /models index. 'auto' and ''
+# resolve to the main provider, which is OpenRouter on this host; any other
+# provider (custom / nous / codex) is a bill this guard cannot see.
+_PRICEABLE_AUX_PROVIDERS = ("openrouter", "auto", "")
+
+
+def config_aux_models(config: dict) -> List[Tuple[str, str]]:
+    """(label, model_id) for every pinned auxiliary model, fallback_chain
+    entries included ("vision.fallback_chain[0]").
+
+    Hermes calls these for side tasks — compression, smart-approval,
+    curator, vision — outside model/fallback_providers, so the chain check
+    alone never saw them. Unpinned, a task lands on Hermes' HARDCODED
+    OpenRouter default (google/gemini-3-flash-preview, paid): every image
+    while the primary is text-only, and any text call whose model 429s.
+    That billed the key 22 times after the 2026-09-07 promotion to a
+    text-only primary, while this guard reported every model free.
+
+    Never raises: auxiliary is optional, and a malformed block must not
+    blind the whole guard — the primary check matters more. An entry with
+    an empty model is skipped (it has no id to price; see the usage hint).
+    """
+    aux = config.get("auxiliary") if isinstance(config, dict) else None
+    if not isinstance(aux, dict):
+        return []
+    out: List[Tuple[str, str]] = []
+    for task, task_cfg in aux.items():
+        if not isinstance(task_cfg, dict):
+            continue
+        entries = [(str(task), task_cfg)]
+        chain = task_cfg.get("fallback_chain")
+        if isinstance(chain, list):
+            entries += [(f"{task}.fallback_chain[{i}]", e)
+                        for i, e in enumerate(chain) if isinstance(e, dict)]
+        for label, entry in entries:
+            model = str(entry.get("model") or "").strip()
+            provider = str(entry.get("provider") or "").strip().lower()
+            base_url = str(entry.get("base_url") or "").strip().lower()
+            # base_url wins over provider in Hermes; a non-OpenRouter
+            # endpoint is priced somewhere else.
+            if base_url and "openrouter.ai" not in base_url:
+                continue
+            if model and provider in _PRICEABLE_AUX_PROVIDERS:
+                out.append((label, model))
+    return out
+
+
+def vision_pinned(config: dict) -> bool:
+    """True iff auxiliary.vision names a model. Unpinned vision is the one
+    side task that reaches the paid default WITHOUT any error: whenever the
+    primary cannot take images, Hermes hands every image to it directly."""
+    aux = config.get("auxiliary") if isinstance(config, dict) else None
+    vis = aux.get("vision") if isinstance(aux, dict) else None
+    return isinstance(vis, dict) and bool(str(vis.get("model") or "").strip())
+
+
+def _group_aux(auxiliary: List[Tuple[str, ModelStatus]]) -> List[Tuple[str, List[str], ModelStatus]]:
+    """[(model_id, [labels], status)] in first-seen order, so sixteen tasks
+    pinned to one model read (and alert) as one line, not sixteen."""
+    groups: Dict[str, Tuple[ModelStatus, List[str]]] = {}
+    for label, st in auxiliary:
+        groups.setdefault(st.model, (st, []))[1].append(label)
+    return [(model_id, labels, st) for model_id, (st, labels) in groups.items()]
+
+
+def _labels_text(labels: List[str], limit: int = 6) -> str:
+    shown = ", ".join(labels[:limit])
+    return shown + (f" и ещё {len(labels) - limit}" if len(labels) > limit else "")
+
+
 def _code(s: str) -> str:
     return f"<code>{html.escape(str(s))}</code>"
 
 
-def _chain_text(primary: ModelStatus, fallbacks: List[ModelStatus]) -> str:
+def _chain_text(primary: ModelStatus, fallbacks: List[ModelStatus],
+                auxiliary: List[Tuple[str, ModelStatus]] = ()) -> str:
     lines = [f"default: {_code(primary.model)} — {primary.pricing_text()}"]
     for st in fallbacks:
         lines.append(f"fallback: {_code(st.model)} — {st.pricing_text()}")
+    for model_id, labels, st in _group_aux(list(auxiliary)):
+        lines.append(f"aux ({html.escape(_labels_text(labels))}): "
+                     f"{_code(model_id)} — {st.pricing_text()}")
     return "\n".join(lines)
 
 
@@ -350,20 +440,28 @@ def decide(config: dict, models_index: Optional[Dict[str, dict]],
         model, fallbacks = config_models(config)
         plan.primary = classify_model(model["default"], models_index)
         plan.fallbacks = [classify_model(fb["model"], models_index) for fb in fallbacks]
+        plan.auxiliary = [(label, classify_model(m, models_index))
+                          for label, m in config_aux_models(config)]
 
     # (a) money moved — always first, always critical, independent of (c).
     if usage is not None and prev_usage is not None:
         plan.usage_delta = usage - prev_usage
         if plan.usage_delta > USAGE_GROWTH_THRESHOLD:
-            chain = (_chain_text(plan.primary, plan.fallbacks)
+            chain = (_chain_text(plan.primary, plan.fallbacks, plan.auxiliary)
                      if plan.primary else "цепочка моделей: не удалось проверить")
+            # The chain above can be all-free and money still moved: that is
+            # exactly the 2026-09 blind spot. Name the likeliest culprit.
+            hint = ("" if vision_pinned(config) else
+                    "\nauxiliary.vision НЕ закреплён — картинки Hermes отдаёт своей "
+                    "встроенной модели по умолчанию (на 2026-09 это платная "
+                    "google/gemini-3-flash-preview): вероятный источник.")
             plan.notifications.append(Notification(
                 key="usage_grew", severity=CRITICAL,
                 title="Hermes model guard: агент тратит деньги",
                 detail=(
                     f"Usage ключа OpenRouter вырос с ${prev_usage:.4f} до "
                     f"${usage:.4f} (+${plan.usage_delta:.4f}) с прошлой проверки.\n"
-                    f"{chain}\n"
+                    f"{chain}{hint}\n"
                     "Действие: ничего не переключал — источник списаний смотреть "
                     "на openrouter.ai/activity; если это Hermes, остановить: "
                     "systemctl stop hermes-api.service."
@@ -372,6 +470,38 @@ def decide(config: dict, models_index: Optional[Dict[str, dict]],
 
     if plan.primary is None:
         return plan
+
+    # (e) a pinned auxiliary model got worse — on the transition only, like
+    # (d): an operator may pin a paid side-task model on purpose, and the
+    # usage check (a) still catches every cent it actually spends.
+    for model_id, labels, st in _group_aux(plan.auxiliary):
+        if st.state == FREE or prev_states.get(model_id) == st.state:
+            continue
+        tasks = html.escape(_labels_text(labels))
+        if st.state == PAID:
+            plan.notifications.append(Notification(
+                key=f"aux_paid:{model_id}", severity=CRITICAL,
+                title="Hermes model guard: вспомогательная модель стала платной",
+                detail=(
+                    f"{_code(model_id)} — {st.pricing_text()}\n"
+                    f"Задачи: {tasks}. Каждый их вызов теперь списывает деньги.\n"
+                    "Действие: ничего не менял — перезакрепи auxiliary.&lt;задача&gt;.model "
+                    "на :free-модель в /root/.hermes/config.yaml и перезапусти hermes-api."
+                ),
+            ))
+        else:
+            plan.notifications.append(Notification(
+                key=f"aux_missing:{model_id}", severity=WARN,
+                title="Hermes model guard: вспомогательная модель пропала из OpenRouter",
+                detail=(
+                    f"{_code(model_id)} — {st.pricing_text()}\n"
+                    f"Задачи: {tasks}. Закреплённая задача на пропавшей модели падает "
+                    "(денег не тратит), но эти функции агента не работают.\n"
+                    "Действие: ничего не менял — перезакрепи auxiliary.&lt;задача&gt;.model "
+                    "в /root/.hermes/config.yaml и перезапусти hermes-api. НЕ ставь "
+                    "model: '' — пустая модель = встроенная ПЛАТНАЯ по умолчанию."
+                ),
+            ))
 
     # (d) fallback got worse — on the transition only.
     for st in plan.fallbacks:
@@ -746,6 +876,9 @@ def _print_plan(plan: Plan, extra: List[Notification], usage: Optional[float],
         print(f"{tag}default  {plan.primary.model}: {plan.primary.pricing_text()}")
         for st in plan.fallbacks:
             print(f"{tag}fallback {st.model}: {st.pricing_text()}")
+        for model_id, labels, st in _group_aux(plan.auxiliary):
+            print(f"{tag}aux      {model_id} [{len(labels)}: {_labels_text(labels, 4)}]: "
+                  f"{st.pricing_text()}")
     else:
         print(f"{tag}pricing: not checked (fetch failed)" if api_failed else
               f"{tag}pricing: not checked")
