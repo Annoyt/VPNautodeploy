@@ -112,7 +112,21 @@ class BlockingAgent:
 
 @pytest.fixture
 def db(tmp_path):
-    return Database(str(tmp_path / 'bot.db'))
+    d = Database(str(tmp_path / 'bot.db'))
+    # These tests exercise the spawn machinery — slots, per-key dedupe,
+    # release on every outcome — which only runs for ASNs we actually
+    # have users on (AlertManager._asn_has_our_users). Seed one user per
+    # ASN used in the keys above so the machinery stays what's under
+    # test here, rather than the gate in front of it. The gate has its
+    # own class below.
+    with d._connect() as conn:
+        for i, asn in enumerate(('AS8402', 'AS12389', 'AS9198')):
+            conn.execute(
+                "INSERT INTO users (chat_id, username, email, status, last_asn) "
+                "VALUES (?, ?, ?, 'demo', ?)",
+                (f'90{i}', f'seed{i}', f'seed{i}@nekovo.ru', asn),
+            )
+    return d
 
 
 @pytest.fixture
@@ -459,3 +473,88 @@ class TestFactoryFailureIsContained:
         assert fire(mgr, dpi_alert()) is None
         agent.client.ask.assert_not_called()
         assert history(db) == [{'key': KEY_A, 'kimi_analysis': None}]
+
+
+class TestAsnUserGate:
+    """A DPI storm on an ASN with none of our users is probing, not an
+    outage — the alert still lands, but no Hermes turn is spent on it.
+
+    AS31205 (MegaFon) produced 1073 handshake failures and zero
+    successful connections in a day while we had no users on it. Each
+    fire burned a 10-minute turn from a two-slot pool to emit ~100
+    characters of analysis, on a VPS with ~190 MB free.
+
+    Mutation checks that must go red: drop the gate (the no-user key
+    spawns), invert it (the seeded key stops spawning), make it fail
+    closed (a DB error silences a real storm).
+    """
+
+    UNKNOWN = 'dpi_hsfail:RU:AS31205'   # nobody of ours lives here
+
+    def test_alert_on_unknown_asn_spawns_no_agent(self, db, mgr, agent, caplog):
+        with caplog.at_level(logging.INFO, logger=LOGGER):
+            assert fire(mgr, dpi_alert(self.UNKNOWN)) is None
+        agent.client.ask.assert_not_called()
+        assert inflight(mgr) == set()
+        assert any('no users on that ASN' in r.getMessage()
+                   for r in caplog.records)
+
+    def test_the_alert_itself_is_still_recorded(self, db, mgr, agent):
+        """Skipping the agent must not skip the signal — the dashboard
+        is where probing is reviewed."""
+        fire(mgr, dpi_alert(self.UNKNOWN))
+        assert history(db) == [{'key': self.UNKNOWN, 'kimi_analysis': None}]
+
+    def test_alert_on_an_asn_with_users_still_spawns(self, mgr, agent):
+        assert fire(mgr, dpi_alert(KEY_B)) is not None
+        wait_entered(agent, KEY_B)
+
+    def test_user_seen_via_sub_fetches_counts(self, db, mgr, agent):
+        """users.last_asn is a snapshot; a mobile carrier moves a
+        subscriber between ASNs. A recent request-time footprint counts."""
+        with db._connect() as conn:
+            conn.execute(
+                "INSERT INTO sub_fetches (ts, chat_id, country, asn) "
+                "VALUES (datetime('now', '-1 hours'), '901', 'RU', 'AS31205')"
+            )
+        assert fire(mgr, dpi_alert(self.UNKNOWN)) is not None
+        wait_entered(agent, self.UNKNOWN)
+
+    def test_footprint_older_than_the_window_does_not_count(self, db, mgr, agent):
+        with db._connect() as conn:
+            conn.execute(
+                "INSERT INTO sub_fetches (ts, chat_id, country, asn) VALUES "
+                "(datetime('now', '-60 days'), '901', 'RU', 'AS31205')"
+            )
+        assert fire(mgr, dpi_alert(self.UNKNOWN)) is None
+        agent.client.ask.assert_not_called()
+
+    def test_hy2_auth_footprint_counts(self, db, mgr, agent):
+        with db._connect() as conn:
+            conn.execute(
+                "INSERT INTO hy2_auth_log (ts, chat_id, decision, asn) VALUES "
+                "(datetime('now', '-30 minutes'), '901', 'allow', 'AS31205')"
+            )
+        assert fire(mgr, dpi_alert(self.UNKNOWN)) is not None
+        wait_entered(agent, self.UNKNOWN)
+
+    def test_key_without_an_asn_is_never_gated(self, mgr, agent):
+        """dpi_rst:global carries no ASN — it's host-wide and must keep
+        its follow-up."""
+        assert fire(mgr, dpi_alert(KEY_C)) is not None
+        wait_entered(agent, KEY_C)
+
+    def test_dash_asn_is_never_gated(self, mgr, agent):
+        """The check emits '-' when geoip couldn't map the IP; that's
+        'unknown', not 'nobody'."""
+        key = 'dpi_hsfail:RU:-'
+        assert fire(mgr, dpi_alert(key)) is not None
+        wait_entered(agent, key)
+
+    def test_db_error_fails_open(self, mgr, agent):
+        """A bug in the gate may cost an agent turn; it must never hide a
+        storm that is hitting real subscribers."""
+        with patch.object(type(mgr.db), '_connect',
+                          side_effect=RuntimeError('db gone')):
+            assert fire(mgr, dpi_alert(self.UNKNOWN)) is not None
+        wait_entered(agent, self.UNKNOWN)
