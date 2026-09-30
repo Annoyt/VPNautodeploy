@@ -1,0 +1,7 @@
+# EXIT host: /etc/cron.d/memory-watchdog  (source: scripts/exit_memory_watchdog.cron)
+# Memory watchdog: restarts the 3x-ui container when the host is really out of
+# memory (RAM+swap headroom or PSI thrashing, 2 checks in a row), reboots
+# gracefully only if that restart did not hold. See the script header for why.
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
+*/5 * * * * root /usr/local/bin/memory_watchdog.sh

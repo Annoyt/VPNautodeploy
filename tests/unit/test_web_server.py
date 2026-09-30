@@ -379,14 +379,24 @@ class TestValidateInitData:
 
 
 class TestHy2AuthQuotaGate:
-    """Panel-side quota gate in /api/hy2/auth.
+    """Quota gate in /api/hy2/auth.
 
-    The bot.db status check said 'allow'; the gate must flip that to
-    deny when the panel reports the client disabled or over quota, and
-    must fail open when the panel has nothing to say.
+    The bot.db status check said 'allow'; the gate must flip that to deny
+    when the panel reports the client disabled or over quota — WITHOUT
+    awaiting the panel on the request path. Hysteria blocks the client's
+    handshake on this callback: the synchronous lookup cost ~95 ms per new
+    hy2 connection (~620 ms on a panel re-login), the 2026-09-30 "hysteria
+    connects slowly" complaint. Decisions come from a background-refreshed
+    per-email cache of PANEL readings; no reading yet -> allow.
+
+    The panel is the only source of truth. A first cut also gated a cold
+    cache on the bot's users.quota_gb mirror — and denied the probe user,
+    whose bot row says 1 GB while the panel says unlimited.
     """
 
-    def _make_server(self, traffic):
+    EMAIL = 'user_x_123@nekovo.ru'
+
+    def _make_server(self, traffic=None):
         from unittest.mock import AsyncMock
 
         config = Mock(spec=Settings)
@@ -398,13 +408,17 @@ class TestHy2AuthQuotaGate:
         db = MagicMock(spec=Database)
         conn = MagicMock()
         conn.execute.return_value.fetchone.return_value = (
-            123, 'user_x_123@nekovo.ru', 'paid', None,
+            123, self.EMAIL, 'paid', None,
         )
         db._connect.return_value.__enter__.return_value = conn
 
         xui = Mock()
         xui.get_client_traffic = AsyncMock(return_value=traffic)
         return WebAppServer(config, db, xui_service=xui)
+
+    def _warm(self, server, traffic, age=0.0):
+        import time
+        server._hy2_quota_cache[self.EMAIL] = (time.monotonic() - age, traffic)
 
     async def _auth(self, server):
         from unittest.mock import AsyncMock
@@ -413,53 +427,131 @@ class TestHy2AuthQuotaGate:
         response = await server.handle_hy2_auth(request)
         return json.loads(response.text)
 
+    async def _drain(self, server):
+        import asyncio
+        if server._bg_tasks:
+            await asyncio.gather(*list(server._bg_tasks), return_exceptions=True)
+
+    OVER = {'upload': 60, 'download': 41, 'total': 100, 'enable': True}
+    UNDER = {'upload': 1, 'download': 2, 'total': 100, 'enable': True}
+
+    # -- decisions from a cached panel reading ------------------------------
+
     @pytest.mark.asyncio
     async def test_allow_under_quota(self):
-        server = self._make_server(
-            {'upload': 1, 'download': 2, 'total': 100, 'enable': True}
-        )
-        data = await self._auth(server)
-        assert data['ok'] is True
+        server = self._make_server()
+        self._warm(server, self.UNDER)
+        assert (await self._auth(server))['ok'] is True
 
     @pytest.mark.asyncio
     async def test_deny_when_panel_disabled(self):
-        server = self._make_server(
-            {'upload': 1, 'download': 2, 'total': 100, 'enable': False}
-        )
-        data = await self._auth(server)
-        assert data['ok'] is False
+        server = self._make_server()
+        self._warm(server, {'upload': 1, 'download': 2, 'total': 100, 'enable': False})
+        assert (await self._auth(server))['ok'] is False
 
     @pytest.mark.asyncio
     async def test_deny_when_over_quota(self):
-        server = self._make_server(
-            {'upload': 60, 'download': 41, 'total': 100, 'enable': True}
-        )
-        data = await self._auth(server)
-        assert data['ok'] is False
+        server = self._make_server()
+        self._warm(server, self.OVER)
+        assert (await self._auth(server))['ok'] is False
 
     @pytest.mark.asyncio
     async def test_unlimited_total_zero_allows(self):
-        server = self._make_server(
-            {'upload': 500, 'download': 500, 'total': 0, 'enable': True}
-        )
-        data = await self._auth(server)
+        """The probe user's panel shape: counters run, total 0 = unlimited."""
+        server = self._make_server()
+        self._warm(server, {'upload': 500, 'download': 500, 'total': 0, 'enable': True})
+        assert (await self._auth(server))['ok'] is True
+
+    # -- the point of the change: the panel is never awaited ----------------
+
+    @pytest.mark.asyncio
+    async def test_cold_cache_never_waits_for_the_panel(self):
+        """A panel that would take forever must not delay the answer."""
+        import asyncio
+        from unittest.mock import AsyncMock
+        server = self._make_server()
+        gate = asyncio.Event()
+
+        async def slow_panel(_email):
+            await gate.wait()
+            return self.UNDER
+
+        server.xui.get_client_traffic = AsyncMock(side_effect=slow_panel)
+        data = await asyncio.wait_for(self._auth(server), timeout=1.0)
         assert data['ok'] is True
+        gate.set()
+        await self._drain(server)
+        assert server._hy2_quota_cache[self.EMAIL][1] == self.UNDER
+
+    @pytest.mark.asyncio
+    async def test_cold_cache_lets_one_in_then_the_panel_gates(self):
+        """First connect after a bot restart is allowed; the refresh it
+        triggers stops a reconnect-looping over-quota client right after."""
+        server = self._make_server(self.OVER)
+        assert (await self._auth(server))['ok'] is True
+        await self._drain(server)
+        assert (await self._auth(server))['ok'] is False
+
+    @pytest.mark.asyncio
+    async def test_known_over_quota_stays_out_while_it_reconnects(self):
+        """A reading minutes old still decides — reconnecting every 15 min
+        must not buy a fresh session each time."""
+        server = self._make_server(self.OVER)
+        self._warm(server, self.OVER, age=15 * 60)
+        assert (await self._auth(server))['ok'] is False
+        await self._drain(server)
+
+    @pytest.mark.asyncio
+    async def test_stale_reading_answers_now_and_refreshes_once(self):
+        server = self._make_server(self.OVER)
+        self._warm(server, self.UNDER, age=server.HY2_QUOTA_FRESH_S + 5)
+        assert (await self._auth(server))['ok'] is True
+        assert (await self._auth(server))['ok'] is True      # refresh still in flight
+        await self._drain(server)
+        assert server.xui.get_client_traffic.await_count == 1   # deduped
+        assert (await self._auth(server))['ok'] is False    # next connect: refreshed
+
+    @pytest.mark.asyncio
+    async def test_fresh_reading_is_not_refreshed(self):
+        server = self._make_server()
+        self._warm(server, self.UNDER)
+        await self._auth(server)
+        await self._drain(server)
+        server.xui.get_client_traffic.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_reading_older_than_stale_max_is_forgotten(self):
+        server = self._make_server(self.UNDER)
+        self._warm(server, self.OVER, age=server.HY2_QUOTA_STALE_MAX_S + 5)
+        assert (await self._auth(server))['ok'] is True
+        await self._drain(server)
+        assert server._hy2_quota_cache[self.EMAIL][1] == self.UNDER
+
+    @pytest.mark.asyncio
+    async def test_failed_refresh_keeps_the_known_reading(self):
+        """A panel hiccup must not flip a known over-quota user to allowed."""
+        from unittest.mock import AsyncMock
+        server = self._make_server()
+        server.xui.get_client_traffic = AsyncMock(side_effect=Exception("panel down"))
+        self._warm(server, self.OVER, age=server.HY2_QUOTA_FRESH_S + 5)
+        assert (await self._auth(server))['ok'] is False
+        await self._drain(server)
+        assert server._hy2_quota_cache[self.EMAIL][1] == self.OVER
+        assert server._hy2_quota_refreshing == set()             # slot released
 
     @pytest.mark.asyncio
     async def test_fail_open_when_panel_has_no_record(self):
         server = self._make_server(None)
-        data = await self._auth(server)
-        assert data['ok'] is True
+        self._warm(server, None)
+        assert (await self._auth(server))['ok'] is True
 
     @pytest.mark.asyncio
     async def test_fail_open_when_panel_lookup_raises(self):
         from unittest.mock import AsyncMock
-        server = self._make_server({})
-        server.xui.get_client_traffic = AsyncMock(
-            side_effect=Exception("panel down")
-        )
-        data = await self._auth(server)
-        assert data['ok'] is True
+        server = self._make_server()
+        server.xui.get_client_traffic = AsyncMock(side_effect=Exception("panel down"))
+        assert (await self._auth(server))['ok'] is True
+        await self._drain(server)
 
 
 class TestHy2AuthPaidTier:

@@ -95,11 +95,15 @@ class WebAppServer:
         # client repaints instantly instead of waiting for the next
         # 5s poll.
         self._ws_clients: set = set()
-        # hy2 auth quota gate: per-email TTL cache of the panel lookup.
-        # Each auth callback otherwise costs a full inbounds fetch, and
-        # a reconnect-looping client would hammer the panel.
+        # hy2 auth quota gate: per-email cache of the panel lookup, filled
+        # ONLY by background refreshes (never awaited on the auth path).
         # {email: (monotonic_ts, traffic_dict_or_None)}
         self._hy2_quota_cache: dict = {}
+        # emails with a refresh in flight — a reconnect-looping client must
+        # not stack refreshes (nor hammer the panel)
+        self._hy2_quota_refreshing: set = set()
+        # strong refs: the event loop keeps only weak ones to its tasks
+        self._bg_tasks: set = set()
         self._setup_routes()
     
     def _setup_routes(self):
@@ -467,6 +471,44 @@ class WebAppServer:
         """
         return await self._hy2_auth_common(request, paid_only=True)
 
+    # hy2 quota gate cache windows (see _hy2_auth_common). Younger than
+    # FRESH: the cached panel reading decides as is. Older: it still decides
+    # (a known over-quota user stays out while he reconnects), and a
+    # background refresh replaces it. Older than STALE_MAX: forgotten — the
+    # connect is let through and the refresh decides the next one.
+    HY2_QUOTA_FRESH_S = 30
+    HY2_QUOTA_STALE_MAX_S = 6 * 3600
+
+    def _schedule_hy2_quota_refresh(self, email_id: str) -> None:
+        """Refresh one client's panel counters without blocking the caller.
+
+        At most one refresh per email in flight. A failed refresh keeps the
+        previous reading — a panel hiccup must not flip a known over-quota
+        user back to allowed. Never raises: this runs inside the auth path.
+        """
+        if not self.xui or email_id in self._hy2_quota_refreshing:
+            return
+
+        async def _refresh():
+            import time as _time
+            try:
+                t = await self.xui.get_client_traffic(email_id)
+            except Exception as e:
+                logger.warning(f"hy2_auth: background quota refresh failed for {email_id}: {e}")
+            else:
+                self._hy2_quota_cache[email_id] = (_time.monotonic(), t)
+            finally:
+                self._hy2_quota_refreshing.discard(email_id)
+
+        try:
+            task = asyncio.get_running_loop().create_task(_refresh())
+        except Exception as e:
+            logger.warning(f"hy2_auth: could not schedule quota refresh: {e}")
+            return
+        self._hy2_quota_refreshing.add(email_id)
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
+
     async def _hy2_auth_common(
         self, request: web.Request, paid_only: bool
     ) -> web.Response:
@@ -576,26 +618,31 @@ class WebAppServer:
                 if not expired and status in allowed:
                     decision = 'allow'
 
-        # Panel-side quota gate. Hy2 bytes are bridged into the panel's
-        # client_traffics on the exit host (hy2-traffic-collector), so
-        # the xray+hy2 quota is one shared counter there. Deny when the
-        # panel has disabled the client or the quota is spent — without
-        # this, an over-quota user kicked out of xray could still ride
-        # hy2 forever via reconnects. Panel unreachable → keep 'allow'
-        # (availability over enforcement; the exit-side kick loop still
-        # covers connected sessions).
-        if decision == 'allow' and email_id and self.xui:
+        # Quota gate. Hy2 bytes are bridged into the panel's client_traffics
+        # on the exit host (hy2-traffic-collector), so the xray+hy2 quota is
+        # one shared counter there. Deny when the panel has disabled the
+        # client or the quota is spent — without this, an over-quota user
+        # kicked out of xray could still ride hy2 forever via reconnects.
+        #
+        # The panel is NEVER awaited here. Hysteria blocks the client's
+        # handshake on this callback, and the panel lookup (bot on entry ->
+        # panel on exit) cost ~95 ms per new hy2 connection — ~620 ms when
+        # the session had to log in again — on top of the ~100 ms this
+        # callback already costs: the "hysteria connects slowly" complaint of
+        # 2026-09-30, a cost no other protocol pays. So the decision uses the
+        # per-email panel reading a BACKGROUND refresh left in the cache (see
+        # HY2_QUOTA_*). No reading yet (first connect since a bot restart) ->
+        # allow; the refresh this triggers gates the next connect.
+        # The panel stays the only source of truth: the bot's users.quota_gb
+        # is NOT the panel's limit (the probe user: 1 GB here, unlimited
+        # there) — deciding from it denied a user the panel allows.
+        if decision == 'allow' and email_id:
             import time as _time
             cached = self._hy2_quota_cache.get(email_id)
-            if cached and _time.monotonic() - cached[0] < 30:
-                t = cached[1]
-            else:
-                try:
-                    t = await self.xui.get_client_traffic(email_id)
-                except Exception as e:
-                    logger.warning(f"hy2_auth: panel quota lookup failed: {e}")
-                    t = None
-                self._hy2_quota_cache[email_id] = (_time.monotonic(), t)
+            age = _time.monotonic() - cached[0] if cached else None
+            t = cached[1] if cached is not None and age < self.HY2_QUOTA_STALE_MAX_S else None
+            if cached is None or age >= self.HY2_QUOTA_FRESH_S:
+                self._schedule_hy2_quota_refresh(email_id)
             if t:
                 # XUIService's API path speaks upload/download, its DB
                 # fallback up/down — accept both.
