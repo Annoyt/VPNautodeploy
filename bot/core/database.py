@@ -636,11 +636,17 @@ class Database:
         - ``chat_id`` — user's TG id, ties row to ``users``.
         - ``country`` / ``asn`` — snapshotted ``users.last_country`` /
           ``users.last_asn`` so deletes / re-geo don't lose history.
-        - ``last_sub_fetch_ts`` — last successful /sub refresh; if it's
-          older than a few hours when complaint comes in, the user is
-          on a stale config and the urltest auto-failover hasn't fired.
-        - ``last_traffic_ts`` — last byte through any inbound, from
-          xui_synced / traffic_log.
+        - ``last_sub_fetch_ts`` — last /sub fetch (max sub_fetches.ts,
+          UTC); if it's older than a few hours when complaint comes in,
+          the user is on a stale config and the urltest auto-failover
+          hasn't fired. It is also how old ``country`` / ``asn`` are —
+          only /sub refreshes them. NULL before 2026-09-30.
+        - ``last_traffic_ts`` — the panel's lastOnline for the client at
+          report time (UTC; xray stats and the hy2 bridge both bump it),
+          NULL when the panel did not answer within the report's cap.
+          Rows before 2026-09-30 hold users.last_traffic_update instead —
+          the traffic mirror's run time, identical for all users, NOT
+          the user's traffic.
         - ``acked_at`` — set when operator acks via dashboard.
         """
         try:

@@ -4,6 +4,8 @@ import asyncio
 import html
 import logging
 import threading
+import time
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Optional
 
 from bot.config import Platform, UserState, BYTES_PER_GB
@@ -23,6 +25,50 @@ if TYPE_CHECKING:
     from bot.config import Settings
 
 logger = logging.getLogger(__name__)
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _parse_utc(value) -> Optional[datetime]:
+    """Naive-UTC datetime from either DB spelling — '2026-09-30 15:20:28'
+    (CURRENT_TIMESTAMP) or '2026-09-30T15:30:56.040972' (isoformat());
+    None when missing or unparseable."""
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed
+
+
+def _ago(when: datetime, now: datetime) -> str:
+    """'3 мин назад' — read next to the message's own time, so relative."""
+    secs = max(0.0, (now - when).total_seconds())
+    if secs < 60:
+        return 'только что'
+    mins = int(secs // 60)
+    if mins < 60:
+        return f'{mins} мин назад'
+    hours = mins // 60
+    if hours < 48:
+        return f'{hours} ч назад'
+    return f'{hours // 24} дн назад'
+
+
+def _stamp(when: datetime, now: datetime) -> str:
+    """'15:27 UTC' today, '26.09 08:18 UTC' otherwise — for matching logs."""
+    if when.date() == now.date():
+        return f'{when:%H:%M} UTC'
+    return f'{when:%d.%m %H:%M} UTC'
+
+
+def _db_ts(when: Optional[datetime]) -> Optional[str]:
+    return when.strftime('%Y-%m-%d %H:%M:%S') if when else None
 
 
 class DemoRequestHandler(BaseCallbackHandler):
@@ -599,6 +645,21 @@ class MyKeyAnswerHandler(BaseCallbackHandler):
     REPORT_RATE_LIMIT_SECONDS = 600  # 10 min — keeps the support topic noise-free
     _last_report_times: dict = {}
 
+    # Facts for the operator ping (see _report_facts). The panel read runs
+    # under a hard cap: updates are handled one at a time (core/polling.py),
+    # the panel API client's own timeout is 30 s, and "nothing loads"
+    # reports come in bursts exactly when something upstream is down — so
+    # after one timeout the panel is skipped for a minute.
+    PANEL_LOOKUP_TIMEOUT_S = 3.0
+    PANEL_SKIP_AFTER_TIMEOUT_S = 60.0
+    _panel_skip_until: float = 0.0  # time.monotonic()
+    HY2_ALLOWS_WINDOW_MIN = 60
+    # exit inbound (user_presence.proto) → the label /onlines prints
+    _PRESENCE_LABEL = {
+        'reality': 'Reality', 'cf-ws': 'WS', 'ss2022': 'ShadowTLS',
+        'xhttp': 'XHTTP',
+    }
+
     # Failure categories for the dropdown. Values map to user-facing labels
     # in both languages and are stored in user_failure_reports.target_domain.
     FAILURE_CATEGORIES = {
@@ -995,6 +1056,156 @@ class MyKeyAnswerHandler(BaseCallbackHandler):
             message_thread_id=thread_id,
         )
 
+    def _report_facts(self, chat_id: str, email: Optional[str]) -> dict:
+        """What we actually know about this user's recent contact with us.
+
+        Replaces users.last_traffic_update, which the 10-minute traffic
+        mirror stamps on EVERY panel client each run — the mirror's clock,
+        not the user's traffic (report #10 on 2026-09-30 said 14:32 for a
+        user whose connections kept arriving until 15:27). Each source is
+        best-effort: a missing one stays empty and the report still goes.
+
+        - ``sub_fetch`` — last /sub fetch. Only /sub moves
+          users.last_country / last_asn, so this is how old "Network" is.
+        - ``panel`` — ``(status, at)`` from _panel_last_online: the
+          panel's lastOnline, the real last traffic.
+        - ``xray`` — ``(label, seen_at, conns)``: the exit inbound this
+          email was last seen on and its accepts in that 5-min report
+          (user_presence, fed by exit_dpi_reporter).
+        - ``hy2`` — ``(last_ts, last_decision, allows_last_hour)``:
+          connects, not traffic. Dozens an hour is a reconnect storm —
+          the network lets the QUIC handshake through, then drops the
+          flow (normal is a few a day).
+        """
+        cid = str(chat_id)
+
+        def _row(sql: str, *args):
+            try:
+                with self.db._connect() as conn:
+                    return conn.execute(sql, args).fetchone()
+            except Exception as e:
+                logger.warning(f"report_failure: lookup failed ({sql[:45]}…): {e}")
+                return None
+
+        facts = {'sub_fetch': None, 'panel': ('no_email', None),
+                 'xray': None, 'hy2': None}
+        row = _row("SELECT max(ts) FROM sub_fetches WHERE chat_id = ?", cid)
+        facts['sub_fetch'] = _parse_utc(row[0]) if row else None
+        if email:
+            row = _row("SELECT proto, seen_at, conns FROM user_presence "
+                       "WHERE email = ?", email)
+            if row and _parse_utc(row[1]):
+                facts['xray'] = (self._PRESENCE_LABEL.get(row[0], row[0]),
+                                 _parse_utc(row[1]), int(row[2] or 0))
+        row = _row("SELECT ts, decision FROM hy2_auth_log WHERE chat_id = ? "
+                   "ORDER BY ts DESC, id DESC LIMIT 1", cid)
+        if row and _parse_utc(row[0]):
+            allows = _row("SELECT count(*) FROM hy2_auth_log WHERE chat_id = ? "
+                          "AND decision = 'allow' AND ts >= datetime('now', ?)",
+                          cid, f'-{self.HY2_ALLOWS_WINDOW_MIN} minutes')
+            facts['hy2'] = (_parse_utc(row[0]), row[1],
+                            int(allows[0]) if allows else 0)
+        if email:
+            facts['panel'] = self._panel_last_online(email)
+        return facts
+
+    def _panel_last_online(self, email: str) -> tuple:
+        """``(status, at)`` for the client's panel row, read under a cap.
+
+        status: ``ok`` (``at`` = lastOnline, naive UTC) · ``never`` (the
+        row exists, no traffic yet) · ``missing`` (the panel answered and
+        this client is not in it — every xray protocol fails for them) ·
+        ``unavailable`` (timeout, error, no API, or inside the skip window
+        after a timeout). A late answer is dropped along with its thread.
+        """
+        cls = type(self)
+        if time.monotonic() < cls._panel_skip_until:
+            return ('unavailable', None)
+        box: dict = {}
+
+        def _run():
+            try:
+                box['ms'] = self._fetch_panel_last_online_ms(email)
+            except Exception as e:
+                box['error'] = e
+
+        worker = threading.Thread(target=_run, name='report-panel-lookup',
+                                  daemon=True)
+        worker.start()
+        worker.join(self.PANEL_LOOKUP_TIMEOUT_S)
+        if worker.is_alive():
+            cls._panel_skip_until = (time.monotonic()
+                                     + self.PANEL_SKIP_AFTER_TIMEOUT_S)
+            logger.warning(
+                f"report_failure: panel lookup took over "
+                f"{self.PANEL_LOOKUP_TIMEOUT_S:g}s — skipping the panel "
+                f"for {self.PANEL_SKIP_AFTER_TIMEOUT_S:g}s")
+            return ('unavailable', None)
+        if 'error' in box:
+            logger.warning(f"report_failure: panel lookup failed: {box['error']}")
+            return ('unavailable', None)
+        ms = box.get('ms')
+        if ms is None:
+            return ('missing', None)
+        if not ms:
+            return ('never', None)
+        return ('ok', datetime.fromtimestamp(ms / 1000, tz=timezone.utc)
+                .replace(tzinfo=None))
+
+    def _fetch_panel_last_online_ms(self, email: str) -> Optional[int]:
+        """Blocking panel read: lastOnline in epoch ms, None when the
+        client has no accounting row. Same source as /onlines —
+        clientStats is UNIQUE(email), so the first match is the client's
+        only row. Raises when the panel can't be asked: no API, or no
+        inbounds back (the API client logs and returns [] on errors, and
+        a live panel always has inbounds)."""
+        from bot.services.xui_service import XUIService
+        xui = XUIService(self.config)
+        if not getattr(xui, 'api', None):
+            raise RuntimeError('no panel API configured')
+        inbounds = xui._run_sync(xui.api.get_inbounds())
+        if not inbounds:
+            raise RuntimeError('panel returned no inbounds')
+        for inbound in inbounds:
+            for stats in (inbound.get('clientStats') or []):
+                if stats.get('email') == email:
+                    return int(stats.get('lastOnline') or 0)
+        return None
+
+    def _format_report_facts(self, facts: dict, country, asn,
+                             now: datetime) -> list:
+        """The Network / Last traffic / Protocols lines of the operator ping."""
+        net = (country or 'unk') + (' / ' + asn if asn else '')
+        if facts['sub_fetch']:
+            net += f" (по /sub {_ago(facts['sub_fetch'], now)})"
+        elif country or asn:
+            net += ' (давность неизвестна)'
+        status, at = facts['panel']
+        if status == 'ok':
+            traffic = f"{_ago(at, now)}, {_stamp(at, now)}"
+        else:
+            traffic = {
+                'never': 'ни разу',
+                'missing': '⚠️ клиента нет в панели',
+                'no_email': 'нет данных (нет email панели)',
+            }.get(status, 'нет данных (панель не ответила)')
+        lines = [f"Network: {html.escape(net)}", f"Last traffic: {traffic}"]
+        seen = []
+        if facts['xray']:
+            label, at, conns = facts['xray']
+            seen.append(f"{html.escape(str(label))} {_ago(at, now)} "
+                        f"(соединений за 5 мин: {conns})")
+        if facts['hy2']:
+            at, decision, allows = facts['hy2']
+            part = (f"Hy2 {_ago(at, now)}" if decision == 'allow'
+                    else f"Hy2 ОТКАЗ {_ago(at, now)}")
+            if allows:
+                part += f" (входов за час: {allows})"
+            seen.append(part)
+        if seen:
+            lines.append('Protocols: ' + ' · '.join(seen))
+        return lines
+
     def _handle_target_selection(self, data: str, chat_id: str, user_id: str,
                                  user, lang: str, thread_id=None) -> None:
         """Process the user's category selection and log the failure report."""
@@ -1038,7 +1249,14 @@ class MyKeyAnswerHandler(BaseCallbackHandler):
         city = getattr(user, 'last_city', None)
         lat = getattr(user, 'last_lat', None)
         lon = getattr(user, 'last_lon', None)
-        last_traffic_ts = getattr(user, 'last_traffic_update', None)
+        # Not users.last_traffic_update — that is the traffic mirror's
+        # clock, the same for everyone (see _report_facts).
+        facts = self._report_facts(
+            getattr(user, 'chat_id', None) or user_id or chat_id,
+            getattr(user, 'email', None))
+        panel_status, panel_at = facts['panel']
+        last_traffic_ts = _db_ts(panel_at) if panel_status == 'ok' else None
+        last_sub_fetch_ts = _db_ts(facts['sub_fetch'])
 
         try:
             with self.db._connect() as conn:
@@ -1046,11 +1264,11 @@ class MyKeyAnswerHandler(BaseCallbackHandler):
                     "INSERT INTO user_failure_reports "
                     "(chat_id, country, asn, city, lat, lon, "
                     " last_sub_fetch_ts, last_traffic_ts, target_domain) "
-                    "VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)",
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     # the report row references the REPORTING USER — in a
                     # group press chat_id would be the group id
                     (user_id or chat_id, country, asn, city, lat, lon,
-                     last_traffic_ts, category),
+                     last_sub_fetch_ts, last_traffic_ts, category),
                 )
                 report_id = cur.lastrowid
                 conn.commit()
@@ -1086,16 +1304,13 @@ class MyKeyAnswerHandler(BaseCallbackHandler):
             topic = getattr(self.config, 'TOPIC_SUPPORT', 0)
             if forum_group and topic:
                 uname = getattr(user, 'username', None) or user_id or chat_id
-                ctx = (country or 'unk') + (' / ' + asn if asn else '')
-                last_seen = last_traffic_ts or 'нет'
                 cat_label = self.FAILURE_CATEGORIES[category].get('ru', category)
-                msg = (
-                    f"🆘 <b>Failure report #{report_id or '?'}</b>\n"
-                    f"User: <code>@{uname}</code> ({user_id or chat_id})\n"
-                    f"Problem: {cat_label}\n"
-                    f"Network: {ctx}\n"
-                    f"Last traffic: {last_seen}"
-                )
+                msg = '\n'.join([
+                    f"🆘 <b>Failure report #{report_id or '?'}</b>",
+                    f"User: <code>@{uname}</code> ({user_id or chat_id})",
+                    f"Problem: {cat_label}",
+                    *self._format_report_facts(facts, country, asn, _utc_now()),
+                ])
                 self.bot.send_message(
                     chat_id=forum_group,
                     message_thread_id=topic,
