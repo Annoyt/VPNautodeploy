@@ -95,11 +95,15 @@ class WebAppServer:
         # client repaints instantly instead of waiting for the next
         # 5s poll.
         self._ws_clients: set = set()
-        # hy2 auth quota gate: per-email TTL cache of the panel lookup.
-        # Each auth callback otherwise costs a full inbounds fetch, and
-        # a reconnect-looping client would hammer the panel.
+        # hy2 auth quota gate: per-email cache of the panel lookup, filled
+        # ONLY by background refreshes (never awaited on the auth path).
         # {email: (monotonic_ts, traffic_dict_or_None)}
         self._hy2_quota_cache: dict = {}
+        # emails with a refresh in flight — a reconnect-looping client must
+        # not stack refreshes (nor hammer the panel)
+        self._hy2_quota_refreshing: set = set()
+        # strong refs: the event loop keeps only weak ones to its tasks
+        self._bg_tasks: set = set()
         self._setup_routes()
     
     def _setup_routes(self):
@@ -467,6 +471,42 @@ class WebAppServer:
         """
         return await self._hy2_auth_common(request, paid_only=True)
 
+    # hy2 quota gate cache windows (see _hy2_auth_common). Fresh: decide
+    # from the cached panel reading as is. Stale: still decide from it, but
+    # refresh in the background. Beyond stale: the users mirror decides.
+    HY2_QUOTA_FRESH_S = 30
+    HY2_QUOTA_STALE_MAX_S = 600
+
+    def _schedule_hy2_quota_refresh(self, email_id: str) -> None:
+        """Refresh one client's panel counters without blocking the caller.
+
+        At most one refresh per email in flight. A failed refresh keeps the
+        previous reading — a panel hiccup must not flip a known over-quota
+        user back to allowed. Never raises: this runs inside the auth path.
+        """
+        if not self.xui or email_id in self._hy2_quota_refreshing:
+            return
+
+        async def _refresh():
+            import time as _time
+            try:
+                t = await self.xui.get_client_traffic(email_id)
+            except Exception as e:
+                logger.warning(f"hy2_auth: background quota refresh failed for {email_id}: {e}")
+            else:
+                self._hy2_quota_cache[email_id] = (_time.monotonic(), t)
+            finally:
+                self._hy2_quota_refreshing.discard(email_id)
+
+        try:
+            task = asyncio.get_running_loop().create_task(_refresh())
+        except Exception as e:
+            logger.warning(f"hy2_auth: could not schedule quota refresh: {e}")
+            return
+        self._hy2_quota_refreshing.add(email_id)
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
+
     async def _hy2_auth_common(
         self, request: web.Request, paid_only: bool
     ) -> web.Response:
@@ -540,12 +580,14 @@ class WebAppServer:
         decision = 'deny'
         chat_id_str = None
         email_id = None
+        mirror_up = mirror_down = quota_gb = None
 
         if password:
             try:
                 with self.db._connect() as conn:
                     row = conn.execute(
-                        "SELECT chat_id, email, status, subscription_expiry "
+                        "SELECT chat_id, email, status, subscription_expiry, "
+                        "traffic_up, traffic_down, quota_gb "
                         "FROM users WHERE uuid = ? LIMIT 1",
                         (password,),
                     ).fetchone()
@@ -554,6 +596,9 @@ class WebAppServer:
                 row = None
             if row:
                 chat_id_str, email_id, status, expiry = row[0], row[1], row[2], row[3]
+                # The bot's own copy of the panel counters (GB), mirrored every
+                # 10 min by NotificationService._sync_traffic_to_botdb_sync.
+                mirror_up, mirror_down, quota_gb = row[4], row[5], row[6]
                 expired = False
                 if expiry:
                     try:
@@ -576,26 +621,40 @@ class WebAppServer:
                 if not expired and status in allowed:
                     decision = 'allow'
 
-        # Panel-side quota gate. Hy2 bytes are bridged into the panel's
-        # client_traffics on the exit host (hy2-traffic-collector), so
-        # the xray+hy2 quota is one shared counter there. Deny when the
-        # panel has disabled the client or the quota is spent — without
-        # this, an over-quota user kicked out of xray could still ride
-        # hy2 forever via reconnects. Panel unreachable → keep 'allow'
-        # (availability over enforcement; the exit-side kick loop still
+        # Quota gate. Hy2 bytes are bridged into the panel's client_traffics
+        # on the exit host (hy2-traffic-collector), so the xray+hy2 quota is
+        # one shared counter there. Deny when the panel has disabled the
+        # client or the quota is spent — without this, an over-quota user
+        # kicked out of xray could still ride hy2 forever via reconnects.
+        #
+        # The panel is NEVER awaited here. Hysteria blocks the client's
+        # handshake on this callback, and the panel lookup (bot on entry ->
+        # panel on exit) cost ~95 ms per new hy2 connection — ~620 ms when
+        # the session had to log in again — on top of the ~100 ms this
+        # callback already costs: the "hysteria connects slowly" complaint of
+        # 2026-09-30, a cost no other protocol pays. So the decision uses
+        # what is already in hand, newest first:
+        #   1. the per-email panel reading cached by an earlier refresh
+        #      (younger than HY2_QUOTA_STALE_MAX_S; older than
+        #      HY2_QUOTA_FRESH_S -> refreshed in the background);
+        #   2. else the bot's own mirror of the panel counters in users
+        #      (traffic_up/down vs quota_gb, <= 10 min old), and a background
+        #      refresh fills the cache for the next connect.
+        # Panel unreachable -> the mirror still gates; no mirror either ->
+        # allow (availability over enforcement; the exit-side kick loop still
         # covers connected sessions).
-        if decision == 'allow' and email_id and self.xui:
+        if decision == 'allow' and email_id:
             import time as _time
+            now_m = _time.monotonic()
             cached = self._hy2_quota_cache.get(email_id)
-            if cached and _time.monotonic() - cached[0] < 30:
+            age = now_m - cached[0] if cached else None
+            t = None
+            if cached is not None and age < self.HY2_QUOTA_STALE_MAX_S:
                 t = cached[1]
+                if age >= self.HY2_QUOTA_FRESH_S:
+                    self._schedule_hy2_quota_refresh(email_id)
             else:
-                try:
-                    t = await self.xui.get_client_traffic(email_id)
-                except Exception as e:
-                    logger.warning(f"hy2_auth: panel quota lookup failed: {e}")
-                    t = None
-                self._hy2_quota_cache[email_id] = (_time.monotonic(), t)
+                self._schedule_hy2_quota_refresh(email_id)
             if t:
                 # XUIService's API path speaks upload/download, its DB
                 # fallback up/down — accept both.
@@ -608,7 +667,19 @@ class WebAppServer:
                     decision = 'deny'
                     logger.info(
                         f"hy2_auth: quota gate deny {chat_id_str} "
-                        f"(used {used} of {total}, enable={t.get('enable')})"
+                        f"(panel: used {used} of {total}, enable={t.get('enable')})"
+                    )
+            else:
+                try:
+                    used_gb = float(mirror_up or 0) + float(mirror_down or 0)
+                    q = float(quota_gb or 0)
+                except (TypeError, ValueError):
+                    used_gb, q = 0.0, 0.0
+                if q > 0 and used_gb >= q:
+                    decision = 'deny'
+                    logger.info(
+                        f"hy2_auth: quota gate deny {chat_id_str} "
+                        f"(mirror: used {used_gb:.3f} of {q:g} GB)"
                     )
 
         # Pin the user's last geo (country / ASN / city / lat / lon)
