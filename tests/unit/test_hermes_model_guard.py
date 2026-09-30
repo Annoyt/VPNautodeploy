@@ -235,10 +235,10 @@ class TestDecidePromote:
                               FALLBACK: 'free', OTHER: 'free'})
         plan = guard.decide(cfg, index, None, None)
         assert plan.new_config['model']['default'] == FALLBACK
-        # untouched fallbacks keep their order; the old primary is gone
-        assert [fb['model'] for fb in plan.new_config['fallback_providers']] == [
-            'x/paid-one', OTHER,
-        ]
+        # survivors keep their order; the old primary is gone, and so is the
+        # PAID fallback — the guard never leaves a paid path in the chain
+        assert [fb['model'] for fb in plan.new_config['fallback_providers']] == [OTHER]
+        assert 'drop_fallback:x/paid-one' in plan.actions
 
     def test_winner_does_not_inherit_old_primary_endpoint_or_key(self):
         cfg = real_config()
@@ -363,18 +363,17 @@ class TestDecideUsage:
 # ---------------------------------------------------------------------------
 
 class TestFallbackDegraded:
-    def test_fallback_turned_paid_warns_once_on_transition(self):
-        index = make_index(**{FALLBACK: 'paid'})
-        first = guard.decide(real_config(), index, None, None, prev_states={})
-        assert keys(first) == [f'fallback_degraded:{FALLBACK}']
-        n = first.notifications[0]
-        assert n.severity == guard.WARN
-        assert 'ПЛАТНУЮ' in n.detail
-        assert first.new_config is None       # primary is fine — hands off
-
-        again = guard.decide(real_config(), index, None, None,
-                             prev_states=first.model_states())
-        assert again.notifications == []      # already known -> no nagging
+    def test_paid_fallback_is_cut_at_once(self):
+        """A PAID fallback is a billing path Hermes WILL take the first time
+        the free primary 429s — it goes on the first sighting, no waiting."""
+        plan = guard.decide(real_config(), make_index(**{FALLBACK: 'paid'}), None, None,
+                            prev_states={})
+        assert plan.new_config['model']['default'] == PRIMARY      # primary untouched
+        assert plan.new_config['fallback_providers'] == []
+        assert f'drop_fallback:{FALLBACK}' in plan.actions
+        [n] = plan.notifications
+        assert n.key.startswith('rewrite:') and n.severity == guard.CRITICAL
+        assert FALLBACK in n.detail and 'платной' in n.detail
 
     def test_fallback_vanished_warns(self):
         plan = guard.decide(real_config(), make_index(**{FALLBACK: 'missing'}), None, None,
@@ -755,14 +754,15 @@ class TestRunOnce:
         io.send_ok = False
         guard.run_once(io, host['config'], host['state'], dry_run=False)
         st = state_of(host)
-        assert [p['key'] for p in st['pending']] == [
-            f'fallback_degraded:{FALLBACK}', 'no_free_model']
+        # nothing free anywhere -> no rewrite at all, one critical that
+        # prints the whole (paid) chain
+        assert [p['key'] for p in st['pending']] == ['no_free_model']
         # the dedupe stamp stays: the queued text IS the delivery
         assert 'no_free_model' in st['notified']
         io2 = FakeIO(index=io.index, now=NOW + timedelta(minutes=30))
         guard.run_once(io2, host['config'], host['state'], dry_run=False)
-        assert len(io2.sent) == 2                     # queued ones only, no duplicate
-        assert 'бесплатных моделей не осталось' in io2.sent[1]
+        assert len(io2.sent) == 1                     # queued one only, no duplicate
+        assert 'бесплатных моделей не осталось' in io2.sent[0]
         assert state_of(host)['pending'] == []
 
     def test_promote_message_survives_a_dead_telegram(self, host):
@@ -1077,42 +1077,96 @@ class TestConfigAuxModels:
         assert guard.config_aux_models(cfg) == []
 
 
+GEMMA = 'google/gemma-4-31b-it:free'                           # = VISION
+LIGHTNING = 'nvidia/nemotron-3.5-lightning:free'
+OMNI = 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free'
+NORTH = 'cohere/north-mini-code:free'
+TEXT_TASKS = ['web_extract', 'compression', 'skills_hub', 'approval', 'mcp',
+              'title_generation', 'tts_audio_tags', 'triage_specifier',
+              'kanban_decomposer', 'profile_describer', 'curator', 'monitor',
+              'background_review', 'moa_reference', 'moa_aggregator', 'goal_judge']
+
+
+def rich(state='free', *, tools=True, images=False):
+    """A /models entry with the capability fields the repair reads."""
+    entry = dict(free() if state == 'free' else paid())
+    if tools:
+        entry['supported_parameters'] = ['tools', 'temperature']
+    entry['architecture'] = {'input_modalities': ['text', 'image'] if images else ['text']}
+    return entry
+
+
+def curated_index(**states):
+    """aux_index + the live-smoked candidates with real capabilities."""
+    index = aux_index(**states)
+    for mid, entry in ((GEMMA, rich(images=True)), (LIGHTNING, rich()),
+                       (OMNI, rich(images=True)), (NORTH, rich())):
+        if mid not in states:
+            index[mid] = entry
+    return index
+
+
+def prod_config():
+    """entry:/root/.hermes/config.yaml as of 2026-09-28."""
+    cfg = real_config()
+    cfg['model']['default'] = FALLBACK
+    cfg['fallback_providers'] = [
+        {'provider': 'openrouter', 'model': GEMMA, 'base_url': guard.OPENROUTER_API},
+        {'provider': 'openrouter', 'model': LIGHTNING, 'base_url': guard.OPENROUTER_API},
+    ]
+    cfg['auxiliary'] = {t: {'provider': 'openrouter', 'model': GEMMA} for t in ('vision', 'video')}
+    cfg['auxiliary'].update({t: {'provider': 'openrouter', 'model': FALLBACK} for t in TEXT_TASKS})
+    return cfg
+
+
 class TestDecideAuxiliary:
 
     def test_all_free_aux_is_silent(self):
         plan = guard.decide(aux_config(), aux_index(), 0.0, 0.0)
-        assert plan.notifications == []
+        assert plan.notifications == [] and plan.new_config is None
         assert [st.state for _, st in plan.auxiliary] == [guard.FREE] * 3
 
-    def test_paid_aux_model_is_critical_and_names_the_tasks(self):
-        plan = guard.decide(aux_config(), aux_index(**{VISION: 'paid'}), 0.0, 0.0)
-        assert keys(plan) == [f'aux_paid:{VISION}']
-        n = plan.notifications[0]
-        assert n.severity == guard.CRITICAL and plan.critical
-        assert 'vision' in n.detail and VISION in n.detail
+    def test_paid_aux_is_repinned_at_once_and_is_critical(self):
+        """A paid side-task model bills on every compression/approval call —
+        fixed on the first sighting, no 'поправь руками'."""
+        cfg = aux_config()
+        plan = guard.decide(cfg, curated_index(**{VISION: 'paid'}), 0.0, 0.0)
+        # vision needs images: the next live-smoked image model, not the text primary
+        assert plan.new_config['auxiliary']['vision']['model'] == OMNI
+        assert f'repin:vision:{VISION}->{OMNI}' in plan.actions
+        [n] = plan.notifications
+        assert n.key.startswith('rewrite:') and n.severity == guard.CRITICAL
+        assert 'vision' in n.detail and VISION in n.detail and OMNI in n.detail
+        assert cfg['auxiliary']['vision']['model'] == VISION     # input never mutated
 
-    def test_missing_aux_model_warns_and_forbids_the_empty_model_fix(self):
-        """The tempting 'fix' — model: '' — is the paid default itself."""
-        plan = guard.decide(aux_config(), aux_index(**{VISION: 'missing'}), 0.0, 0.0)
-        assert keys(plan) == [f'aux_missing:{VISION}']
-        n = plan.notifications[0]
-        assert n.severity == guard.WARN and not plan.critical
-        assert "model: ''" in n.detail
+    def test_missing_aux_waits_one_run_then_repins(self):
+        idx = curated_index(**{VISION: 'missing'})
+        first = guard.decide(aux_config(), idx, 0.0, 0.0)
+        assert keys(first) == [f'aux_missing:{VISION}']
+        assert first.new_config is None and not first.critical
+        assert 'перезакреплю' in first.notifications[0].detail
+        second = guard.decide(aux_config(), idx, 0.0, 0.0, prev_states=first.model_states())
+        assert second.new_config['auxiliary']['vision']['model'] == OMNI
+        [n] = second.notifications
+        assert n.severity == guard.WARN          # a 404 costs nothing
 
-    def test_tasks_sharing_a_model_alert_once(self):
-        """Sixteen tasks pinned to the primary read as ONE alert, not 16."""
+    def test_tasks_sharing_a_model_repin_as_one_line(self):
+        """Sixteen tasks on one dead model read as ONE change, not 16."""
         cfg = aux_config({t: {'provider': 'openrouter', 'model': OTHER}
                           for t in ('compression', 'approval', 'curator')})
         plan = guard.decide(cfg, aux_index(**{OTHER: 'paid'}), 0.0, 0.0)
-        assert keys(plan) == [f'aux_paid:{OTHER}']
-        assert all(t in plan.notifications[0].detail
-                   for t in ('compression', 'approval', 'curator'))
+        assert {t: c['model'] for t, c in plan.new_config['auxiliary'].items()} == {
+            'compression': FALLBACK, 'approval': FALLBACK, 'curator': FALLBACK}
+        [n] = plan.notifications
+        assert n.detail.count(OTHER) == 1
+        assert all(t in n.detail for t in ('compression', 'approval', 'curator'))
 
-    def test_transition_only(self):
-        prev = {VISION: guard.PAID}
-        plan = guard.decide(aux_config(), aux_index(**{VISION: 'paid'}), 0.0, 0.0,
-                            prev_states=prev)
-        assert keys(plan) == []
+    def test_a_known_paid_aux_is_still_fixed(self):
+        """The repair is state-based: while the config points at a paid
+        model, it bills. (Notification repeats are the dedupe window's job.)"""
+        plan = guard.decide(aux_config(), curated_index(**{VISION: 'paid'}), 0.0, 0.0,
+                            prev_states={VISION: guard.PAID})
+        assert plan.new_config['auxiliary']['vision']['model'] == OMNI
 
     def test_aux_states_are_remembered_for_the_next_run(self):
         plan = guard.decide(aux_config(), aux_index(**{VISION: 'paid'}), 0.0, 0.0)
@@ -1120,7 +1174,7 @@ class TestDecideAuxiliary:
 
     def test_primary_that_is_also_the_text_aux_model_keeps_one_state(self):
         """nemotron is both default and the compression model; losing it
-        must still take the two-run confirmation before a promotion."""
+        takes the two-run confirmation, then ONE rewrite fixes both."""
         cfg = aux_config()
         cfg['fallback_providers'] = [{'provider': 'openrouter', 'model': OTHER}]
         idx = aux_index(**{FALLBACK: 'missing', OTHER: 'free'})
@@ -1130,12 +1184,123 @@ class TestDecideAuxiliary:
         assert f'aux_missing:{FALLBACK}' in keys(first)
         second = guard.decide(cfg, idx, 0.0, 0.0, prev_states=first.model_states())
         assert second.new_config['model']['default'] == OTHER
+        assert second.new_config['auxiliary']['compression']['model'] == OTHER
+        assert second.new_config['auxiliary']['approval']['model'] == OTHER
+        assert [n.key for n in second.notifications] == [f'promoted:{FALLBACK}->{OTHER}']
 
-    def test_promotion_keeps_the_auxiliary_pins(self):
+    def test_promotion_carries_the_text_tasks_along(self):
+        """The billing hole this change closes: text side tasks pinned to a
+        primary that turned PAID would keep billing after the promotion."""
         cfg = aux_config()
         cfg['fallback_providers'] = [{'provider': 'openrouter', 'model': OTHER}]
         plan = guard.decide(cfg, aux_index(**{FALLBACK: 'paid', OTHER: 'free'}), 0.0, 0.0)
-        assert plan.new_config['auxiliary'] == cfg['auxiliary']
+        aux = plan.new_config['auxiliary']
+        assert aux['compression']['model'] == OTHER and aux['approval']['model'] == OTHER
+        assert aux['vision']['model'] == VISION          # free, left alone
+        assert FALLBACK not in json.dumps(plan.new_config)
+        assert plan.actions.count(f'restart:{guard.HERMES_UNIT}') == 1
+
+
+class TestAutoRepair:
+
+    def test_2026_09_prod_shape_primary_turns_paid(self):
+        """The live config, nemotron priced: promote gemma, move the 16 text
+        tasks with it, top the chain back up from the smoked list."""
+        plan = guard.decide(prod_config(), curated_index(**{FALLBACK: 'paid'}), None, None)
+        new = plan.new_config
+        assert new['model']['default'] == GEMMA
+        assert [fb['model'] for fb in new['fallback_providers']] == [LIGHTNING, OMNI]
+        assert all(new['auxiliary'][t]['model'] == GEMMA for t in TEXT_TASKS)
+        assert new['auxiliary']['vision']['model'] == GEMMA
+        assert FALLBACK not in json.dumps(new)
+        [n] = plan.notifications
+        assert n.key == f'promoted:{FALLBACK}->{GEMMA}' and n.severity == guard.CRITICAL
+        assert 'Все изменения' in n.detail and f'add_fallback:{OMNI}' in plan.actions
+
+    def test_healthy_chain_is_never_topped_up(self):
+        """Only after the guard had to cut it: a hand-shaped chain stays."""
+        cfg = prod_config()
+        cfg['fallback_providers'] = cfg['fallback_providers'][:1]        # one fallback
+        plan = guard.decide(cfg, curated_index(), 0.0, 0.0)
+        assert plan.new_config is None and plan.notifications == []
+
+    def test_only_smoked_tool_capable_models_are_ever_added(self):
+        cfg = real_config()
+        index = make_index(**{PRIMARY: 'paid'})
+        index['anyone/untested-but-free:free'] = rich()      # free + tools, not curated
+        index[GEMMA] = rich(tools=False, images=True)        # curated, no tools
+        index[LIGHTNING] = rich()
+        plan = guard.decide(cfg, index, None, None)
+        chain = [fb['model'] for fb in plan.new_config['fallback_providers']]
+        assert 'anyone/untested-but-free:free' not in chain
+        assert GEMMA not in chain and chain == [LIGHTNING]
+
+    def test_curated_model_is_promoted_when_the_chain_has_nothing_free(self):
+        cfg = real_config()
+        index = make_index(**{PRIMARY: 'paid', FALLBACK: 'paid'})
+        index[GEMMA] = rich(images=True)
+        index[LIGHTNING] = rich()
+        index[NORTH] = rich()
+        plan = guard.decide(cfg, index, None, None)
+        assert plan.new_config['model'] == {'default': GEMMA, 'provider': 'openrouter',
+                                            'base_url': guard.OPENROUTER_API}
+        assert [fb['model'] for fb in plan.new_config['fallback_providers']] == [LIGHTNING, NORTH]
+        assert f'drop_fallback:{FALLBACK}' in plan.actions
+
+    def test_nothing_free_anywhere_touches_nothing(self):
+        plan = guard.decide(real_config(), make_index(**{PRIMARY: 'paid', FALLBACK: 'paid'}),
+                            None, None)
+        assert plan.new_config is None and keys(plan) == ['no_free_model']
+
+    def test_missing_fallback_is_cut_on_the_second_sighting(self):
+        cfg = prod_config()
+        idx = curated_index(**{LIGHTNING: 'missing'})
+        first = guard.decide(cfg, idx, None, None, prev_states={LIGHTNING: guard.FREE})
+        assert first.new_config is None and keys(first) == [f'fallback_degraded:{LIGHTNING}']
+        second = guard.decide(cfg, idx, None, None, prev_states=first.model_states())
+        assert [fb['model'] for fb in second.new_config['fallback_providers']] == [GEMMA, OMNI]
+        assert second.notifications[0].severity == guard.WARN
+
+    def test_vision_prefers_an_image_model_already_in_the_chain(self):
+        cfg = prod_config()
+        cfg['auxiliary'] = {'vision': {'provider': 'openrouter', 'model': 'x/dead-vision'}}
+        idx = curated_index(**{'x/dead-vision': 'paid'})
+        plan = guard.decide(cfg, idx, None, None)
+        assert plan.new_config['auxiliary']['vision']['model'] == GEMMA   # chain, not OMNI
+
+    def test_no_free_image_model_pins_text_and_says_so(self):
+        cfg = aux_config()
+        plan = guard.decide(cfg, aux_index(**{VISION: 'paid'}), 0.0, 0.0)
+        assert plan.new_config['auxiliary']['vision']['model'] == FALLBACK
+        assert 'картинки агент читать не сможет' in plan.notifications[0].detail
+
+    def test_dead_entries_leave_a_task_fallback_chain(self):
+        cfg = aux_config({'compression': {'provider': 'openrouter', 'model': FALLBACK,
+                                          'fallback_chain': [
+                                              {'provider': 'openrouter', 'model': OTHER},
+                                              {'provider': 'custom', 'model': 'local'}]}})
+        plan = guard.decide(cfg, aux_index(**{OTHER: 'paid'}), 0.0, 0.0)
+        assert plan.new_config['auxiliary']['compression']['fallback_chain'] == [
+            {'provider': 'custom', 'model': 'local'}]
+
+    def test_rewrite_key_is_stable_for_the_same_repair(self):
+        idx = curated_index(**{VISION: 'paid'})
+        a = guard.decide(aux_config(), idx, 0.0, 0.0).notifications[0].key
+        b = guard.decide(aux_config(), idx, 0.0, 0.0).notifications[0].key
+        assert a == b and a.startswith('rewrite:')
+
+    def test_repair_is_written_restarted_and_announced(self, host):
+        cfg = aux_config()
+        with open(host['config'], 'w') as fh:
+            yaml.safe_dump(cfg, fh)
+        io = FakeIO(index=curated_index(**{VISION: 'paid'}))
+        rc = guard.run_once(io, host['config'], host['state'], dry_run=False)
+        assert rc == 1                                   # paid touched -> check balance
+        on_disk = yaml.safe_load(open(host['config']).read())
+        assert on_disk['auxiliary']['vision']['model'] == OMNI
+        assert io.restarts == 1
+        [msg] = io.sent
+        assert 'починил конфиг' in msg and 'перезапущен' in msg and '.bak-' in msg
 
 
 class TestUsageMessageNamesTheSideTasks:
