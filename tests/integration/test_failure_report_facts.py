@@ -263,15 +263,21 @@ class TestPanelRead:
 
     @pytest.fixture
     def read(self, db, monkeypatch):
-        state = {'api': True, 'inbounds': []}
+        state = {'api': True, 'inbounds': [], 'closed': 0, 'raise': None}
 
         class FakeXUI:
             def __init__(self, config):
-                self.api = (SimpleNamespace(get_inbounds=self._inbounds)
+                self.api = (SimpleNamespace(get_inbounds=self._inbounds,
+                                            close=self._close)
                             if state['api'] else None)
 
             async def _inbounds(self):
+                if state['raise']:
+                    raise state['raise']
                 return state['inbounds']
+
+            async def _close(self):
+                state['closed'] += 1
 
             def _run_sync(self, coro):
                 return asyncio.run(coro)
@@ -308,6 +314,19 @@ class TestPanelRead:
         state['api'] = False
         with pytest.raises(RuntimeError):
             fetch()
+
+    def test_session_is_closed_after_a_read(self, read):
+        state, fetch = read
+        state['inbounds'] = [{'clientStats': [{'email': EMAIL, 'lastOnline': 7}]}]
+        assert fetch() == 7
+        assert state['closed'] == 1
+
+    def test_session_is_closed_when_the_read_fails(self, read):
+        state, fetch = read
+        state['raise'] = ConnectionError('panel down')
+        with pytest.raises(ConnectionError):
+            fetch()
+        assert state['closed'] == 1
 
 
 @pytest.mark.parametrize('secs, text', [

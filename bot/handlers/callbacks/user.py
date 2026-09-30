@@ -1163,7 +1163,19 @@ class MyKeyAnswerHandler(BaseCallbackHandler):
         xui = XUIService(self.config)
         if not getattr(xui, 'api', None):
             raise RuntimeError('no panel API configured')
-        inbounds = xui._run_sync(xui.api.get_inbounds())
+
+        async def _read():
+            try:
+                return await xui.api.get_inbounds()
+            finally:
+                # A fresh client per report: close its aiohttp session in
+                # the loop that opened it, or it lingers until GC.
+                try:
+                    await xui.api.close()
+                except Exception as e:
+                    logger.debug(f"report_failure: panel session close: {e}")
+
+        inbounds = xui._run_sync(_read())
         if not inbounds:
             raise RuntimeError('panel returned no inbounds')
         for inbound in inbounds:
