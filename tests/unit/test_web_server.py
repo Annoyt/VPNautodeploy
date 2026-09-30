@@ -387,13 +387,16 @@ class TestHy2AuthQuotaGate:
     handshake on this callback: the synchronous lookup cost ~95 ms per new
     hy2 connection (~620 ms on a panel re-login), the 2026-09-30 "hysteria
     connects slowly" complaint. Decisions come from a background-refreshed
-    per-email cache, else from the bot's own users mirror (traffic_up/down
-    vs quota_gb, GB), and fail open when neither has anything to say.
+    per-email cache of PANEL readings; no reading yet -> allow.
+
+    The panel is the only source of truth. A first cut also gated a cold
+    cache on the bot's users.quota_gb mirror — and denied the probe user,
+    whose bot row says 1 GB while the panel says unlimited.
     """
 
     EMAIL = 'user_x_123@nekovo.ru'
 
-    def _make_server(self, traffic=None, *, mirror=(0.0, 0.0, 100.0)):
+    def _make_server(self, traffic=None):
         from unittest.mock import AsyncMock
 
         config = Mock(spec=Settings)
@@ -405,7 +408,7 @@ class TestHy2AuthQuotaGate:
         db = MagicMock(spec=Database)
         conn = MagicMock()
         conn.execute.return_value.fetchone.return_value = (
-            123, self.EMAIL, 'paid', None, *mirror,
+            123, self.EMAIL, 'paid', None,
         )
         db._connect.return_value.__enter__.return_value = conn
 
@@ -429,12 +432,15 @@ class TestHy2AuthQuotaGate:
         if server._bg_tasks:
             await asyncio.gather(*list(server._bg_tasks), return_exceptions=True)
 
+    OVER = {'upload': 60, 'download': 41, 'total': 100, 'enable': True}
+    UNDER = {'upload': 1, 'download': 2, 'total': 100, 'enable': True}
+
     # -- decisions from a cached panel reading ------------------------------
 
     @pytest.mark.asyncio
     async def test_allow_under_quota(self):
         server = self._make_server()
-        self._warm(server, {'upload': 1, 'download': 2, 'total': 100, 'enable': True})
+        self._warm(server, self.UNDER)
         assert (await self._auth(server))['ok'] is True
 
     @pytest.mark.asyncio
@@ -446,11 +452,12 @@ class TestHy2AuthQuotaGate:
     @pytest.mark.asyncio
     async def test_deny_when_over_quota(self):
         server = self._make_server()
-        self._warm(server, {'upload': 60, 'download': 41, 'total': 100, 'enable': True})
+        self._warm(server, self.OVER)
         assert (await self._auth(server))['ok'] is False
 
     @pytest.mark.asyncio
     async def test_unlimited_total_zero_allows(self):
+        """The probe user's panel shape: counters run, total 0 = unlimited."""
         server = self._make_server()
         self._warm(server, {'upload': 500, 'download': 500, 'total': 0, 'enable': True})
         assert (await self._auth(server))['ok'] is True
@@ -467,62 +474,58 @@ class TestHy2AuthQuotaGate:
 
         async def slow_panel(_email):
             await gate.wait()
-            return {'upload': 0, 'download': 0, 'total': 100, 'enable': True}
+            return self.UNDER
 
         server.xui.get_client_traffic = AsyncMock(side_effect=slow_panel)
         data = await asyncio.wait_for(self._auth(server), timeout=1.0)
         assert data['ok'] is True
-        # ...and the refresh it kicked off lands in the cache afterwards
         gate.set()
         await self._drain(server)
-        assert server._hy2_quota_cache[self.EMAIL][1]['total'] == 100
+        assert server._hy2_quota_cache[self.EMAIL][1] == self.UNDER
 
     @pytest.mark.asyncio
-    async def test_cold_cache_decides_from_the_users_mirror(self):
-        server = self._make_server(mirror=(6.0, 4.5, 10.0))    # 10.5 of 10 GB
+    async def test_cold_cache_lets_one_in_then_the_panel_gates(self):
+        """First connect after a bot restart is allowed; the refresh it
+        triggers stops a reconnect-looping over-quota client right after."""
+        server = self._make_server(self.OVER)
+        assert (await self._auth(server))['ok'] is True
+        await self._drain(server)
+        assert (await self._auth(server))['ok'] is False
+
+    @pytest.mark.asyncio
+    async def test_known_over_quota_stays_out_while_it_reconnects(self):
+        """A reading minutes old still decides — reconnecting every 15 min
+        must not buy a fresh session each time."""
+        server = self._make_server(self.OVER)
+        self._warm(server, self.OVER, age=15 * 60)
         assert (await self._auth(server))['ok'] is False
         await self._drain(server)
 
     @pytest.mark.asyncio
-    async def test_cold_cache_mirror_under_quota_allows(self):
-        server = self._make_server(mirror=(1.0, 2.0, 10.0))
-        assert (await self._auth(server))['ok'] is True
-        await self._drain(server)
-
-    @pytest.mark.asyncio
-    async def test_mirror_with_zero_quota_means_unlimited(self):
-        server = self._make_server(mirror=(900.0, 900.0, 0))
-        assert (await self._auth(server))['ok'] is True
-        await self._drain(server)
-
-    @pytest.mark.asyncio
-    async def test_stale_cache_answers_now_and_refreshes_once(self):
-        server = self._make_server({'upload': 60, 'download': 41, 'total': 100, 'enable': True})
-        self._warm(server, {'upload': 1, 'download': 2, 'total': 100, 'enable': True},
-                   age=server.HY2_QUOTA_FRESH_S + 5)
-        # answered from the stale-but-valid reading...
+    async def test_stale_reading_answers_now_and_refreshes_once(self):
+        server = self._make_server(self.OVER)
+        self._warm(server, self.UNDER, age=server.HY2_QUOTA_FRESH_S + 5)
         assert (await self._auth(server))['ok'] is True
         assert (await self._auth(server))['ok'] is True      # refresh still in flight
         await self._drain(server)
         assert server.xui.get_client_traffic.await_count == 1   # deduped
-        # ...and the next connect sees the refreshed (over-quota) reading
-        assert (await self._auth(server))['ok'] is False
+        assert (await self._auth(server))['ok'] is False    # next connect: refreshed
 
     @pytest.mark.asyncio
-    async def test_fresh_cache_is_not_refreshed(self):
+    async def test_fresh_reading_is_not_refreshed(self):
         server = self._make_server()
-        self._warm(server, {'upload': 1, 'download': 2, 'total': 100, 'enable': True})
+        self._warm(server, self.UNDER)
         await self._auth(server)
         await self._drain(server)
         server.xui.get_client_traffic.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_too_old_cache_falls_back_to_the_mirror(self):
-        server = self._make_server(mirror=(6.0, 4.5, 10.0))
-        self._warm(server, {'upload': 1, 'download': 2, 'total': 100, 'enable': True},
-                   age=server.HY2_QUOTA_STALE_MAX_S + 5)
-        assert (await self._auth(server))['ok'] is False
+    async def test_reading_older_than_stale_max_is_forgotten(self):
+        server = self._make_server(self.UNDER)
+        self._warm(server, self.OVER, age=server.HY2_QUOTA_STALE_MAX_S + 5)
+        assert (await self._auth(server))['ok'] is True
         await self._drain(server)
+        assert server._hy2_quota_cache[self.EMAIL][1] == self.UNDER
 
     @pytest.mark.asyncio
     async def test_failed_refresh_keeps_the_known_reading(self):
@@ -530,11 +533,10 @@ class TestHy2AuthQuotaGate:
         from unittest.mock import AsyncMock
         server = self._make_server()
         server.xui.get_client_traffic = AsyncMock(side_effect=Exception("panel down"))
-        over = {'upload': 60, 'download': 41, 'total': 100, 'enable': True}
-        self._warm(server, over, age=server.HY2_QUOTA_FRESH_S + 5)
+        self._warm(server, self.OVER, age=server.HY2_QUOTA_FRESH_S + 5)
         assert (await self._auth(server))['ok'] is False
         await self._drain(server)
-        assert server._hy2_quota_cache[self.EMAIL][1] == over
+        assert server._hy2_quota_cache[self.EMAIL][1] == self.OVER
         assert server._hy2_quota_refreshing == set()             # slot released
 
     @pytest.mark.asyncio
@@ -570,7 +572,7 @@ class TestHy2AuthPaidTier:
         db = MagicMock(spec=Database)
         conn = MagicMock()
         conn.execute.return_value.fetchone.return_value = (
-            123, 'user_x_123@nekovo.ru', status, None, 0.0, 0.0, 100.0,
+            123, 'user_x_123@nekovo.ru', status, None,
         )
         db._connect.return_value.__enter__.return_value = conn
 

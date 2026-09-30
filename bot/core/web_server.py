@@ -471,11 +471,13 @@ class WebAppServer:
         """
         return await self._hy2_auth_common(request, paid_only=True)
 
-    # hy2 quota gate cache windows (see _hy2_auth_common). Fresh: decide
-    # from the cached panel reading as is. Stale: still decide from it, but
-    # refresh in the background. Beyond stale: the users mirror decides.
+    # hy2 quota gate cache windows (see _hy2_auth_common). Younger than
+    # FRESH: the cached panel reading decides as is. Older: it still decides
+    # (a known over-quota user stays out while he reconnects), and a
+    # background refresh replaces it. Older than STALE_MAX: forgotten — the
+    # connect is let through and the refresh decides the next one.
     HY2_QUOTA_FRESH_S = 30
-    HY2_QUOTA_STALE_MAX_S = 600
+    HY2_QUOTA_STALE_MAX_S = 6 * 3600
 
     def _schedule_hy2_quota_refresh(self, email_id: str) -> None:
         """Refresh one client's panel counters without blocking the caller.
@@ -580,14 +582,12 @@ class WebAppServer:
         decision = 'deny'
         chat_id_str = None
         email_id = None
-        mirror_up = mirror_down = quota_gb = None
 
         if password:
             try:
                 with self.db._connect() as conn:
                     row = conn.execute(
-                        "SELECT chat_id, email, status, subscription_expiry, "
-                        "traffic_up, traffic_down, quota_gb "
+                        "SELECT chat_id, email, status, subscription_expiry "
                         "FROM users WHERE uuid = ? LIMIT 1",
                         (password,),
                     ).fetchone()
@@ -596,9 +596,6 @@ class WebAppServer:
                 row = None
             if row:
                 chat_id_str, email_id, status, expiry = row[0], row[1], row[2], row[3]
-                # The bot's own copy of the panel counters (GB), mirrored every
-                # 10 min by NotificationService._sync_traffic_to_botdb_sync.
-                mirror_up, mirror_down, quota_gb = row[4], row[5], row[6]
                 expired = False
                 if expiry:
                     try:
@@ -632,28 +629,19 @@ class WebAppServer:
         # panel on exit) cost ~95 ms per new hy2 connection — ~620 ms when
         # the session had to log in again — on top of the ~100 ms this
         # callback already costs: the "hysteria connects slowly" complaint of
-        # 2026-09-30, a cost no other protocol pays. So the decision uses
-        # what is already in hand, newest first:
-        #   1. the per-email panel reading cached by an earlier refresh
-        #      (younger than HY2_QUOTA_STALE_MAX_S; older than
-        #      HY2_QUOTA_FRESH_S -> refreshed in the background);
-        #   2. else the bot's own mirror of the panel counters in users
-        #      (traffic_up/down vs quota_gb, <= 10 min old), and a background
-        #      refresh fills the cache for the next connect.
-        # Panel unreachable -> the mirror still gates; no mirror either ->
-        # allow (availability over enforcement; the exit-side kick loop still
-        # covers connected sessions).
+        # 2026-09-30, a cost no other protocol pays. So the decision uses the
+        # per-email panel reading a BACKGROUND refresh left in the cache (see
+        # HY2_QUOTA_*). No reading yet (first connect since a bot restart) ->
+        # allow; the refresh this triggers gates the next connect.
+        # The panel stays the only source of truth: the bot's users.quota_gb
+        # is NOT the panel's limit (the probe user: 1 GB here, unlimited
+        # there) — deciding from it denied a user the panel allows.
         if decision == 'allow' and email_id:
             import time as _time
-            now_m = _time.monotonic()
             cached = self._hy2_quota_cache.get(email_id)
-            age = now_m - cached[0] if cached else None
-            t = None
-            if cached is not None and age < self.HY2_QUOTA_STALE_MAX_S:
-                t = cached[1]
-                if age >= self.HY2_QUOTA_FRESH_S:
-                    self._schedule_hy2_quota_refresh(email_id)
-            else:
+            age = _time.monotonic() - cached[0] if cached else None
+            t = cached[1] if cached is not None and age < self.HY2_QUOTA_STALE_MAX_S else None
+            if cached is None or age >= self.HY2_QUOTA_FRESH_S:
                 self._schedule_hy2_quota_refresh(email_id)
             if t:
                 # XUIService's API path speaks upload/download, its DB
@@ -667,19 +655,7 @@ class WebAppServer:
                     decision = 'deny'
                     logger.info(
                         f"hy2_auth: quota gate deny {chat_id_str} "
-                        f"(panel: used {used} of {total}, enable={t.get('enable')})"
-                    )
-            else:
-                try:
-                    used_gb = float(mirror_up or 0) + float(mirror_down or 0)
-                    q = float(quota_gb or 0)
-                except (TypeError, ValueError):
-                    used_gb, q = 0.0, 0.0
-                if q > 0 and used_gb >= q:
-                    decision = 'deny'
-                    logger.info(
-                        f"hy2_auth: quota gate deny {chat_id_str} "
-                        f"(mirror: used {used_gb:.3f} of {q:g} GB)"
+                        f"(used {used} of {total}, enable={t.get('enable')})"
                     )
 
         # Pin the user's last geo (country / ASN / city / lat / lon)
