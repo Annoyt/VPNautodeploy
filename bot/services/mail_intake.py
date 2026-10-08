@@ -17,6 +17,13 @@ and typed /addmail by hand. This poller closes the loop:
 
 Nothing is ever issued automatically — the button is the gate, spam
 dies in the pending pile.
+
+SOS by mail (IMPROVEMENT_PLAN E24): a letter from a key holder's
+``contact_email`` that says sos / help / не работает / не подключается
+(subject, or the body with quotes stripped — the body is fetched only for
+key holders) is answered with the emergency subscription instead of
+becoming a card; see ``bot/services/sos.py``. Unknown senders and letters
+without a trigger word take the request path above, unchanged.
 """
 
 import email
@@ -171,6 +178,13 @@ class MailIntakeService:
         if _MACHINE_SENDER.search(addr):
             return False
 
+        # SOS from a key holder (IMPROVEMENT_PLAN E24) — ahead of the
+        # request path, whose one-open-request rule would swallow it.
+        # Everything else (unknown sender, no trigger word) goes on below
+        # exactly as before.
+        if self._handle_sos_letter(m, uid, addr, subject, message_id):
+            return False
+
         with self.db._connect() as conn:
             if message_id and conn.execute(
                 "SELECT 1 FROM email_requests WHERE message_id = ?",
@@ -201,6 +215,76 @@ class MailIntakeService:
         self._notify_admin(req_id, addr, subject,
                            known[1] if known else None)
         return True
+
+    # ---- SOS by mail (IMPROVEMENT_PLAN E24) ----
+
+    def _sos_user(self, addr: str):
+        """The key holder whose ``contact_email`` is ``addr`` (demo / paid /
+        support_topic with a uuid), or None. ``users.email`` is the
+        synthetic panel id and never matches a real address. Any failure
+        → None: the letter then takes the request path, as before."""
+        try:
+            with self.db._connect() as conn:
+                row = conn.execute(
+                    "SELECT chat_id FROM users "
+                    "WHERE LOWER(TRIM(contact_email)) = ? "
+                    "AND status IN ('demo', 'paid', 'support_topic') "
+                    "AND uuid IS NOT NULL AND uuid != '' "
+                    "ORDER BY CASE status WHEN 'paid' THEN 0 "
+                    "WHEN 'support_topic' THEN 1 ELSE 2 END LIMIT 1",
+                    (addr,),
+                ).fetchone()
+            return self.db.get_user(row[0]) if row else None
+        except Exception as e:
+            logger.debug(f"mail_intake: sos lookup skipped: {e}")
+            return None
+
+    def _letter_body(self, m, uid: int) -> str:
+        """The user's own words (quotes stripped) from the first 64 KB."""
+        from bot.services.sos import MAIL_BODY_FETCH_BYTES, letter_text
+        try:
+            typ, data = m.uid('FETCH', str(uid),
+                              f'(BODY.PEEK[]<0.{MAIL_BODY_FETCH_BYTES}>)')
+            if typ != 'OK' or not data or data[0] is None:
+                return ''
+            raw = data[0][1] if isinstance(data[0], tuple) else data[0]
+            return letter_text(raw if isinstance(raw, bytes) else b'')
+        except Exception as e:
+            logger.warning(f"mail_intake: uid {uid} body fetch failed: {e}")
+            return ''
+
+    def _handle_sos_letter(self, m, uid: int, addr: str, subject: str,
+                           message_id: str) -> bool:
+        """True when the letter was an SOS from a key holder and is dealt
+        with here (answered, or a duplicate); False → the request path."""
+        user = self._sos_user(addr)
+        if user is None:
+            return False
+        from bot.services.sos import SosService, match_sos_keywords
+        if not (match_sos_keywords(subject)
+                or match_sos_keywords(self._letter_body(m, uid))):
+            return False
+        if message_id:
+            try:
+                with self.db._connect() as conn:
+                    if conn.execute(
+                        "SELECT 1 FROM email_requests WHERE message_id = ?",
+                        (message_id,),
+                    ).fetchone():
+                        return True
+            except Exception as e:
+                logger.warning(f"mail_intake: sos dup check failed: {e}")
+        return SosService(self.bot, self.db, self.config).handle_mail_sos(
+            user, addr, subject, message_id, uid, mailer=self._mailer())
+
+    def _mailer(self):
+        """The SMTP relay (``bot.services['email']`` when the bot has one)."""
+        services = getattr(self.bot, 'services', None)
+        mailer = services.get('email') if isinstance(services, dict) else None
+        if mailer is None:
+            from bot.services.email_service import EmailService
+            mailer = EmailService(self.config)
+        return mailer
 
     @staticmethod
     def _decode(value) -> str:

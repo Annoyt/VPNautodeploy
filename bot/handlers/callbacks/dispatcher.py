@@ -38,6 +38,7 @@ from bot.handlers.callbacks.admin import (
 )
 from bot.handlers.callbacks.ai_model import AiModelSelectHandler
 from bot.handlers.callbacks.rule_lists import ReportSiteHandler, RuleListQueueHandler
+from bot.handlers.callbacks.sos import SosCallbackHandler
 
 if TYPE_CHECKING:
     from bot.core.bot import Bot
@@ -92,7 +93,9 @@ class CallbackDispatcher:
         self.handlers.append(StatsRequestHandler(self.bot, self.db, self.config))
         self.handlers.append(FullVersionHandler(self.bot, self.db, self.config))
         self.handlers.append(LanguageSetHandler(self.bot, self.db, self.config))
-        
+        # Buttons under the /sos answer (offline kit, share-VPN text).
+        self.handlers.append(SosCallbackHandler(self.bot, self.db, self.config))
+
         # Admin handlers (check after user handlers)
         self.handlers.append(ApproveUserHandler(self.bot, self.db, self.config))
         self.handlers.append(RejectUserHandler(self.bot, self.db, self.config))

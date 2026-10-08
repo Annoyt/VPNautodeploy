@@ -208,14 +208,18 @@ class EmailService:
         subject, body = _key_email(sub_url, lang, platform)
         return self._send(to_addr, subject, body)
 
-    def send_notice(self, to_addr: str, subject: str, body: str) -> bool:
+    def send_notice(self, to_addr: str, subject: str, body: str, *,
+                    in_reply_to: str = None) -> bool:
         """Plain transactional notice (quota warnings, renewals, request
         replies) for users whose only channel is email. Same relay path
         as the key letter; no per-user rate limit — callers de-dupe.
+        ``in_reply_to`` (the incoming Message-ID) threads a reply under
+        the user's letter in clients that thread by reference.
         """
-        return self._send(to_addr, subject, body)
+        return self._send(to_addr, subject, body, in_reply_to=in_reply_to)
 
-    def _send(self, to_addr: str, subject: str, body: str) -> bool:
+    def _send(self, to_addr: str, subject: str, body: str, *,
+              in_reply_to: str = None) -> bool:
         if not self.is_configured():
             logger.warning("email: SMTP_HOST not configured, drop send")
             return False
@@ -223,6 +227,9 @@ class EmailService:
         msg['Subject'] = subject
         msg['From'] = formataddr((self.from_name, self.from_addr))
         msg['To'] = to_addr
+        if in_reply_to:
+            msg['In-Reply-To'] = in_reply_to
+            msg['References'] = in_reply_to
         try:
             # Port 465 is implicit TLS; everything else is submission
             # with STARTTLS (mandatory — creds never travel plaintext).
