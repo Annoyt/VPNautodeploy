@@ -178,6 +178,22 @@ class Bot:
             **kwargs,
         )
 
+    def send_document(
+        self,
+        chat_id: str,
+        filename: str,
+        content: bytes,
+        caption: Optional[str] = None,
+        parse_mode: Optional[str] = None,
+        **kwargs
+    ) -> Optional[dict]:
+        """Send in-memory ``content`` as a file named ``filename`` (the
+        offline kit). See ``TelegramClient.send_document_bytes``."""
+        return self.client.send_document_bytes(
+            chat_id, filename, content,
+            caption=caption, parse_mode=parse_mode, **kwargs,
+        )
+
     def edit_forum_topic(
         self,
         chat_id: str,
