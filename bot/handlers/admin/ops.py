@@ -91,32 +91,110 @@ def _humanize_minutes(mins: float) -> str:
     return f"{days} д {hours} ч"
 
 
-def _format_probe_line(tag: str, info: Optional[dict], now: datetime,
-                       *, window_h: int, min_samples: int) -> str:
-    """One card line per protocol. States, in order of severity:
+def probe_verdict(info: Optional[dict], *, min_samples: int) -> str:
+    """The /protocols judgement of one protocol's probe window (the dict
+    ``read_probe_state`` builds per tag), shared with the user-facing
+    /sos summary so the card and what users are told cannot disagree:
 
-    🔴 no sign of life across the whole window (≥ ``min_samples`` rows,
-       none alive) — this is what the pager calls protocol_down;
-    🟡 the LAST run had no answer at all, or fewer than half its probes
-       succeeded — degraded / possibly the first minutes of an outage;
-    🟢 otherwise (7/10 is the everyday baseline — RU domestic targets
-       fail through the tunnel by design);
-    ⚪ no rows in the window at all.
+    ``down``     no sign of life across the whole window (≥ ``min_samples``
+                 rows, none alive) — what the pager calls protocol_down;
+    ``silent``   the LAST run had no answer at all — possibly the first
+                 minutes of an outage;
+    ``degraded`` fewer than half of the last run's probes succeeded;
+    ``ok``       otherwise (7/10 is the everyday baseline — RU domestic
+                 targets fail through the tunnel by design);
+    ``unknown``  no rows in the window at all.
     """
     if not info:
+        return 'unknown'
+    if info['alive_window'] == 0 and info['rows'] >= min_samples:
+        return 'down'
+    if info['last_alive'] == 0:
+        return 'silent'
+    if info['last_ok'] * 2 < info['last_n']:
+        return 'degraded'
+    return 'ok'
+
+
+def _format_probe_line(tag: str, info: Optional[dict], now: datetime,
+                       *, window_h: int, min_samples: int) -> str:
+    """One card line per protocol, by ``probe_verdict``, in order of
+    severity: 🔴 down · 🟡 silent / degraded · 🟢 ok · ⚪ no rows."""
+    verdict = probe_verdict(info, min_samples=min_samples)
+    if verdict == 'unknown':
         return f"⚪ <b>{tag}</b> — нет проб за {window_h} ч"
     rate = f"{info['last_ok']}/{info['last_n']} ok"
-    if info['alive_window'] == 0 and info['rows'] >= min_samples:
+    if verdict == 'down':
         since = info.get('last_alive_ts')
         how_long = (_humanize_minutes(_minutes_since(since, now))
                     if since else 'всё время наблюдений')
         return (f"🔴 <b>{tag}</b> — {rate}, лежит {how_long} "
                 f"(ни одного ответа за {info['rows']} попыток)")
-    if info['last_alive'] == 0:
+    if verdict == 'silent':
         return f"🟡 <b>{tag}</b> — {rate}, последний прогон без единого ответа"
-    if info['last_ok'] * 2 < info['last_n']:
+    if verdict == 'degraded':
         return f"🟡 <b>{tag}</b> — {rate}, деградация"
     return f"🟢 <b>{tag}</b> — {rate}"
+
+
+def read_probe_state(db, config, now: datetime, *, window_h: int,
+                     runs: int) -> dict:
+    """Newest ``runs`` runs per protocol from outbound_health.
+
+    A "run" is one row per target domain (HealthChecker writes them
+    with per-row timestamps, so runs are recovered by count, exactly
+    as the alert check does). Tags = what HealthChecker probes on
+    THIS deployment (config-driven: hy2t only with HY2T_PORT) so a
+    protocol with NO rows at all still gets a line, plus whatever
+    else has rows in the window — a tag added to the checker shows
+    up here without a code change. Shared by /protocols and /sos.
+    """
+    try:
+        from bot.services.health_checker import HealthChecker as _HC
+        expected = _HC.probe_tags_for(config)
+        per_run = len(_HC.TARGET_DOMAINS)
+    except Exception:      # keep the card alive even if that import breaks
+        expected, per_run = ['reality', 'hy2', 'ws', 'stls'], 10
+
+    cutoff = (now - timedelta(hours=window_h)).isoformat()
+    limit = runs * per_run
+    per_tag: dict = {}
+    with db._connect() as conn:
+        newest = conn.execute(
+            "SELECT MAX(ts) FROM outbound_health").fetchone()[0]
+        seen = [r[0] for r in conn.execute(
+            "SELECT DISTINCT outbound_tag FROM outbound_health WHERE ts >= ?",
+            (cutoff,)).fetchall()]
+        tags = expected + sorted(t for t in seen if t not in expected)
+        for tag in tags:
+            rows = conn.execute(
+                "SELECT status, latency_ms, ts FROM outbound_health "
+                "WHERE outbound_tag = ? AND ts >= ? "
+                "ORDER BY ts DESC LIMIT ?",
+                (tag, cutoff, limit),
+            ).fetchall()
+            if not rows:
+                continue
+            last_run = rows[:per_run]
+            info = {
+                'rows': len(rows),
+                'alive_window': sum(1 for r in rows if _probe_alive(r)),
+                'last_n': len(last_run),
+                'last_ok': sum(1 for r in last_run if r[0] == 'ok'),
+                'last_alive': sum(1 for r in last_run if _probe_alive(r)),
+                'last_alive_ts': None,
+            }
+            if info['alive_window'] == 0:
+                # "How long" is anchored on the last row that showed
+                # life — looked up only for dark tags (rare).
+                info['last_alive_ts'] = conn.execute(
+                    "SELECT MAX(ts) FROM outbound_health WHERE "
+                    "outbound_tag = ? AND (latency_ms IS NOT NULL "
+                    "OR status = 'ok')",
+                    (tag,),
+                ).fetchone()[0]
+            per_tag[tag] = info
+    return {'newest': newest, 'tags': tags, 'per_tag': per_tag}
 
 
 # ----- /cascade helpers -----
@@ -632,62 +710,11 @@ class AdminOpsMixin(AdminHandlerBase):
         return text
 
     def _read_probe_state(self, now: datetime) -> dict:
-        """Newest ``PROTO_RUNS`` runs per protocol from outbound_health.
-
-        A "run" is one row per target domain (HealthChecker writes them
-        with per-row timestamps, so runs are recovered by count, exactly
-        as the alert check does). Tags = what HealthChecker probes on
-        THIS deployment (config-driven: hy2t only with HY2T_PORT) so a
-        protocol with NO rows at all still gets a line, plus whatever
-        else has rows in the window — a tag added to the checker shows
-        up here without a code change.
-        """
-        try:
-            from bot.services.health_checker import HealthChecker as _HC
-            expected = _HC.probe_tags_for(self.config)
-            per_run = len(_HC.TARGET_DOMAINS)
-        except Exception:      # keep the card alive even if that import breaks
-            expected, per_run = ['reality', 'hy2', 'ws', 'stls'], 10
-
-        cutoff = (now - timedelta(hours=self.PROTO_WINDOW_H)).isoformat()
-        limit = self.PROTO_RUNS * per_run
-        per_tag: dict = {}
-        with self.db._connect() as conn:
-            newest = conn.execute(
-                "SELECT MAX(ts) FROM outbound_health").fetchone()[0]
-            seen = [r[0] for r in conn.execute(
-                "SELECT DISTINCT outbound_tag FROM outbound_health WHERE ts >= ?",
-                (cutoff,)).fetchall()]
-            tags = expected + sorted(t for t in seen if t not in expected)
-            for tag in tags:
-                rows = conn.execute(
-                    "SELECT status, latency_ms, ts FROM outbound_health "
-                    "WHERE outbound_tag = ? AND ts >= ? "
-                    "ORDER BY ts DESC LIMIT ?",
-                    (tag, cutoff, limit),
-                ).fetchall()
-                if not rows:
-                    continue
-                last_run = rows[:per_run]
-                info = {
-                    'rows': len(rows),
-                    'alive_window': sum(1 for r in rows if _probe_alive(r)),
-                    'last_n': len(last_run),
-                    'last_ok': sum(1 for r in last_run if r[0] == 'ok'),
-                    'last_alive': sum(1 for r in last_run if _probe_alive(r)),
-                    'last_alive_ts': None,
-                }
-                if info['alive_window'] == 0:
-                    # "How long" is anchored on the last row that showed
-                    # life — looked up only for dark tags (rare).
-                    info['last_alive_ts'] = conn.execute(
-                        "SELECT MAX(ts) FROM outbound_health WHERE "
-                        "outbound_tag = ? AND (latency_ms IS NOT NULL "
-                        "OR status = 'ok')",
-                        (tag,),
-                    ).fetchone()[0]
-                per_tag[tag] = info
-        return {'newest': newest, 'tags': tags, 'per_tag': per_tag}
+        """``read_probe_state`` with this card's window (class attrs so
+        tests can shrink them)."""
+        return read_probe_state(self.db, self.config, now,
+                                window_h=self.PROTO_WINDOW_H,
+                                runs=self.PROTO_RUNS)
 
     def _probe_header_lines(self, newest, now: datetime) -> list:
         """Staleness first: rows that stopped arriving mean the probe
