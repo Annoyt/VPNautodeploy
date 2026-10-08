@@ -4,3 +4,17 @@
 # Browser E2E for the admin dashboard (tests/e2e/). After installing,
 # fetch the browser once: `playwright install chromium`.
 playwright>=1.49
+
+# Imported by code that is NOT in the prod image, so requirements.txt
+# doesn't carry them — but the unit suite does, and a clean venv (CI)
+# fails at collection without them:
+# - bot/core/cluster/* (multi-node sync/failover API, not wired in prod,
+#   AGENTS.md §5) imports fastapi + tenacity at module level; its tests
+#   drive the API through fastapi.testclient, which needs httpx.
+# - scripts/hermes_model_guard.py runs on the entry HOST and edits the
+#   Hermes YAML config; tests/integration/test_clash_profile.py parses
+#   the Clash profile with it (importorskip — silently skipped without).
+fastapi>=0.115
+httpx>=0.28
+tenacity>=9.0
+PyYAML>=6.0

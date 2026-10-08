@@ -1,4 +1,11 @@
-"""Integration tests for Docker Compose setup."""
+"""Integration tests for Docker Compose setup.
+
+Tests marked ``requires_docker`` need the live stack — a running 3x-ui
+container, its API on :2026, the bot's /var/lib/vpn-bot mount — and are
+deselected in CI (``-m "not requires_docker"``). They self-skip when the
+stack is absent, except test_api_login_with_real_container, which runs
+whenever CI is set and on a bare GitHub runner can only fail.
+"""
 
 import pytest
 import subprocess
@@ -58,6 +65,7 @@ networks:
                 continue
         pytest.skip("docker-compose not available")
     
+    @pytest.mark.requires_docker
     def test_containers_can_communicate(self):
         """Test that containers can communicate over network."""
         # This test assumes containers are already running
@@ -85,6 +93,7 @@ networks:
         )
         assert result.returncode == 0, "Cannot ping 3x-ui container"
     
+    @pytest.mark.requires_docker
     def test_xui_api_accessible(self):
         """Test that 3X-UI API is accessible."""
         import urllib.request
@@ -106,6 +115,7 @@ networks:
         except Exception as e:
             pytest.skip(f"3X-UI API not accessible: {e}")
     
+    @pytest.mark.requires_docker
     def test_bot_db_path_exists(self):
         """Test that bot database path exists."""
         db_path = Path('/var/lib/vpn-bot')
@@ -120,6 +130,7 @@ networks:
 class TestXUIAPIIntegration:
     """Integration tests for X-UI API."""
     
+    @pytest.mark.requires_docker
     @pytest.mark.asyncio
     async def test_api_login_with_real_container(self):
         """Test login to real 3X-UI container."""
