@@ -142,9 +142,9 @@ class WebAppServer:
         # FlClash pulls them hourly. Not /rule-sets/: that prefix is the
         # .srs mirror for sing-box (Caddy may serve it statically).
         self.app.router.add_get('/lists/clash/{name}.yaml', self.handle_rule_list)
-        # Health-check target of the FlClash profile (E4). Public, always
-        # 204 (GET and HEAD — mihomo tests with HEAD); the token in the
-        # path attributes the heartbeat to a user.
+        # Health-check target of the FlClash profile's proxy-providers
+        # (E4). Public, always 204 (GET and HEAD — mihomo tests with
+        # HEAD); the token in the path attributes the heartbeat to a user.
         self.app.router.add_get('/probe/{token}/{group}', self.handle_probe)
         
         # Admin — read
@@ -1189,9 +1189,8 @@ class WebAppServer:
     # ==================== Client probes (E4) ====================
 
     # At most one client_probe row per (chat_id, group) in this window.
-    # A group's health check hits the url once per proxy in the same
-    # second, and three groups/providers share a tick — this collapses a
-    # round into one row per group.
+    # A provider's health check hits its url once per proxy in the same
+    # second — this collapses a round into one row per provider.
     PROBE_MIN_INTERVAL_S = 60
     # token -> chat_id map: full rebuild at least this often (drops tokens
     # of re-keyed users), and on a miss at most once per
@@ -1202,16 +1201,16 @@ class WebAppServer:
 
     async def handle_probe(self, request: web.Request) -> web.Response:
         """``GET|HEAD /probe/<token>/<group>`` — the health-check url of
-        the FlClash profile's groups and providers (IMPROVEMENT_PLAN E4).
+        the FlClash profile's proxy-providers (IMPROVEMENT_PLAN E4);
+        ``group`` is the provider name (emergency, mirror-<n>).
 
         mihomo sends it THROUGH each proxy it tests, so the request
         arriving here is a heartbeat "this user's client is alive through
         a tunnel". Always 204 with no body, before any lookup: the answer
         must not depend on the token (an unknown one is not revealed as
-        such) nor on the database — the client measures this response as
-        the tunnel's delay, and a slow or failing write here would make
-        it fail over away from a healthy server. The row is written by a
-        background task.
+        such) nor on the database — the client times this response, and
+        a slow or failing write must not make a healthy tunnel look slow
+        or dead. The row is written by a background task.
         """
         token = request.match_info.get('token', '') or ''
         group = request.match_info.get('group', '') or ''

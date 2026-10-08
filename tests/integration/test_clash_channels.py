@@ -3,9 +3,11 @@
 * E3  ``Cascade``: a fallback group in the EFFECTIVE cascade order (the
       DE reserve last), the default of ``VPN``; what DPIMonitor demotes
       for the user's network is left out of Cascade/Auto, kept in VPN.
-* E4  health checks go to our ``/probe/<token>/<group>`` (gstatic only
-      without WEBAPP_URL); the endpoint answers 204 and leaves one
-      ``client_probe`` heartbeat per (user, group) a minute.
+* E4  the groups health-check gstatic (our /probe sits behind exit's
+      Caddy — the DE reserve must not look dead while exit is down);
+      ``/probe/<token>/<provider>`` is the providers' health check: the
+      endpoint answers 204 and leaves one ``client_probe`` heartbeat per
+      (user, provider) a minute.
 * E5  ``SUB_MIRROR_URLS`` → one ``mirror-<n>`` proxy-provider each.
 * E20 ``emergency`` provider on the main domain, refreshed every 10 min.
 * E6  under lockdown Cascade starts with ws and DNS rides the tunnel.
@@ -184,20 +186,28 @@ class TestCascadeGroup:
 
 class TestProbeUrl:
 
-    def test_groups_probe_our_endpoint(self):
-        g = _groups(_build())
-        tok = _token()
-        assert g['Cascade']['url'] == f'{WEB}/probe/{tok}/cascade'
-        assert g['Auto']['url'] == f'{WEB}/probe/{tok}/auto'
-        assert g['Calls']['url'] == f'{WEB}/probe/{tok}/calls'
+    def test_groups_check_gstatic_not_our_endpoint(self):
+        # /probe sits behind exit's Caddy: with exit down the DE reserve
+        # would look dead too and Cascade could not fail over to it.
+        cfg = _build(user=_user('paid'), config=_config(
+            **FALLBACK, SUB_MIRROR_URLS='https://m1.example.net'))
+        g = _groups(cfg)
+        assert {g[n]['url'] for n in ('Cascade', 'Auto', 'Calls')} == {GSTATIC}
         assert g['Calls']['interval'] == 180
         assert 'url' not in g['VPN']        # select: never health-checked
         for grp in g.values():
             assert 'expected-status' not in grp   # any answer = alive
+        assert '/probe/' not in json.dumps(cfg['proxy-groups'])
+
+    def test_providers_probe_our_endpoint(self):
+        p = _build(config=_config(SUB_MIRROR_URLS='https://m1.example.net'))['proxy-providers']
+        tok = _token()
+        assert p['emergency']['health-check']['url'] == f'{WEB}/probe/{tok}/emergency'
+        assert p['mirror-1']['health-check']['url'] == f'{WEB}/probe/{tok}/mirror-1'
 
     def test_trailing_slash_in_webapp_url(self):
-        g = _groups(_build(config=_config(WEBAPP_URL=WEB + '/')))
-        assert g['Cascade']['url'] == f'{WEB}/probe/{_token()}/cascade'
+        p = _build(config=_config(WEBAPP_URL=WEB + '/'))['proxy-providers']
+        assert p['emergency']['health-check']['url'] == f'{WEB}/probe/{_token()}/emergency'
 
     def test_gstatic_without_webapp_url(self):
         cfg = _build(config=_config(WEBAPP_URL=''))
@@ -208,21 +218,21 @@ class TestProbeUrl:
     def test_every_probe_url_is_accepted_by_the_endpoint(self):
         config = _config(SUB_MIRROR_URLS='https://m1.example.net,https://m2.example.org')
         cfg = _build(config=config)
-        urls = [g['url'] for g in cfg['proxy-groups'] if 'url' in g]
-        urls += [p['health-check']['url'] for p in cfg['proxy-providers'].values()]
+        urls = [p['health-check']['url'] for p in cfg['proxy-providers'].values()]
         groups = SubscriptionService(config).probe_groups()
-        assert len(urls) == 6
+        assert len(urls) == 3
         for url in urls:
             prefix, group = url.rsplit('/', 1)
             assert prefix == f'{WEB}/probe/{_token()}' and group in groups, url
-        assert len(groups) == 6
+        assert groups == {'emergency', 'mirror-1', 'mirror-2'}
 
     def test_probe_groups_are_the_emitted_ones_only(self):
-        assert set(CLASH_PROBE_GROUPS) == {'cascade', 'auto', 'calls', 'emergency'}
-        assert SubscriptionService(_config()).probe_groups() == set(CLASH_PROBE_GROUPS)
+        # the provider names — the groups (cascade, auto, calls) are gone
+        assert CLASH_PROBE_GROUPS == ('emergency',)
+        assert SubscriptionService(_config()).probe_groups() == {'emergency'}
         two = SubscriptionService(_config(
             SUB_MIRROR_URLS='https://m1.example.net,https://m2.example.org')).probe_groups()
-        assert two == set(CLASH_PROBE_GROUPS) | {'mirror-1', 'mirror-2'}
+        assert two == {'emergency', 'mirror-1', 'mirror-2'}
 
     def test_singbox_profile_keeps_gstatic(self):
         sb = SubscriptionService(_config()).build_singbox_config(_user(), ALL)
@@ -531,46 +541,49 @@ class TestProbeEndpoint:
     async def test_204_and_a_heartbeat(self, probe_srv, method):
         srv, db = probe_srv
         async with _client(srv) as client:
-            resp = await client.request(method, f'/probe/{_token()}/cascade',
+            resp = await client.request(method, f'/probe/{_token()}/emergency',
                                         headers={'X-Forwarded-For': '192.0.2.10, 10.0.0.1'})
             assert resp.status == 204
             assert await resp.read() == b''
             await _flush(srv)
-        assert _probes(db) == [('1', 'cascade', '192.0.2.10')]
+        assert _probes(db) == [('1', 'emergency', '192.0.2.10')]
         assert _rows(db, "SELECT count(*) FROM client_probe WHERE ts IS NOT NULL") == [(1,)]
 
     @pytest.mark.asyncio
     async def test_one_row_per_group_per_minute(self, probe_srv):
         srv, db = probe_srv
         async with _client(srv) as client:
-            for group in ('cascade', 'cascade', 'auto', 'cascade', 'mirror-2', 'auto'):
+            for group in ('emergency', 'emergency', 'mirror-1', 'emergency', 'mirror-2',
+                          'mirror-1'):
                 assert (await client.get(f'/probe/{_token()}/{group}')).status == 204
                 await _flush(srv)
-            assert [r[1] for r in _probes(db)] == ['cascade', 'auto', 'mirror-2']
-            # a minute later the same group writes again
-            srv._probe_last[('1', 'cascade')] -= 61
-            await client.get(f'/probe/{_token()}/cascade')
+            assert [r[1] for r in _probes(db)] == ['emergency', 'mirror-1', 'mirror-2']
+            # a minute later the same provider writes again
+            srv._probe_last[('1', 'emergency')] -= 61
+            await client.get(f'/probe/{_token()}/emergency')
             await _flush(srv)
-        assert [r[1] for r in _probes(db)] == ['cascade', 'auto', 'mirror-2', 'cascade']
+        assert [r[1] for r in _probes(db)] == ['emergency', 'mirror-1', 'mirror-2',
+                                               'emergency']
 
     @pytest.mark.asyncio
     async def test_window_is_sixty_seconds(self, probe_srv):
         srv, db = probe_srv
         assert srv.PROBE_MIN_INTERVAL_S == 60
         async with _client(srv) as client:
-            await client.get(f'/probe/{_token()}/calls')
+            await client.get(f'/probe/{_token()}/mirror-2')
             await _flush(srv)
-            srv._probe_last[('1', 'calls')] -= 59
-            await client.get(f'/probe/{_token()}/calls')
+            srv._probe_last[('1', 'mirror-2')] -= 59
+            await client.get(f'/probe/{_token()}/mirror-2')
             await _flush(srv)
         assert len(_probes(db)) == 1
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize('path', [
-        f'/probe/{"0" * 32}/cascade',                 # unknown token
-        f'/probe/{UUID.replace("-", "")[:31]}/cascade',  # malformed
-        '/probe/' + 'A' * 32 + '/cascade',            # not lowercase hex
+        f'/probe/{"0" * 32}/emergency',               # unknown token
+        f'/probe/{UUID.replace("-", "")[:31]}/emergency',  # malformed
+        '/probe/' + 'A' * 32 + '/emergency',          # not lowercase hex
         '/probe/TOKEN/vpn',                           # unknown group (token below)
+        '/probe/TOKEN/cascade',                       # groups check gstatic now
         '/probe/TOKEN/mirror-3',                      # only 2 mirrors configured
     ])
     async def test_unknown_is_204_without_a_row(self, probe_srv, path):
@@ -592,19 +605,18 @@ class TestProbeEndpoint:
 
         monkeypatch.setattr(srv, '_record_probe', record)
         async with _client(srv) as client:
-            for path in (f'/probe/{_token()[:31]}/auto', f'/probe/{_token()}0/auto',
-                         f'/probe/{_token().upper()}/auto', f'/probe/{_token()}/Auto',
+            for path in (f'/probe/{_token()[:31]}/mirror-1', f'/probe/{_token()}0/mirror-1',
+                         f'/probe/{_token().upper()}/mirror-1', f'/probe/{_token()}/Mirror-1',
                          f'/probe/{_token()}/mirror-0', f'/probe/{_token()}/mirror-3',
-                         f'/probe/{_token()}/auto'):
+                         f'/probe/{_token()}/auto', f'/probe/{_token()}/mirror-1'):
                 assert (await client.get(path)).status == 204
             await _flush(srv)
-        assert seen == [(_token(), 'auto')]
+        assert seen == [(_token(), 'mirror-1')]
 
     @pytest.mark.asyncio
     async def test_answers_before_the_write(self, probe_srv, monkeypatch):
-        # The client measures this answer as the tunnel's delay: a slow
-        # or locked sqlite must never delay it (or the client fails over
-        # away from a healthy server).
+        # The client times this answer: a slow or locked sqlite must never
+        # make a healthy tunnel look slow or dead.
         srv, db = probe_srv
         release = threading.Event()
         written = []
@@ -617,13 +629,13 @@ class TestProbeEndpoint:
         async with _client(srv) as client:
             try:
                 resp = await asyncio.wait_for(
-                    client.get(f'/probe/{_token()}/auto'), timeout=2)
+                    client.get(f'/probe/{_token()}/mirror-1'), timeout=2)
                 assert resp.status == 204
                 assert written == []
             finally:
                 release.set()
             await _flush(srv)
-        assert written == [('1', 'auto')]
+        assert written == [('1', 'mirror-1')]
 
     @pytest.mark.asyncio
     async def test_db_failure_is_still_204(self, probe_srv, caplog):
@@ -631,7 +643,7 @@ class TestProbeEndpoint:
         with db._connect() as conn:
             conn.execute("DROP TABLE client_probe")
         async with _client(srv) as client:
-            assert (await client.get(f'/probe/{_token()}/cascade')).status == 204
+            assert (await client.get(f'/probe/{_token()}/emergency')).status == 204
             await _flush(srv)
         assert 'heartbeat not recorded' in caplog.text
 
@@ -641,15 +653,15 @@ class TestProbeEndpoint:
         other_uuid = '11111111-2222-3333-4444-555555555555'
         other = srv.subscription.derive_token(other_uuid)
         async with _client(srv) as client:
-            await client.get(f'/probe/{_token()}/cascade')      # builds the map
+            await client.get(f'/probe/{_token()}/emergency')    # builds the map
             await _flush(srv)
             db._users.save(User(chat_id='2', username='u2', status='demo',
                                 uuid=other_uuid, email='u2@x'))
-            await client.get(f'/probe/{other}/cascade')         # miss within 60 s
+            await client.get(f'/probe/{other}/emergency')       # miss within 60 s
             await _flush(srv)
             assert [r[0] for r in _probes(db)] == ['1']
             srv._probe_tokens_at -= 61                          # a minute later
-            await client.get(f'/probe/{other}/cascade')
+            await client.get(f'/probe/{other}/emergency')
             await _flush(srv)
         assert [r[0] for r in _probes(db)] == ['1', '2']
 
@@ -661,7 +673,7 @@ class TestProbeEndpoint:
         monkeypatch.setattr(srv, '_probe_token_map', lambda: scans.append(1) or real())
         async with _client(srv) as client:
             for n in range(5):
-                await client.get(f'/probe/{n:032x}/cascade')
+                await client.get(f'/probe/{n:032x}/emergency')
                 await _flush(srv)
         assert len(scans) == 1
 
@@ -677,7 +689,7 @@ class TestProbeEndpoint:
         monkeypatch.setattr(srv, '_probe_token_map', broken)
         async with _client(srv) as client:
             for _ in range(3):
-                assert (await client.get(f'/probe/{_token()}/cascade')).status == 204
+                assert (await client.get(f'/probe/{_token()}/emergency')).status == 204
                 await _flush(srv)
         assert scans == [1] and _probes(db) == []
 
@@ -686,7 +698,7 @@ class TestProbeEndpoint:
         srv, db = probe_srv
         assert srv.PROBE_TOKEN_REFRESH_S == 600
         async with _client(srv) as client:
-            await client.get(f'/probe/{_token()}/cascade')
+            await client.get(f'/probe/{_token()}/emergency')
             await _flush(srv)
             # the user is re-keyed: the old token must stop counting
             user = db._users.get_by_id('1')
@@ -694,13 +706,13 @@ class TestProbeEndpoint:
             db._users.save(user)
             srv._probe_last.clear()
             srv._probe_tokens_at -= 599
-            await client.get(f'/probe/{_token()}/auto')         # still cached
+            await client.get(f'/probe/{_token()}/mirror-1')     # still cached
             await _flush(srv)
             srv._probe_last.clear()
             srv._probe_tokens_at -= 2                           # > 600 s old
-            await client.get(f'/probe/{_token()}/calls')
+            await client.get(f'/probe/{_token()}/mirror-2')
             await _flush(srv)
-        assert [r[1] for r in _probes(db)] == ['cascade', 'auto']
+        assert [r[1] for r in _probes(db)] == ['emergency', 'mirror-1']
 
 
 class TestClientProbeSchema:
@@ -717,7 +729,7 @@ class TestClientProbeSchema:
         path = str(tmp_path / 'bot.db')
         db = Database(path)
         with db._connect() as conn:
-            conn.execute("INSERT INTO client_probe (chat_id, grp) VALUES ('1', 'auto')")
+            conn.execute("INSERT INTO client_probe (chat_id, grp) VALUES ('1', 'emergency')")
             conn.commit()
         db2 = Database(path)
         with db2._connect() as conn:

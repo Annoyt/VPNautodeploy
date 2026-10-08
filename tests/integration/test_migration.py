@@ -39,7 +39,7 @@ class TestMigrationV3:
                     conn.execute("PRAGMA table_info(client_probe)")]
             idx = {r[1] for r in conn.execute("PRAGMA index_list(client_probe)")}
             conn.execute("INSERT INTO client_probe (chat_id, grp, src_ip) "
-                         "VALUES ('1', 'cascade', '192.0.2.1')")
+                         "VALUES ('1', 'emergency', '192.0.2.1')")
             ts = conn.execute("SELECT ts FROM client_probe").fetchone()[0]
         finally:
             conn.close()

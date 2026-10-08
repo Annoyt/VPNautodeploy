@@ -36,10 +36,11 @@ from bot.services import rule_lists
 logger = logging.getLogger(__name__)
 
 # The last path segment of ``/probe/<token>/<group>`` (IMPROVEMENT_PLAN
-# E4): the Clash profile's health-checked groups and the ``emergency``
-# provider; ``SubscriptionService.probe_groups`` adds one ``mirror-<n>``
-# per configured mirror.
-CLASH_PROBE_GROUPS = ('cascade', 'auto', 'calls', 'emergency')
+# E4) names the proxy-provider whose health check it is: ``emergency``,
+# plus one ``mirror-<n>`` per configured mirror (``SubscriptionService.
+# probe_groups``). The groups themselves check gstatic — see
+# ``SubscriptionService._CLASH_TEST_URL``.
+CLASH_PROBE_GROUPS = ('emergency',)
 
 
 class SubscriptionService:
@@ -594,9 +595,12 @@ class SubscriptionService:
 
     # ---------- Main profile for Clash / mihomo (FlClash) ----------
 
-    # Health-check target when the bot doesn't know its public address
-    # (WEBAPP_URL empty). Otherwise the groups probe our own /probe
-    # endpoint — see _clash_probe_url.
+    # Health-check target of the GROUPS (Cascade / Auto / Calls), as in
+    # the sing-box profile. Not our /probe on purpose: it sits behind
+    # exit's Caddy, so while exit is down the DE reserve would look dead
+    # too and the fallback could not switch to it. /probe is only the
+    # providers' health check (telemetry, see _clash_probe_url); per-group
+    # telemetry returns with a probe point on entry (E25).
     _CLASH_TEST_URL = 'https://www.gstatic.com/generate_204'
     # Group health-check cadence, seconds (Cascade / Auto / Calls).
     _CLASH_GROUP_INTERVAL = 180
@@ -608,12 +612,13 @@ class SubscriptionService:
     _CLASH_EMERGENCY_INTERVAL = 600
     _CLASH_MIRROR_INTERVAL = 3600
     # Health-check cadence of the PROVIDERS' proxies. mihomo tests them
-    # against the provider's own url and, on the same tick, against the
-    # url of every group that uses the provider (Cascade, Auto) — three
-    # requests per proxy per provider. They sit behind the profile's own
-    # proxies in Cascade, and a run of failed dials makes mihomo re-check
-    # the group on the spot, so 600 s costs little in failover and saves
-    # two thirds of the probe load against 180.
+    # against the provider's own url (our /probe) and, on the same tick,
+    # against the url of the groups that use the provider (gstatic, one
+    # url for Cascade and Auto) — the groups decide on the gstatic result.
+    # They sit behind the profile's own proxies in Cascade, and a run of
+    # failed dials makes mihomo re-check the group on the spot, so 600 s
+    # costs little in failover and holds /probe to one hit per proxy per
+    # provider per 10 min.
     _CLASH_PROVIDER_HC_INTERVAL = 600
 
     def _clash_proxies(self, user, enabled_protocols) -> tuple:
@@ -672,20 +677,21 @@ class SubscriptionService:
             f'mirror-{n}' for n in range(1, mirrors + 1)
         }
 
-    def _clash_probe_url(self, token: Optional[str], group: str) -> str:
-        """Health-check url of one group / provider (E4):
-        ``{WEBAPP_URL}/probe/<token>/<group>`` — a 204 from our own
+    def _clash_probe_url(self, token: Optional[str], provider: str) -> str:
+        """Health-check url of one proxy-provider (E4):
+        ``{WEBAPP_URL}/probe/<token>/<provider>`` — a 204 from our own
         endpoint that also leaves a heartbeat "this user's client is
-        alive through the tunnel" in ``client_probe``. gstatic only when
-        the bot has no public address.
+        alive through the tunnel" in ``client_probe``. gstatic when the
+        bot has no public address. Telemetry only: the groups using the
+        provider judge its proxies by their own url (gstatic).
 
         No ``expected-status`` on purpose: mihomo then counts ANY HTTP
-        answer as alive, so a bot restart (Caddy answers 502) never
-        makes the client's failover think every tunnel is dead."""
+        answer as alive, so a bot restart (Caddy answers 502) does not
+        paint the provider's servers dead in the client."""
         base = (getattr(self.config, 'WEBAPP_URL', '') or '').rstrip('/')
         if not (base and token):
             return self._CLASH_TEST_URL
-        return f'{base}/probe/{token}/{group}'
+        return f'{base}/probe/{token}/{provider}'
 
     def _clash_providers(self, token: Optional[str]) -> dict:
         """proxy-providers of the profile: ``emergency`` on the main
@@ -784,7 +790,9 @@ class SubscriptionService:
             user's ASN; Cascade and Auto leave them out, ``VPN`` (the
             manual pick) and ``Calls`` keep them.
           * ``Calls`` (url-test) — UDP-native servers only, as before.
-          * health checks go to our ``/probe/<token>/<group>``.
+          * the groups health-check gstatic, like the sing-box profile;
+            our ``/probe/<token>/<provider>`` is the providers' health
+            check only — telemetry, never a failover input.
           * ``Cascade``, ``Auto`` and ``VPN`` also take the proxies of
             the ``emergency`` / ``mirror-<n>`` providers, after the
             profile's own.
@@ -817,10 +825,10 @@ class SubscriptionService:
             excluded = self._clash_excluded(names, protocol_of, demoted)
             kept = [n for n in names if n not in excluded]
             cascade = {'name': 'Cascade', 'type': 'fallback', 'proxies': kept,
-                       'url': self._clash_probe_url(token, 'cascade'),
+                       'url': self._CLASH_TEST_URL,
                        'interval': self._CLASH_GROUP_INTERVAL}
             auto = {'name': 'Auto', 'type': 'url-test', 'proxies': kept,
-                    'url': self._clash_probe_url(token, 'auto'),
+                    'url': self._CLASH_TEST_URL,
                     'interval': self._CLASH_GROUP_INTERVAL, 'tolerance': 50}
             for group in (cascade, auto):
                 if use:
@@ -838,7 +846,7 @@ class SubscriptionService:
             # UDP-native only (see _collect_outbounds) — call media must
             # never land on a TCP transport.
             groups.append({'name': 'Calls', 'type': 'url-test', 'proxies': calls,
-                           'url': self._clash_probe_url(token, 'calls'),
+                           'url': self._CLASH_TEST_URL,
                            'interval': self._CLASH_GROUP_INTERVAL,
                            'tolerance': 50})
 
