@@ -670,11 +670,11 @@ class SubscriptionService:
             'proxies': proxies,
             'proxy-groups': groups,
         }
-        providers = self._clash_rule_providers()
-        if providers:
-            config['rule-providers'] = providers
+        rule_providers = self._clash_rule_providers()
+        if rule_providers:
+            config['rule-providers'] = rule_providers
         config['rules'] = self._clash_rules('Calls' if calls else 'VPN',
-                                            lists=bool(providers))
+                                            lists=bool(rule_providers))
         return json.dumps(config, ensure_ascii=False, indent=1)
 
     def _clash_rule_providers(self) -> dict:
