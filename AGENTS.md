@@ -161,6 +161,7 @@ exact sha. Commit before deploying or the stamp says `-dirty`.
 - Compose project name is pinned to `vpn-bot` via `name: vpn-bot` — must not change (volume names derive from it).
 - Volumes on entry: `vpn-bot_3xui-data` (local 3x-ui), `vpn-bot_vpn-bot-data` (bot.db at `/var/lib/vpn-bot/`), `vpn-bot_vpn-bot-logs`.
 - The bot talks to BOTH panels via HTTP API only; `xui.db` direct access is dead on entry (the May notes about making x-ui.db group-writable are historical).
+- **Backup subscription domain (2026-10-08, IMPROVEMENT_PLAN E5):** `https://sub.nekoweather.xyz:2096` — Cloudflare-proxied A record to exit, Caddy site block on exit `:2096` (a port CF proxies end-to-end) reverse-proxying entry `:8080` + the `/rule-sets/` mirror; cert from acme.sh `dns_cf` installed to `/etc/ssl/sub` with reloadcmd `chgrp caddy … && chmod 640 … && systemctl reload caddy` (acme.sh writes the key 600 root — without the hook every renewal breaks the Caddy reload). Caddyfile backups: `/etc/caddy/Caddyfile.bak-*`.
 
 **Backups before risky operations:**
 ```bash
