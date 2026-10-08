@@ -1,9 +1,12 @@
 """Broadcast handlers for admin operations.
 
-Includes: broadcast_preview, broadcast_confirm, broadcast_cancel
+Includes: broadcast_preview, broadcast_confirm, broadcast_cancel, nudge_sub
 """
 
+import html
 import logging
+import threading
+import time
 from typing import Optional
 
 from bot.config import UserState
@@ -96,3 +99,116 @@ class AdminBroadcastMixin(AdminHandlerBase):
             self._send(chat_id=chat_id, text="❌ Рассылка отменена.")
         else:
             self._send(chat_id=chat_id, text="📭 Нет активной рассылки.")
+
+    # ----- /nudge_sub (IMPROVEMENT_PLAN A1.2) -----
+
+    NUDGE_STATUSES = ('demo', 'paid', 'support_topic')
+    NUDGE_SEND_DELAY_S = 0.05   # same cadence as the dashboard broadcast
+    NUDGE_SAMPLE = 10
+
+    def _nudge_audience(self) -> list:
+        """Active key holders whose ``last_asn`` is empty: they have not
+        fetched /sub since geo landed, so per-ASN cascade tuning (and the
+        "your network" line of /sos) cannot reach them. A refresh from
+        their app fills it in."""
+        return [
+            u for u in (self.db.get_all_users() or [])
+            if u.status in self.NUDGE_STATUSES and u.uuid
+            and not (u.last_asn or '').strip()
+        ]
+
+    @staticmethod
+    def _telegram_reachable(user) -> bool:
+        # ext_* users are email-only: there is no chat to send to.
+        return str(user.chat_id or '').lstrip('-').isdigit()
+
+    def _nudge_admin_id(self) -> str:
+        upd = getattr(self, '_current_update', None) or {}
+        try:
+            uid = self._get_user_id(upd)
+        except Exception:
+            uid = None
+        return str(uid or getattr(self.config, 'SUPER_ADMIN_ID', '') or 'admin')
+
+    def _last_nudge(self) -> Optional[tuple]:
+        try:
+            with self.db._connect() as conn:
+                return conn.execute(
+                    "SELECT created_at, target_id FROM admin_actions "
+                    "WHERE action = 'nudge_sub' ORDER BY id DESC LIMIT 1"
+                ).fetchone()
+        except Exception as e:
+            logger.warning(f"/nudge_sub: last-run read failed: {e}")
+            return None
+
+    def nudge_sub(self, chat_id: str, args: list) -> Optional[threading.Thread]:
+        """``/nudge_sub`` — how many active users have no ``last_asn`` and
+        a sample of them; ``/nudge_sub go`` — send them "refresh your
+        subscription" (ru/en) on a worker, 50 ms apart, then report back
+        here and log ``admin_actions('nudge_sub')``. Returns the worker
+        so tests can join it."""
+        from bot.services.sos import nudge_text, user_lang
+
+        audience = self._nudge_audience()
+        reachable = [u for u in audience if self._telegram_reachable(u)]
+        go = bool(args) and str(args[0]).lower() == 'go'
+        if not go:
+            sample = ', '.join(
+                html.escape(f"@{u.username}" if u.username else str(u.chat_id))
+                for u in reachable[:self.NUDGE_SAMPLE]) or '—'
+            last = self._last_nudge()
+            lines = [
+                "🔄 <b>/nudge_sub</b> — подсказка «обнови подписку» тем, у кого "
+                "пуст last_asn",
+                f"Активных без оператора: <b>{len(audience)}</b> "
+                f"(Telegram: {len(reachable)}, только почта: "
+                f"{len(audience) - len(reachable)} — им не шлём)",
+                f"Пример: {sample}",
+            ]
+            if last:
+                lines.append(f"Последняя рассылка: {html.escape(str(last[0]))} UTC, "
+                             f"доставлено {html.escape(str(last[1]))}")
+            lines.append("Отправить: <code>/nudge_sub go</code>")
+            self._send(chat_id=chat_id, text='\n'.join(lines), parse_mode='HTML')
+            return None
+
+        if not reachable:
+            self._send(chat_id=chat_id, text="📭 /nudge_sub: некому слать — у всех "
+                                             "активных last_asn уже заполнен.")
+            return None
+        thread_id = self._get_thread_id(chat_id)
+        admin_id = self._nudge_admin_id()
+        self._send(chat_id=chat_id, message_thread_id=thread_id,
+                   text=f"🔄 /nudge_sub: отправляю {len(reachable)} юзерам…")
+
+        def _worker() -> None:
+            sent = failed = 0
+            for u in reachable:
+                try:
+                    ok = self.bot.send_message(chat_id=str(u.chat_id),
+                                               text=nudge_text(user_lang(u)),
+                                               parse_mode='HTML')
+                    if ok:
+                        sent += 1
+                    else:
+                        failed += 1
+                except Exception as e:
+                    failed += 1
+                    logger.warning(f"/nudge_sub: send to {u.chat_id} failed: {e}")
+                time.sleep(self.NUDGE_SEND_DELAY_S)
+            try:
+                self.db.log_admin_action(admin_id, 'nudge_sub',
+                                         f"{sent}/{len(reachable)}",
+                                         f"sent={sent} failed={failed}")
+            except Exception as e:
+                logger.warning(f"/nudge_sub: audit log failed: {e}")
+            try:
+                self._send(chat_id=chat_id, message_thread_id=thread_id,
+                           text=f"✅ /nudge_sub: доставлено {sent}, ошибок {failed}.")
+            except Exception as e:
+                logger.warning(f"/nudge_sub: report send failed: {e}")
+            logger.info(f"/nudge_sub by {admin_id}: sent={sent} failed={failed}")
+
+        t = threading.Thread(target=_worker, daemon=True, name="nudge-sub")
+        t.start()
+        return t

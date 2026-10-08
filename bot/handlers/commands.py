@@ -23,6 +23,10 @@ class CommandHandler(BaseHandler):
         '/raw': 'handle_raw',
         '/admin': 'handle_admin',
         '/setemail': 'handle_setemail',
+        # SOS channels (IMPROVEMENT_PLAN E19/E27/E29) — bot/services/sos.py
+        '/sos': 'handle_sos',
+        '/kit': 'handle_kit',
+        '/share': 'handle_share',
     }
     
     def can_handle(self, update: dict) -> bool:
@@ -173,7 +177,10 @@ class CommandHandler(BaseHandler):
                     "/mykey - Получить subscription URL (=/sub)\n"
                     "/sub - Subscription URL (один линк = весь каскад)\n"
                     "/buy - Купить подписку (100 ГБ/мес, все протоколы)\n"
-                    "/raw - Raw-ключи для legacy-клиентов (CDN-only)\n\n"
+                    "/raw - Raw-ключи для legacy-клиентов (CDN-only)\n"
+                    "/sos - Не подключается? Аварийная подписка и что сейчас работает\n"
+                    "/kit - Офлайн-комплект: профиль файлом (сохрани заранее)\n"
+                    "/share - Раздать VPN соседям по Wi-Fi\n\n"
                     "Нужна помощь? Используйте кнопку поддержки в меню."
                 )
             else:
@@ -185,7 +192,10 @@ class CommandHandler(BaseHandler):
                     "/mykey - Get subscription URL (=/sub)\n"
                     "/sub - Subscription URL (one link = full cascade)\n"
                     "/buy - Buy a subscription (100 GB/mo, all protocols)\n"
-                    "/raw - Raw keys for legacy clients (CDN-only)\n\n"
+                    "/raw - Raw keys for legacy clients (CDN-only)\n"
+                    "/sos - Not connecting? Emergency subscription + what works now\n"
+                    "/kit - Offline kit: the profile as a file (save it in advance)\n"
+                    "/share - Share your VPN with neighbours over Wi-Fi\n\n"
                     "Need help? Use the support button in the menu."
                 )
         
@@ -583,3 +593,24 @@ class CommandHandler(BaseHandler):
 
         self.bot.send_message(chat_id=chat_id, text=text, message_thread_id=thread_id)
         logger.info(f"User {chat_id} set contact email")
+
+    # ----- SOS channels (bot/services/sos.py) -----
+
+    def handle_sos(self, update: dict, chat_id: str) -> None:
+        """/sos — the emergency profile links, how to refresh, what works
+        right now; the operator gets a report and an agent diagnosis."""
+        from bot.services.sos import SosService
+        SosService(self.bot, self.db, self.config).handle_sos(
+            chat_id, self.db.get_user(chat_id))
+
+    def handle_kit(self, update: dict, chat_id: str) -> None:
+        """/kit — the emergency profile as two files (import offline)."""
+        from bot.services.sos import SosService
+        SosService(self.bot, self.db, self.config).send_kit(
+            chat_id, self.db.get_user(chat_id))
+
+    def handle_share(self, update: dict, chat_id: str) -> None:
+        """/share — how to share a working VPN over the LAN (one hop)."""
+        from bot.services.sos import SosService, user_lang
+        SosService(self.bot, self.db, self.config).send_share(
+            chat_id, user_lang(self.db.get_user(chat_id)))

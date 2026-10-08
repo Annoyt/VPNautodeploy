@@ -76,7 +76,17 @@ ADMIN_HELP_TEXT = (
     "📢 <b>Рассылка</b>\n"
     "• <code>/broadcast &lt;текст&gt;</code> — превью\n"
     "• <code>/broadcast_confirm</code> — отправить\n"
-    "• <code>/broadcast_cancel</code> — отменить\n\n"
+    "• <code>/broadcast_cancel</code> — отменить\n"
+    "• <code>/nudge_sub</code> — сколько активных без оператора (пустой "
+    "last_asn) + выборка; <code>/nudge_sub go</code> — разослать им "
+    "«обнови подписку»\n\n"
+
+    "🆘 <b>SOS (у юзеров)</b>\n"
+    "• /sos — аварийная подписка + что работает; отчёт «SOS» сюда, в "
+    "топик поддержки, и диагностика агентом\n"
+    "• письмо с contact_email со словами sos / help / не работает / не "
+    "подключается — ответ письмом с аварийной подпиской + отчёт\n"
+    "• /kit — офлайн-комплект файлами, /share — раздать VPN соседям\n\n"
 
     "🤖 <b>AI / Hermes</b> (в любом топике или PM, admin-only)\n"
     "• <code>/ai &lt;запрос&gt;</code> — спросить агента (default mode)\n"
@@ -123,6 +133,9 @@ class AdminHandlerBase(BaseHandler):
         '/broadcast': 'broadcast_preview',
         '/broadcast_confirm': 'broadcast_confirm',
         '/broadcast_cancel': 'broadcast_cancel',
+        # "Refresh your subscription" to users with no last_asn
+        # (IMPROVEMENT_PLAN A1.2) — preview, then `go`
+        '/nudge_sub': 'nudge_sub',
         # Stats (mixin: stats.py)
         '/stats': 'show_overall_stats',
         '/backup': 'backup_db',

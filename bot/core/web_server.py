@@ -1068,9 +1068,19 @@ class WebAppServer:
         # cascade order below applies it on its own. Tolerant read —
         # a broken app_settings row must degrade to the normal
         # profile, never to a 500 on /sub.
-        lockdown = is_lockdown_active(self.db)
+        # ``?emergency=1`` (E19/E27 — the /sos links and the offline kit)
+        # forces that same profile for this one response whatever the
+        # mode says: ws-first order and DNS through the tunnel. Exactly
+        # '1'; anything else, or no parameter, is the normal profile.
+        # Not for ``clash-proxies``: a provider refresh is a bare server
+        # list for the profile that holds it, never a profile of its own.
+        emergency = not provider_fetch and (
+            (request.rel_url.query.get('emergency') or '').strip() == '1'
+        )
+        lockdown = emergency or is_lockdown_active(self.db)
         cascade = MyKeyAnswerHandler.get_cascade_order(
             self.db, user=user, country=country, asn=asn,
+            force_lockdown=emergency,
         )
 
         if provider_fetch:
@@ -1138,11 +1148,14 @@ class WebAppServer:
         # the dashboard.
         headers = {
             'profile-update-interval': '6',  # refresh every 6 hours
-            'profile-title': 'NekoVPN',
+            # The emergency link is added NEXT TO the main subscription —
+            # its own name keeps the two apart in the client's list.
+            'profile-title': 'NekoVPN SOS' if emergency else 'NekoVPN',
         }
         if fmt == 'clash':
             # Clash clients name the profile from the file name.
-            headers['content-disposition'] = "attachment; filename*=UTF-8''NekoVPN.yaml"
+            name = 'NekoVPN-SOS' if emergency else 'NekoVPN'
+            headers['content-disposition'] = f"attachment; filename*=UTF-8''{name}.yaml"
         try:
             quota_bytes = int((user.quota_gb or 0) * BYTES_PER_GB)
             traffic = await self.xui.get_client_traffic(user.email) or {}

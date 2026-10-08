@@ -154,17 +154,22 @@ class TelegramClient:
     DEFAULT_TIMEOUT = TIMEOUT_API_DEFAULT
     LONG_POLL_TIMEOUT = TIMEOUT_API_LONG_POLL
     
-    def _request(self, method: str, _read_timeout: int = None, **kwargs) -> Dict[str, Any]:
+    def _request(self, method: str, _read_timeout: int = None,
+                 _files: Optional[Dict[str, Any]] = None, **kwargs) -> Dict[str, Any]:
         """Make API request with retry logic.
-        
+
         Args:
             method: API method name
             _read_timeout: HTTP read timeout in seconds (must exceed long-poll timeout)
+            _files: multipart parts for an upload (``{'document': (name,
+                bytes)}``) — the parameters then go as form fields instead
+                of JSON, through the same retry and proxy-pool logic.
+                Bytes, not open files, so a retry can resend them.
             **kwargs: Request parameters
-            
+
         Returns:
             API response as dict
-            
+
         Raises:
             requests.RequestException: If all retries failed
         """
@@ -185,7 +190,11 @@ class TelegramClient:
                 if proxy_entry is not None else {}
             )
             try:
-                response = self.session.post(url, json=kwargs, timeout=_read_timeout, **extra)
+                if _files is not None:
+                    response = self.session.post(url, data=kwargs, files=_files,
+                                                 timeout=_read_timeout, **extra)
+                else:
+                    response = self.session.post(url, json=kwargs, timeout=_read_timeout, **extra)
                 response.raise_for_status()
                 self._note_success(proxy_entry)
                 return response.json()
@@ -647,36 +656,69 @@ class TelegramClient:
         caption: Optional[str] = None,
         **kwargs
     ) -> Optional[dict]:
-        """Send a document/file.
-        
+        """Send a file from disk (the agent's ``[[SEND_FILE]]``).
+
+        Reads the file and goes through ``send_document_bytes`` — the
+        upload used to be a bare ``session.post`` that skipped the retry
+        loop and the TG_PROXY_URLS pool (with the pool configured the
+        session ignores HTTPS_PROXY, so the upload went direct — and the
+        entry node cannot reach api.telegram.org directly).
+
         Args:
             chat_id: Target chat ID
             document: Path to the file
             caption: Optional caption
             **kwargs: Additional parameters
-            
+
         Returns:
             Sent message dict or None
         """
-        url = self.API_URL.format(token=self.token, method='sendDocument')
-        params = {'chat_id': chat_id, **kwargs}
-        if caption:
-            params['caption'] = caption
-            
         try:
             with open(document, 'rb') as f:
-                files = {'document': f}
-                # Note: using raw post here because _request is optimized for JSON
-                response = self.session.post(url, data=params, files=files, timeout=TIMEOUT_API_FILE_UPLOAD)
-                response.raise_for_status()
-                result = response.json()
-                if result.get('ok'):
-                    return result.get('result')
-                else:
-                    logger.error(f"Failed to send document: {result.get('description')}")
-                    return None
-        except Exception as e:
+                content = f.read()
+        except OSError as e:
             logger.error(f"Failed to send document: {e}")
+            return None
+        return self.send_document_bytes(
+            chat_id, os.path.basename(document) or 'file', content,
+            caption=caption, **kwargs,
+        )
+
+    def send_document_bytes(
+        self,
+        chat_id: str,
+        filename: str,
+        content: bytes,
+        caption: Optional[str] = None,
+        parse_mode: Optional[str] = None,
+        **kwargs
+    ) -> Optional[dict]:
+        """Upload ``content`` as a document named ``filename`` (multipart
+        sendDocument) — the offline kit's profile files. Same retry and
+        proxy rules as every other call (``_request``). Returns the sent
+        message dict or None; never raises.
+        """
+        if isinstance(content, str):
+            content = content.encode('utf-8')
+        params: Dict[str, Any] = {'chat_id': chat_id, **kwargs}
+        if caption:
+            params['caption'] = caption
+        if parse_mode:
+            params['parse_mode'] = parse_mode
+        if isinstance(params.get('reply_markup'), dict):
+            params['reply_markup'] = json.dumps(params['reply_markup'])
+        params = {k: v for k, v in params.items() if v is not None}
+        try:
+            result = self._request(
+                'sendDocument', _read_timeout=TIMEOUT_API_FILE_UPLOAD,
+                _files={'document': (filename, content)}, **params,
+            )
+            if result.get('ok'):
+                return result.get('result')
+            logger.error(f"Failed to send document: {result.get('description')}")
+            return None
+        except Exception as e:     # RequestException, or a non-JSON reply
+            logger.error(f"Failed to send document: {self._sanitize_url(str(e))}")
             return None
 
     def get_chat_member(self, chat_id: str, user_id: str) -> Optional[dict]:

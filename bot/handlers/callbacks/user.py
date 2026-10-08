@@ -932,6 +932,7 @@ class MyKeyAnswerHandler(BaseCallbackHandler):
         *,
         apply_auto: bool = True,
         apply_lockdown: bool = True,
+        force_lockdown: bool = False,
     ) -> tuple:
         """Effective rotation: enabled-only protocols filtered by tier
         and (if known) ASN/country tuned.
@@ -950,6 +951,10 @@ class MyKeyAnswerHandler(BaseCallbackHandler):
         together and only the fronted one survives). Same set, same
         enabled flags, only the order; ``apply_lockdown=False`` skips
         it (the dashboard editor shows the saved order).
+        ``force_lockdown=True`` applies the same projection whatever the
+        mode says — the per-user emergency profile (``/sub?emergency=1``,
+        /sos, /kit; IMPROVEMENT_PLAN E19/E27) — and wins over
+        ``apply_lockdown=False``.
 
         Then DPIMonitor's auto-demotions (``cascade_auto``, global ∪ the
         effective ASN's) are applied as a STABLE PARTITION: demoted
@@ -999,8 +1004,9 @@ class MyKeyAnswerHandler(BaseCallbackHandler):
         # (a protocol the probes see dark still sinks to the tail of
         # the lockdown order) and before the tier filter (demo gets
         # ws, stls, hy2 in that order). The read is tolerant — /sub
-        # and the key card run through here.
-        if apply_lockdown and is_lockdown_active(db):
+        # and the key card run through here. A forced projection (the
+        # emergency profile) does not even read the mode.
+        if force_lockdown or (apply_lockdown and is_lockdown_active(db)):
             ordered = apply_lockdown_order(ordered, load_lockdown_order(db))
 
         # DPIMonitor's verdicts: stable partition, demoted to the tail.

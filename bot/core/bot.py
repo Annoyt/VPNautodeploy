@@ -95,6 +95,9 @@ class Bot:
         {'command': 'mykey', 'description': 'Мой ключ (subscription URL)'},
         {'command': 'sub', 'description': 'Subscription URL'},
         {'command': 'stats', 'description': 'Мой трафик и квота'},
+        {'command': 'sos', 'description': 'Не подключается? Аварийный режим'},
+        {'command': 'kit', 'description': 'Офлайн-комплект: профиль файлом'},
+        {'command': 'share', 'description': 'Раздать VPN соседям по Wi-Fi'},
         {'command': 'buy', 'description': 'Купить подписку (100 ГБ/мес)'},
         {'command': 'setemail', 'description': 'Почта для резервного ключа'},
         {'command': 'help', 'description': 'Справка по командам'},
@@ -176,6 +179,22 @@ class Bot:
             from_chat_id=from_chat_id,
             message_id=message_id,
             **kwargs,
+        )
+
+    def send_document(
+        self,
+        chat_id: str,
+        filename: str,
+        content: bytes,
+        caption: Optional[str] = None,
+        parse_mode: Optional[str] = None,
+        **kwargs
+    ) -> Optional[dict]:
+        """Send in-memory ``content`` as a file named ``filename`` (the
+        offline kit). See ``TelegramClient.send_document_bytes``."""
+        return self.client.send_document_bytes(
+            chat_id, filename, content,
+            caption=caption, parse_mode=parse_mode, **kwargs,
         )
 
     def edit_forum_topic(
