@@ -30,6 +30,24 @@ class TestMigrationV3:
         
         conn.close()
     
+    def test_client_probe_table(self, mock_bot_db):
+        """FlClash health-check heartbeats (IMPROVEMENT_PLAN E4) — written
+        by GET /probe/<token>/<grp>, one row per (chat_id, grp) a minute."""
+        conn = mock_bot_db._connect()
+        try:
+            cols = [(r[1], r[2], r[3]) for r in
+                    conn.execute("PRAGMA table_info(client_probe)")]
+            idx = {r[1] for r in conn.execute("PRAGMA index_list(client_probe)")}
+            conn.execute("INSERT INTO client_probe (chat_id, grp, src_ip) "
+                         "VALUES ('1', 'cascade', '192.0.2.1')")
+            ts = conn.execute("SELECT ts FROM client_probe").fetchone()[0]
+        finally:
+            conn.close()
+        assert cols == [('chat_id', 'TEXT', 1), ('grp', 'TEXT', 1),
+                        ('ts', 'TEXT', 1), ('src_ip', 'TEXT', 0)]
+        assert {'idx_client_probe_chat_grp_ts', 'idx_client_probe_ts'} <= idx
+        assert ts  # CURRENT_TIMESTAMP default
+
     def test_xui_api_config_defaults(self, mock_bot_db):
         """Test xui_api_config has default values"""
         config = mock_bot_db.get_xui_api_config()

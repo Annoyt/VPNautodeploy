@@ -254,6 +254,12 @@ class Settings:
         # showed a button to a dead URL and nobody noticed. Now if it's
         # missing, handle_admin says so out loud.
         self.WEBAPP_URL: str = os.getenv('WEBAPP_URL', '')
+        # Mirrors of /sub on OTHER domains (IMPROVEMENT_PLAN E5), comma-
+        # separated base URLs, e.g. "https://m1.example.net,https://m2.example.org".
+        # Each becomes a proxy-provider of the FlClash profile that keeps
+        # delivering the servers if the main domain gets blocked. A mirror
+        # must proxy /sub/<token>?format=clash-proxies to this bot. Empty = off.
+        self.SUB_MIRROR_URLS: str = os.getenv('SUB_MIRROR_URLS', '').strip()
 
         # OpenCode AI agent — the bot talks to a local `opencode serve`
         # HTTP server (headless). Optional: if OPENCODE_URL is empty, the

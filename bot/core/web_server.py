@@ -2,7 +2,9 @@
 
 import logging
 import json
+import re
 import threading
+import time
 import asyncio
 import hmac
 import hashlib
@@ -18,7 +20,7 @@ from bot.core.state_machine import StateMachine
 from bot.services.user_lifecycle import revoke_user_key
 from bot.services.xui_service import XUIService
 from bot.services.system_stats import SystemStatsService
-from bot.services.subscription import SubscriptionService
+from bot.services.subscription import SubscriptionService, is_probe_group
 from bot.utils.admin_token import verify_admin_token
 from bot.utils.rate_limit import check_admin_rate_limit, get_admin_rate_limit_remaining
 from bot.utils.prometheus import metrics, set_gauge_users, set_system_gauge
@@ -48,6 +50,10 @@ SPECIAL_ACTIONS = {'reset', 'grant_100gb', 'grant_paid', 'set_limit_ip',
 
 # Bytes-per-GB constant used by /grant_100gb. Keep in sync with bot.config.constants.
 BYTES_PER_GB = 1024 ** 3
+
+# /probe/<token>/<group>: the token is SubscriptionService.derive_token's
+# 32 lowercase hex chars — anything else is answered without a lookup.
+_PROBE_TOKEN_RE = re.compile(r'[0-9a-f]{32}')
 
 
 def _deployed_version() -> str:
@@ -104,6 +110,13 @@ class WebAppServer:
         self._hy2_quota_refreshing: set = set()
         # strong refs: the event loop keeps only weak ones to its tasks
         self._bg_tasks: set = set()
+        # /probe heartbeats (E4): token -> chat_id, rebuilt from users on
+        # a miss (at most once a minute) and every 10 min; the last row
+        # time per (chat_id, group) for the one-row-a-minute limit.
+        self._probe_tokens: dict = {}
+        self._probe_tokens_at: float = float('-inf')
+        self._probe_tokens_lock: Optional[asyncio.Lock] = None
+        self._probe_last: dict = {}
         self._setup_routes()
     
     def _setup_routes(self):
@@ -129,6 +142,10 @@ class WebAppServer:
         # FlClash pulls them hourly. Not /rule-sets/: that prefix is the
         # .srs mirror for sing-box (Caddy may serve it statically).
         self.app.router.add_get('/lists/clash/{name}.yaml', self.handle_rule_list)
+        # Health-check target of the FlClash profile (E4). Public, always
+        # 204 (GET and HEAD — mihomo tests with HEAD); the token in the
+        # path attributes the heartbeat to a user.
+        self.app.router.add_get('/probe/{token}/{group}', self.handle_probe)
         
         # Admin — read
         self.app.router.add_get('/api/admin/users', self.handle_admin_users)
@@ -958,6 +975,15 @@ class WebAppServer:
         if user.status not in ('demo', 'paid', 'support_topic'):
             return web.Response(status=410, text='Subscription inactive')
 
+        fmt = (request.rel_url.query.get('format') or '').lower()
+        # ``?format=clash-proxies`` is a proxy-provider refresh of the
+        # FlClash profile (E5 mirrors, E20 emergency): up to every 10 min
+        # per client, fetched DIRECT. Read-only: the request's network
+        # still orders the servers, but the stored geo, sub_fetches (the
+        # "/sub age" in failure reports means the PROFILE), the reserve
+        # provisioning and the panel quota read stay with profile fetches.
+        provider_fetch = fmt == 'clash-proxies'
+
         # Geolocate the requesting client. Caddy reverse-proxies us, so
         # the real IP lives in X-Forwarded-For; fall back to peer addr.
         # Used both for the per-region cascade ordering and to update
@@ -995,7 +1021,7 @@ class WebAppServer:
         cur_country = user.last_country or ''
         cur_asn = user.last_asn or ''
         cur_city = user.last_city or ''
-        if (
+        if not provider_fetch and (
             (country and country != cur_country)
             or (asn and asn != cur_asn)
             or (city and city != cur_city)
@@ -1019,7 +1045,7 @@ class WebAppServer:
         # Hy2 / Reality users show up in hy2_auth_log / dpi_metrics
         # respectively; sub-only users (CDN via urltest, no direct hit
         # on our infra) need this row or they're invisible.
-        if country or asn or city:
+        if (country or asn or city) and not provider_fetch:
             try:
                 await asyncio.to_thread(
                     self._record_sub_fetch,
@@ -1047,6 +1073,23 @@ class WebAppServer:
             self.db, user=user, country=country, asn=asn,
         )
 
+        if provider_fetch:
+            # ``channel=emergency`` marks the 10-min channel (E20); logged
+            # only for now — the hook for a separate emergency server set.
+            channel = re.sub(
+                r'[^a-z0-9-]', '',
+                (request.rel_url.query.get('channel') or '').lower(),
+            )[:32]
+            if channel:
+                logger.info(f"sub: clash-proxies channel={channel} for {user.chat_id}")
+            return web.Response(
+                text=self.subscription.build_clash_proxies(user, cascade),
+                content_type='text/plain',
+                # A cached server list would defeat the point of a channel
+                # that exists to deliver server changes.
+                headers={'cache-control': 'no-store'},
+            )
+
         # Paid-tier users get the reserve fallback node appended by the
         # builder below. Provision them there lazily (idempotent, cached)
         # so the outbound actually authenticates when they switch to it.
@@ -1067,12 +1110,18 @@ class WebAppServer:
         # in Happ / v2rayNG / Streisand.
         # ``?format=clash`` gets the same profile in Clash/mihomo form for
         # FlClash — Clash clients apply its rules, Hiddify drops them.
-        fmt = (request.rel_url.query.get('format') or '').lower()
+        # (``?format=clash-proxies`` was answered above.)
         ua = (request.headers.get('User-Agent', '') or '').lower()
         text_body = None
         if fmt == 'clash':
+            # E3: the profile's Cascade/Auto groups leave out what
+            # DPIMonitor demotes for this network (VPN keeps it for the
+            # manual pick). Tolerant read — junk collapses to nothing.
+            demoted = MyKeyAnswerHandler.get_auto_demotions(
+                self.db, asn or getattr(user, 'last_asn', None),
+            )
             text_body = self.subscription.build_clash_config(
-                user, cascade, lockdown=lockdown,
+                user, cascade, lockdown=lockdown, demoted=frozenset(demoted),
             )
         elif fmt == 'links' or (not fmt and 'happ' in ua):
             text_body = self.subscription.build_links(user, cascade)
@@ -1136,6 +1185,114 @@ class WebAppServer:
             text=body, content_type='text/yaml',
             headers={'Cache-Control': f'max-age={rule_lists.PROVIDER_CACHE_MAX_AGE_S}'},
         )
+
+    # ==================== Client probes (E4) ====================
+
+    # At most one client_probe row per (chat_id, group) in this window.
+    # A group's health check hits the url once per proxy in the same
+    # second, and three groups/providers share a tick — this collapses a
+    # round into one row per group.
+    PROBE_MIN_INTERVAL_S = 60
+    # token -> chat_id map: full rebuild at least this often (drops tokens
+    # of re-keyed users), and on a miss at most once per
+    # PROBE_TOKEN_MISS_REBUILD_S (a user keyed a minute ago is found; a
+    # flood of made-up tokens costs one users scan a minute, not one each).
+    PROBE_TOKEN_REFRESH_S = 600
+    PROBE_TOKEN_MISS_REBUILD_S = 60
+
+    async def handle_probe(self, request: web.Request) -> web.Response:
+        """``GET|HEAD /probe/<token>/<group>`` — the health-check url of
+        the FlClash profile's groups and providers (IMPROVEMENT_PLAN E4).
+
+        mihomo sends it THROUGH each proxy it tests, so the request
+        arriving here is a heartbeat "this user's client is alive through
+        a tunnel". Always 204 with no body, before any lookup: the answer
+        must not depend on the token (an unknown one is not revealed as
+        such) nor on the database — the client measures this response as
+        the tunnel's delay, and a slow or failing write here would make
+        it fail over away from a healthy server. The row is written by a
+        background task.
+        """
+        token = request.match_info.get('token', '') or ''
+        group = (request.match_info.get('group', '') or '').lower()
+        if _PROBE_TOKEN_RE.fullmatch(token) and is_probe_group(group):
+            src_ip = (
+                (request.headers.get('X-Forwarded-For', '') or '')
+                .split(',')[0].strip()
+                or (request.headers.get('X-Real-IP', '') or '').strip()
+                or (request.remote or '')
+            )[:64]
+            try:
+                task = asyncio.get_running_loop().create_task(
+                    self._record_probe(token, group, src_ip),
+                )
+            except Exception as e:
+                logger.warning(f"probe: could not schedule the heartbeat: {e}")
+            else:
+                self._bg_tasks.add(task)
+                task.add_done_callback(self._bg_tasks.discard)
+        return web.Response(status=204)
+
+    async def _record_probe(self, token: str, group: str, src_ip: str) -> None:
+        """Resolve the token and write one ``client_probe`` row, at most
+        one per (chat_id, group) per PROBE_MIN_INTERVAL_S. Never raises."""
+        try:
+            chat_id = await self._probe_chat_id(token)
+            if not chat_id:
+                return
+            key = (chat_id, group)
+            now = time.monotonic()
+            last = self._probe_last.get(key)
+            if last is not None and now - last < self.PROBE_MIN_INTERVAL_S:
+                return
+            # Claimed before the write (no await in between): the burst
+            # of one health-check round produces a single row.
+            self._probe_last[key] = now
+            await asyncio.to_thread(self._insert_client_probe, chat_id, group, src_ip)
+        except Exception as e:
+            logger.warning(f"probe: heartbeat not recorded: {e}")
+
+    async def _probe_chat_id(self, token: str) -> Optional[str]:
+        """chat_id for a /sub token from the cached map (see
+        PROBE_TOKEN_REFRESH_S / PROBE_TOKEN_MISS_REBUILD_S); None when
+        unknown. One rebuild at a time."""
+        if self._probe_tokens_lock is None:
+            self._probe_tokens_lock = asyncio.Lock()
+        async with self._probe_tokens_lock:
+            age = time.monotonic() - self._probe_tokens_at
+            chat_id = (
+                self._probe_tokens.get(token)
+                if age < self.PROBE_TOKEN_REFRESH_S else None
+            )
+            if chat_id is None and age >= self.PROBE_TOKEN_MISS_REBUILD_S:
+                try:
+                    self._probe_tokens = await asyncio.to_thread(self._probe_token_map)
+                finally:
+                    # A failed rebuild waits like a successful one: a
+                    # broken users table must not cost a scan per probe.
+                    self._probe_tokens_at = time.monotonic()
+                chat_id = self._probe_tokens.get(token)
+            return chat_id
+
+    def _probe_token_map(self) -> dict:
+        """{derive_token(uuid): chat_id} over every user with a key."""
+        out = {}
+        for u in self.db._users.get_all():
+            uuid = getattr(u, 'uuid', None)
+            if uuid:
+                out[self.subscription.derive_token(uuid)] = str(u.chat_id)
+        return out
+
+    def _insert_client_probe(self, chat_id: str, group: str, src_ip: str) -> None:
+        conn = self.db._connect()
+        try:
+            conn.execute(
+                "INSERT INTO client_probe (chat_id, grp, src_ip) VALUES (?, ?, ?)",
+                (chat_id, group, src_ip or None),
+            )
+            conn.commit()
+        finally:
+            conn.close()
 
     # ==================== Admin — Read ====================
 

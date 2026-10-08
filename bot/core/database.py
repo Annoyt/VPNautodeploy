@@ -124,6 +124,7 @@ class Database:
         self._init_user_failure_reports()
         self._init_sub_fetches()
         self._init_outbound_health()
+        self._init_client_probe()
 
         # Initialize repositories for delegation
         self._users = UserRepository(db_path)
@@ -872,6 +873,41 @@ class Database:
                 conn.commit()
         except sqlite3.Error as e:
             logger.error(f"_init_outbound_health failed: {e}")
+
+    def _init_client_probe(self) -> None:
+        """Heartbeats from the FlClash profile's health checks
+        (IMPROVEMENT_PLAN E4): ``GET /probe/<token>/<grp>`` arrives
+        THROUGH the user's tunnel, so a row means "this user's client is
+        alive through a tunnel right now" — the client-side vantage the
+        entry-host probes (outbound_health) cannot give. The base for E8
+        (per-protocol client telemetry → DPIMonitor) and E21 (the bot
+        writes first when a user's probes stop).
+
+        ``grp`` — group / provider name (cascade, auto, calls, emergency,
+        mirror-<n>); ``src_ip`` — the egress the probe left from (our
+        exit or the reserve node), NOT the user's address. At most one
+        row per (chat_id, grp) a minute — the endpoint rate-limits.
+        """
+        try:
+            with self._connect() as conn:
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS client_probe ("
+                    "chat_id TEXT NOT NULL, "
+                    "grp TEXT NOT NULL, "
+                    "ts TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, "
+                    "src_ip TEXT)"
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_client_probe_chat_grp_ts "
+                    "ON client_probe(chat_id, grp, ts)"
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_client_probe_ts "
+                    "ON client_probe(ts)"
+                )
+                conn.commit()
+        except sqlite3.Error as e:
+            logger.error(f"_init_client_probe failed: {e}")
 
     def get_setting(self, key: str, default: Optional[str] = None) -> Optional[str]:
         """Read a tunable from app_settings. Returns default if missing."""

@@ -23,7 +23,8 @@ import hashlib
 import hmac
 import json
 import logging
-from typing import Optional, Tuple, List, Any
+import re
+from typing import Iterable, Optional, Tuple, List, Any
 
 from bot.config import Settings
 from bot.services.fallback_node import (
@@ -33,6 +34,22 @@ from bot.services.fallback_node import (
 from bot.services import rule_lists
 
 logger = logging.getLogger(__name__)
+
+# The last path segment of ``/probe/<token>/<group>`` (IMPROVEMENT_PLAN
+# E4): the Clash profile's health-checked groups and its proxy-providers
+# (``emergency``, ``mirror-<n>``). A closed set on purpose — the endpoint
+# keys an in-memory rate limit on (chat_id, group), so an open one would
+# let a token holder grow that dict without bound.
+CLASH_PROBE_GROUPS = ('cascade', 'auto', 'calls', 'emergency')
+_PROBE_MIRROR_RE = re.compile(r'mirror-[1-9][0-9]?')
+
+
+def is_probe_group(name: str) -> bool:
+    """True for a group / provider name ``/probe`` records heartbeats for."""
+    return (
+        isinstance(name, str)
+        and (name in CLASH_PROBE_GROUPS or bool(_PROBE_MIRROR_RE.fullmatch(name)))
+    )
 
 
 class SubscriptionService:
@@ -377,11 +394,18 @@ class SubscriptionService:
 
     # ---------- Sing-box JSON ----------
 
-    def _collect_outbounds(self, user, enabled_protocols) -> tuple:
+    def _collect_outbounds(
+        self, user, enabled_protocols, *, protocols: Optional[dict] = None,
+    ) -> tuple:
         """sing-box outbounds for the cascade (+ the reserve DE node for
         paid tiers) as ``(outbounds, proxy_tags, udp_call_tags)``.
         Shared by the sing-box and the Clash builder, so both profiles
         carry exactly the same servers.
+
+        ``protocols``, when given, is filled with ``{proxy_tag: cascade
+        protocol name}`` — the Clash builder needs it to drop
+        auto-demoted protocols from its fallback groups. The reserve DE
+        node is not a cascade protocol and gets no entry.
         """
         outbounds: List[dict] = []
         proxy_tags: List[str] = []
@@ -406,6 +430,8 @@ class SubscriptionService:
                 outbounds.append(ob)
                 tag = ob['tag']
             proxy_tags.append(tag)
+            if protocols is not None:
+                protocols[tag] = proto
             if proto in ('reality', 'hy2', 'hy2t'):
                 udp_call_tags.append(tag)
 
@@ -578,7 +604,157 @@ class SubscriptionService:
 
     # ---------- Main profile for Clash / mihomo (FlClash) ----------
 
+    # Health-check target when the bot doesn't know its public address
+    # (WEBAPP_URL empty). Otherwise the groups probe our own /probe
+    # endpoint — see _clash_probe_url.
     _CLASH_TEST_URL = 'https://www.gstatic.com/generate_204'
+    # Group health-check cadence, seconds (Cascade / Auto / Calls).
+    _CLASH_GROUP_INTERVAL = 180
+    # proxy-provider refresh cadence, seconds. FlClash refreshes the
+    # profile itself once a day and does not read profile-update-interval,
+    # but it honours provider intervals — so the emergency channel (E20)
+    # is how a server change reaches a loaded profile within ten minutes;
+    # mirrors (E5) are the slow reserve for a blocked main domain.
+    _CLASH_EMERGENCY_INTERVAL = 600
+    _CLASH_MIRROR_INTERVAL = 3600
+    # Health-check cadence of the PROVIDERS' proxies. mihomo tests them
+    # against the provider's own url and, on the same tick, against the
+    # url of every group that uses the provider (Cascade, Auto) — three
+    # requests per proxy per provider. They sit behind the profile's own
+    # proxies in Cascade, and a run of failed dials makes mihomo re-check
+    # the group on the spot, so 600 s costs little in failover and saves
+    # two thirds of the probe load against 180.
+    _CLASH_PROVIDER_HC_INTERVAL = 600
+
+    def _clash_proxies(self, user, enabled_protocols) -> tuple:
+        """The cascade as mihomo proxies: ``(proxies, call_names,
+        protocol_by_name)``. One converter for the profile and for the
+        ``clash-proxies`` provider format, so both carry the same servers
+        under the same names, in the same (cascade) order."""
+        protocols: dict = {}
+        outbounds, proxy_tags, udp_call_tags = self._collect_outbounds(
+            user, enabled_protocols, protocols=protocols,
+        )
+        by_tag = {ob['tag']: ob for ob in outbounds}
+        proxies = []
+        for tag in proxy_tags:
+            proxy = self._to_clash_proxy(by_tag[tag], by_tag)
+            if proxy is None:
+                logger.warning(f'subscription: no Clash form for outbound {tag}')
+                continue
+            proxies.append(proxy)
+        names = [p['name'] for p in proxies]
+        calls = [t for t in udp_call_tags if t in names]
+        return proxies, calls, {n: protocols.get(n) for n in names}
+
+    def build_clash_proxies(self, user, enabled_protocols: Tuple[str, ...]) -> str:
+        """``/sub/<token>?format=clash-proxies`` — the body of the Clash
+        profile's proxy-providers (E5 mirrors, E20 emergency): only
+        ``{"proxies": [...]}``, the same converter and order as the
+        profile. Nothing is excluded here: the VPN group lists every
+        server for the manual pick; Cascade/Auto drop auto-demoted ones
+        with their own ``exclude-filter``."""
+        proxies, _calls, _protocols = self._clash_proxies(user, enabled_protocols)
+        return json.dumps({'proxies': proxies}, ensure_ascii=False, indent=1)
+
+    def mirror_bases(self) -> List[str]:
+        """``SUB_MIRROR_URLS`` — comma-separated base URLs of /sub mirrors
+        on other domains (E5) — normalised: trimmed, no trailing slash,
+        http(s) only, first occurrence wins. Empty = no mirrors."""
+        out: List[str] = []
+        for part in str(getattr(self.config, 'SUB_MIRROR_URLS', '') or '').split(','):
+            base = part.strip().rstrip('/')
+            if not base or base in out:
+                continue
+            if not base.lower().startswith(('https://', 'http://')):
+                logger.warning(f'SUB_MIRROR_URLS: {base!r} is not an http(s) URL — skipped')
+                continue
+            out.append(base)
+        return out
+
+    def _clash_probe_url(self, token: Optional[str], group: str) -> str:
+        """Health-check url of one group / provider (E4):
+        ``{WEBAPP_URL}/probe/<token>/<group>`` — a 204 from our own
+        endpoint that also leaves a heartbeat "this user's client is
+        alive through the tunnel" in ``client_probe``. gstatic only when
+        the bot has no public address.
+
+        No ``expected-status`` on purpose: mihomo then counts ANY HTTP
+        answer as alive, so a bot restart (Caddy answers 502) never
+        makes the client's failover think every tunnel is dead."""
+        base = (getattr(self.config, 'WEBAPP_URL', '') or '').rstrip('/')
+        if not (base and token):
+            return self._CLASH_TEST_URL
+        return f'{base}/probe/{token}/{group}'
+
+    def _clash_providers(self, token: Optional[str]) -> dict:
+        """proxy-providers of the profile: ``emergency`` on the main
+        domain (E20, refreshed every 10 min) and ``mirror-<n>`` per
+        ``SUB_MIRROR_URLS`` entry (E5, hourly). Each serves the same
+        proxies as the profile (``?format=clash-proxies``), so a server
+        change reaches an already loaded profile without waiting for its
+        daily refresh, and survives the main domain being blocked."""
+        if not token:
+            return {}
+        providers = {}
+        base = (getattr(self.config, 'WEBAPP_URL', '') or '').rstrip('/')
+        if base:
+            providers['emergency'] = self._clash_provider(
+                'emergency', 'E',
+                f'{base}/sub/{token}?format=clash-proxies&channel=emergency',
+                self._CLASH_EMERGENCY_INTERVAL, token,
+            )
+        for n, mirror in enumerate(self.mirror_bases(), 1):
+            providers[f'mirror-{n}'] = self._clash_provider(
+                f'mirror-{n}', f'M{n}',
+                f'{mirror}/sub/{token}?format=clash-proxies',
+                self._CLASH_MIRROR_INTERVAL, token,
+            )
+        return providers
+
+    def _clash_provider(
+        self, name: str, label: str, url: str, interval: int, token: str,
+    ) -> dict:
+        return {
+            'type': 'http',
+            'url': url,
+            'path': f'./providers/{name}.yaml',
+            'interval': interval,
+            # Fetched DIRECT, never through the tunnel. Without `proxy`
+            # mihomo routes the fetch by the profile's rules (MATCH,VPN →
+            # the tunnel — checked on mihomo 1.19.32), so a channel meant
+            # to deliver replacement servers would die together with the
+            # servers it is meant to replace.
+            'proxy': 'DIRECT',
+            'health-check': {
+                'enable': True,
+                'url': self._clash_probe_url(token, name),
+                'interval': self._CLASH_PROVIDER_HC_INTERVAL,
+            },
+            # Same names as the profile's own proxies; a prefix keeps the
+            # copies apart in the VPN list (a select group resolves a
+            # pick by name — without it the provider copy could never be
+            # chosen by hand).
+            'override': {'additional-prefix': f'[{label}] '},
+        }
+
+    @staticmethod
+    def _clash_excluded(names: List[str], protocol_of: dict, demoted) -> List[str]:
+        """Proxies Cascade and Auto leave out: the ones whose cascade
+        protocol DPIMonitor currently demotes (E3). Anything unusable as
+        a protocol set — None, a non-iterable, junk names — excludes
+        nothing. Nor does a demotion that covers every cascade protocol:
+        what would be left is the reserve node alone or nothing, and a
+        demotion must cost latency, never connectivity (they all stay
+        in the order, the fallback group skips the dead ones itself)."""
+        try:
+            demoted = {p for p in (demoted or ()) if isinstance(p, str)}
+        except TypeError:
+            return []
+        excluded = [n for n in names if protocol_of.get(n) in demoted]
+        if not any(protocol_of.get(n) and n not in excluded for n in names):
+            return []
+        return excluded
 
     def build_clash_config(
         self,
@@ -586,6 +762,7 @@ class SubscriptionService:
         enabled_protocols: Tuple[str, ...],
         *,
         lockdown: bool = False,
+        demoted: Iterable[str] = frozenset(),
     ) -> str:
         """The main profile for Clash/mihomo clients (FlClash) — same
         servers, rules and DNS policy as ``build_singbox_config``. That
@@ -594,6 +771,23 @@ class SubscriptionService:
         always-proxy list, lockdown DNS); Clash clients apply the profile
         as is. Proxies are CONVERTED from the sing-box outbounds, so
         every server parameter still lives in one place.
+
+        Groups (IMPROVEMENT_PLAN E3–E5, E20):
+          * ``Cascade`` (fallback, the default of ``VPN``) — the first
+            live server in ``enabled_protocols`` order, which is already
+            the EFFECTIVE cascade (operator order → lockdown projection →
+            DPIMonitor demotions to the tail → tier filter, see
+            ``get_cascade_order``), the reserve DE node last. The cascade
+            runs on the client, not only in key issuance.
+          * ``Auto`` (url-test) — the fastest of the same set.
+          * ``demoted`` — protocols DPIMonitor holds at the tail for this
+            user's ASN; Cascade and Auto leave them out, ``VPN`` (the
+            manual pick) and ``Calls`` keep them.
+          * ``Calls`` (url-test) — UDP-native servers only, as before.
+          * health checks go to our ``/probe/<token>/<group>``.
+          * ``Cascade``, ``Auto`` and ``VPN`` also take the proxies of
+            the ``emergency`` / ``mirror-<n>`` providers, after the
+            profile's own.
 
         Not carried over: TLS ClientHello fragmentation — mihomo has no
         such option (sing-box ``tls.fragment`` on Reality / ws / stls).
@@ -606,31 +800,46 @@ class SubscriptionService:
         without a profile update. Without WEBAPP_URL there is nothing to
         point at and the profile is exactly what it was before E1.
         """
-        outbounds, proxy_tags, udp_call_tags = self._collect_outbounds(
-            user, enabled_protocols,
-        )
-        by_tag = {ob['tag']: ob for ob in outbounds}
-        proxies = []
-        for tag in proxy_tags:
-            proxy = self._to_clash_proxy(by_tag[tag], by_tag)
-            if proxy is None:
-                logger.warning(f'subscription: no Clash form for outbound {tag}')
-                continue
-            proxies.append(proxy)
+        proxies, calls, protocol_of = self._clash_proxies(user, enabled_protocols)
         names = [p['name'] for p in proxies]
-        calls = [t for t in udp_call_tags if t in names]
+        uuid = getattr(user, 'uuid', None) if user else None
+        token = self.derive_token(uuid) if uuid else None
+        # An empty cascade gets no channels either: there is nothing to
+        # deliver and no group to deliver it to.
+        providers = self._clash_providers(token) if names else {}
+        use = list(providers)
 
         groups = [{'name': 'VPN', 'type': 'select',
-                   'proxies': (['Auto'] + names) if names else ['DIRECT']}]
+                   'proxies': (['Cascade', 'Auto'] + names) if names else ['DIRECT']}]
+        if use:
+            groups[0]['use'] = use
         if names:
-            groups.append({'name': 'Auto', 'type': 'url-test', 'proxies': names,
-                           'url': self._CLASH_TEST_URL, 'interval': 180,
-                           'tolerance': 50})
+            excluded = self._clash_excluded(names, protocol_of, demoted)
+            kept = [n for n in names if n not in excluded]
+            cascade = {'name': 'Cascade', 'type': 'fallback', 'proxies': kept,
+                       'url': self._clash_probe_url(token, 'cascade'),
+                       'interval': self._CLASH_GROUP_INTERVAL}
+            auto = {'name': 'Auto', 'type': 'url-test', 'proxies': kept,
+                    'url': self._clash_probe_url(token, 'auto'),
+                    'interval': self._CLASH_GROUP_INTERVAL, 'tolerance': 50}
+            for group in (cascade, auto):
+                if use:
+                    group['use'] = use
+                    if excluded:
+                        # The providers carry every server (VPN needs them
+                        # all); their copies of the demoted ones go by name.
+                        # Anchored at the end: provider names carry a
+                        # prefix, and u1-hy2 must not catch u1-hy2t.
+                        group['exclude-filter'] = (
+                            '(?:' + '|'.join(re.escape(n) for n in excluded) + ')$'
+                        )
+            groups += [cascade, auto]
         if calls:
             # UDP-native only (see _collect_outbounds) — call media must
             # never land on a TCP transport.
             groups.append({'name': 'Calls', 'type': 'url-test', 'proxies': calls,
-                           'url': self._CLASH_TEST_URL, 'interval': 180,
+                           'url': self._clash_probe_url(token, 'calls'),
+                           'interval': self._CLASH_GROUP_INTERVAL,
                            'tolerance': 50})
 
         if lockdown:
@@ -670,6 +879,8 @@ class SubscriptionService:
             'proxies': proxies,
             'proxy-groups': groups,
         }
+        if providers:
+            config['proxy-providers'] = providers
         rule_providers = self._clash_rule_providers()
         if rule_providers:
             config['rule-providers'] = rule_providers

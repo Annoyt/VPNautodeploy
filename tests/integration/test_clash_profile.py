@@ -114,7 +114,9 @@ class TestGroups:
     def test_vpn_auto_calls(self):
         g = self._groups()
         names = [p['name'] for p in _build()[0]['proxies']]
-        assert g['VPN']['type'] == 'select' and g['VPN']['proxies'] == ['Auto'] + names
+        # Cascade (fallback, the cascade order) is the default since E3.
+        assert g['VPN']['type'] == 'select'
+        assert g['VPN']['proxies'] == ['Cascade', 'Auto'] + names
         assert g['Auto']['type'] == 'url-test' and g['Auto']['proxies'] == names
         # Hy2 present → it alone carries calls (as in the sing-box profile)
         assert [n[-4:] for n in g['Calls']['proxies']] == ['-hy2']
