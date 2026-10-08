@@ -12,6 +12,37 @@ import pytest_asyncio
 pytest_plugins = ('pytest_asyncio',)
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_geoip(monkeypatch, tmp_path_factory):
+    """GeoIP never downloads anything and never reads /var/lib in tests.
+
+    bot/services/geoip.py fetches the db-ip mmdb into
+    /var/lib/vpn-bot/geoip on the first lookup whenever maxminddb is
+    importable, and requirements.txt installs it. A dev box without
+    maxminddb answered every lookup with a quiet None; a clean venv (CI)
+    failed the /onlines tests with PermissionError('/var/lib/vpn-bot'),
+    and where that dir is writable they went to download.db-ip.com
+    mid-test (country ~3 MB, city up to ~150 MB). Point the module at a
+    directory that never exists and make the download a no-op: every
+    lookup is None — what prod answers while its DB is missing. A test
+    that needs a country patches bot.services.geoip.lookup itself.
+    """
+    from bot.services import geoip
+
+    absent = tmp_path_factory.getbasetemp() / 'geoip-absent'
+    monkeypatch.setattr(geoip, '_DB_DIR', str(absent))
+    for attr in ('_DB_PATH', '_ASN_DB_PATH', '_CITY_DB_PATH'):
+        name = os.path.basename(getattr(geoip, attr))
+        monkeypatch.setattr(geoip, attr, str(absent / name))
+    monkeypatch.setattr(geoip, '_download_db', lambda *a, **kw: False)
+    # Fresh readers and caches: a lookup cached as a miss by one test
+    # must not answer for a later test that fakes a reader.
+    for attr in ('_reader', '_asn_reader', '_city_reader'):
+        monkeypatch.setattr(geoip, attr, None)
+    for attr in ('_cache', '_asn_cache', '_city_cache'):
+        monkeypatch.setattr(geoip, attr, {})
+
+
 @pytest.fixture
 def mock_xui_db():
     """Create temporary X-UI database with test inbound"""

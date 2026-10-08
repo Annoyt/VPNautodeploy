@@ -102,6 +102,12 @@ PYTHONPATH=$(pwd) pytest -q
 PYTHONPATH=$(pwd) pytest tests/unit/test_vpn.py -v
 ```
 
+**CI** (`.github/workflows/ci.yml`; every PR into `main` and push to `main`, Python 3.11): job `tests` runs
+`pytest tests/ -m "not requires_docker and not requires_network"`, job `e2e` runs `pytest tests/e2e` on headless
+Chromium with `E2E_REQUIRE_BROWSER=1` (a missing browser fails instead of skipping). The suite must pass in a clean
+venv with no network: mark live-stack/internet tests `requires_docker`/`requires_network` (pytest.ini), bind test
+servers to port 0, put test-only imports in requirements-dev.txt (GeoIP is stubbed for every test in tests/conftest.py).
+
 Some tests suppress expected `DeprecationWarning` from the legacy Database facade:
 ```python
 pytestmark = pytest.mark.filterwarnings(

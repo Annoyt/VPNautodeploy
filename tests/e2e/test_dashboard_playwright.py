@@ -13,15 +13,24 @@ excludes e2e from the default `pytest tests/` run.
 
 Skipped automatically when playwright (or its chromium) is missing:
     pip install -r requirements-dev.txt && playwright install chromium
+unless E2E_REQUIRE_BROWSER=1 (CI sets it): there a missing browser is a
+broken runner, and seven skips must not read as a green E2E stage.
 """
+
+import os
 
 import pytest
 
-pw_sync = pytest.importorskip(
-    'playwright.sync_api',
-    reason='playwright not installed (pip install playwright; '
-           'playwright install chromium)',
-)
+REQUIRE_BROWSER = os.environ.get('E2E_REQUIRE_BROWSER') == '1'
+
+if REQUIRE_BROWSER:
+    import playwright.sync_api as pw_sync
+else:
+    pw_sync = pytest.importorskip(
+        'playwright.sync_api',
+        reason='playwright not installed (pip install playwright; '
+               'playwright install chromium)',
+    )
 
 # External CDNs referenced by index.html — blocked so the suite is
 # hermetic and doesn't hang offline.
@@ -34,6 +43,8 @@ def page_factory(e2e_stack):
         pw = pw_sync.sync_playwright().start()
         browser = pw.chromium.launch()
     except Exception as e:  # chromium not downloaded
+        if REQUIRE_BROWSER:
+            raise
         pytest.skip(f'chromium unavailable: {e}')
 
     def _new_page():

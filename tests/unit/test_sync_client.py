@@ -179,6 +179,21 @@ class TestNodeSyncClientSigning:
         assert sig1 != sig2
 
 
+async def _serve(app):
+    """Start ``app`` on a kernel-picked localhost port → (runner, port).
+
+    These tests used fixed ports 18081-18084: a second suite running in
+    parallel (another worktree) failed with EADDRINUSE, and those four
+    are exactly the probe-proxy sidecar's ports on entry
+    (HealthChecker.PROBE_PORTS).
+    """
+    runner = aiohttp.web.AppRunner(app)
+    await runner.setup()
+    site = aiohttp.web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    return runner, runner.addresses[0][1]
+
+
 @pytest.mark.asyncio
 class TestNodeSyncClientIntegration:
     """Integration tests with mock server."""
@@ -198,10 +213,7 @@ class TestNodeSyncClientIntegration:
         app = web.Application()
         app.router.add_post("/sync/user", handler)
         
-        runner = web.AppRunner(app)
-        await runner.setup()
-        site = web.TCPSite(runner, "127.0.0.1", 18081)
-        await site.start()
+        runner, port = await _serve(app)
         
         try:
             client = NodeSyncClient("exit-1", "test-secret")
@@ -209,7 +221,7 @@ class TestNodeSyncClientIntegration:
                 node_id="exit-2",
                 node_type=NodeType.EXIT,
                 host="127.0.0.1",
-                api_port=18081,
+                api_port=port,
             ))
             
             await client.start()
@@ -257,10 +269,7 @@ class TestNodeSyncClientIntegration:
         app = web.Application()
         app.router.add_get("/health", handler)
         
-        runner = web.AppRunner(app)
-        await runner.setup()
-        site = web.TCPSite(runner, "127.0.0.1", 18082)
-        await site.start()
+        runner, port = await _serve(app)
         
         try:
             client = NodeSyncClient("exit-1", "test-secret")
@@ -268,7 +277,7 @@ class TestNodeSyncClientIntegration:
                 node_id="exit-2",
                 node_type=NodeType.EXIT,
                 host="127.0.0.1",
-                api_port=18082,
+                api_port=port,
             ))
             
             await client.start()
@@ -299,10 +308,7 @@ class TestNodeSyncClientIntegration:
         app = web.Application()
         app.router.add_post("/vote", handler)
         
-        runner = web.AppRunner(app)
-        await runner.setup()
-        site = web.TCPSite(runner, "127.0.0.1", 18083)
-        await site.start()
+        runner, port = await _serve(app)
         
         try:
             client = NodeSyncClient("exit-1", "test-secret")
@@ -310,7 +316,7 @@ class TestNodeSyncClientIntegration:
                 node_id="exit-2",
                 node_type=NodeType.EXIT,
                 host="127.0.0.1",
-                api_port=18083,
+                api_port=port,
             ))
             
             await client.start()
@@ -363,10 +369,7 @@ class TestNodeSyncClientIntegration:
         app = web.Application()
         app.router.add_post("/sync/user", handler)
         
-        runner = web.AppRunner(app)
-        await runner.setup()
-        site = web.TCPSite(runner, "127.0.0.1", 18084)
-        await site.start()
+        runner, port = await _serve(app)
         
         try:
             client = NodeSyncClient("exit-1", "test-secret")
@@ -374,7 +377,7 @@ class TestNodeSyncClientIntegration:
                 node_id="exit-2",
                 node_type=NodeType.EXIT,
                 host="127.0.0.1",
-                api_port=18084,
+                api_port=port,
             ))
             
             await client.start()
