@@ -59,6 +59,8 @@ mutants/
 # Claude Code local permissions
 .claude/settings.local.json
 scripts/hermes_skill_vars.local
+# rotate_reality_dest.py snapshot (+ archived ones): operator-local state, values only
+scripts/.rotation_snapshot*.json
 bot/version.txt
 htmlcov/
 .claude/
