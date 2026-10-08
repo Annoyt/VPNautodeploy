@@ -46,8 +46,10 @@ done
 
 echo "==> Rsync to entry:/opt/vpn-bot (itemized — watch for unexpected drift)"
 # *.local holds untracked operator secrets (see deploy_hermes_skills.sh);
-# it has no business on a prod box.
-rsync -aviR --exclude='*.local' --exclude='__pycache__' \
+# it has no business on a prod box. .rotation_snapshot*.json is the
+# operator-local state of rotate_reality_dest.py — it would get baked
+# into the image along with scripts/.
+rsync -aviR --exclude='*.local' --exclude='__pycache__' --exclude='.rotation_snapshot*.json' \
     "${paths[@]}" entry:/opt/vpn-bot/ | grep -v '/$' || true
 
 echo "==> Remote rebuild (--no-deps)"
