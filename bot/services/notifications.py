@@ -1868,6 +1868,14 @@ class NotificationService:
             id='outbound_health_cleanup',
             replace_existing=True,
         )
+        # Daily: prune client_probe (FlClash /probe heartbeats, E4) older
+        # than CLIENT_PROBE_RETENTION_DAYS, batched like outbound_health.
+        self.scheduler.add_job(
+            self._cleanup_client_probe_sync,
+            IntervalTrigger(hours=24),
+            id='client_probe_cleanup',
+            replace_existing=True,
+        )
         # Every DPI_MONITOR_INTERVAL_MIN (10) min: DPIMonitor turns the
         # probe/DPI telemetry into cascade moves (auto-demote with
         # hysteresis, auto-restore) — the A1 loop that was still open when
@@ -2506,6 +2514,81 @@ class NotificationService:
             # committed — and tomorrow's run picks up where this stopped.
             logger.exception(
                 f"outbound_health cleanup failed after {dropped} rows: {e}"
+            )
+
+    # Retention for client_probe — the heartbeats GET /probe writes from
+    # the FlClash profile's provider health checks (IMPROVEMENT_PLAN E4):
+    # at most a row per (user, provider) a minute, in practice one per
+    # provider every 10 min while the client is in use (~150-450 a day per
+    # always-on client). The readers to come (E8 per-protocol client
+    # telemetry, E21 "this user's probes stopped") look back hours to
+    # days; 30 days matches OUTBOUND_HEALTH_RETENTION_DAYS, so the client-
+    # and the entry-side probes of one incident age out together.
+    CLIENT_PROBE_RETENTION_DAYS = 30
+    # Same batching and pause as outbound_health, for the same reason:
+    # the db is shared with /probe inserts, /sub and the alert tick.
+    CLIENT_PROBE_CLEANUP_BATCH = 20000
+    CLIENT_PROBE_CLEANUP_PAUSE_S = 0.1
+
+    def _cleanup_client_probe_sync(self, now: Optional[datetime] = None):
+        """Daily: prune client_probe rows older than retention, in batches.
+
+        The _cleanup_outbound_health_sync contract — batches of
+        CLIENT_PROBE_CLEANUP_BATCH with a commit and a short pause between
+        them until a batch deletes nothing, a log line with the dropped AND
+        the kept count (also when nothing was dropped), never raises, no
+        VACUUM — with two differences that come from this table:
+
+        * it has no id column: batches pick rows by ``rowid``;
+        * ``ts`` is sqlite's CURRENT_TIMESTAMP, 'YYYY-MM-DD HH:MM:SS' with
+          a SPACE, and the cutoff is written the same way. The strings
+          are compared, and an isoformat cutoff ('…T…') sorts after every
+          row of its own day — that would drop up to a day too much.
+
+        ``now`` is a test seam; the scheduler calls this with no arguments.
+        """
+        import time
+        from datetime import timedelta
+        dropped = 0
+        batches = 0
+        try:
+            now = now or datetime.utcnow()
+            cutoff = (
+                now - timedelta(days=self.CLIENT_PROBE_RETENTION_DAYS)
+            ).strftime('%Y-%m-%d %H:%M:%S')
+            batch = int(self.CLIENT_PROBE_CLEANUP_BATCH)
+            conn = self.db._connect()
+            try:
+                while True:
+                    # Subquery form, as in outbound_health: DELETE …
+                    # LIMIT needs SQLITE_ENABLE_UPDATE_DELETE_LIMIT.
+                    cur = conn.execute(
+                        "DELETE FROM client_probe WHERE rowid IN ("
+                        "SELECT rowid FROM client_probe WHERE ts < ? "
+                        "ORDER BY rowid LIMIT ?)",
+                        (cutoff, batch),
+                    )
+                    n = cur.rowcount
+                    conn.commit()          # releases the write lock per batch
+                    if n <= 0:
+                        break
+                    dropped += n
+                    batches += 1
+                    time.sleep(self.CLIENT_PROBE_CLEANUP_PAUSE_S)
+                kept = conn.execute(
+                    "SELECT COUNT(*) FROM client_probe"
+                ).fetchone()[0]
+            finally:
+                conn.close()
+            logger.info(
+                f"client_probe cleanup: dropped {dropped} rows older than "
+                f"{self.CLIENT_PROBE_RETENTION_DAYS}d in {batches} "
+                f"batch(es), {kept} rows kept"
+            )
+        except Exception as e:
+            # Every finished batch is committed; tomorrow's run goes on.
+            logger.exception(
+                f"client_probe cleanup failed after {dropped} rows: {e}"
             )
 
     def _refresh_geoip_db_sync(self):

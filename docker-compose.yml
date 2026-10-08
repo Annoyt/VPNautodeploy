@@ -125,6 +125,9 @@ services:
       # Admin dashboard URL (Caddy + Let's Encrypt on the host serves
       # https://<domain>:9443 → http://localhost:8080)
       - WEBAPP_URL=${WEBAPP_URL}
+      # /sub mirrors on other domains for the FlClash profile's
+      # proxy-providers (comma-separated base URLs, E5). Empty = off.
+      - SUB_MIRROR_URLS=${SUB_MIRROR_URLS:-}
       # OpenCode AI agent — host-side `opencode serve` (headless HTTP).
       # Empty OPENCODE_URL disables the /ai command. Basic-auth password
       # must match OPENCODE_SERVER_PASSWORD set on the opencode.service unit.
