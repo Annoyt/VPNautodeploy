@@ -20,7 +20,7 @@ from bot.core.state_machine import StateMachine
 from bot.services.user_lifecycle import revoke_user_key
 from bot.services.xui_service import XUIService
 from bot.services.system_stats import SystemStatsService
-from bot.services.subscription import SubscriptionService, is_probe_group
+from bot.services.subscription import SubscriptionService
 from bot.utils.admin_token import verify_admin_token
 from bot.utils.rate_limit import check_admin_rate_limit, get_admin_rate_limit_remaining
 from bot.utils.prometheus import metrics, set_gauge_users, set_system_gauge
@@ -1215,7 +1215,8 @@ class WebAppServer:
         """
         token = request.match_info.get('token', '') or ''
         group = request.match_info.get('group', '') or ''
-        if _PROBE_TOKEN_RE.fullmatch(token) and is_probe_group(group):
+        if (_PROBE_TOKEN_RE.fullmatch(token)
+                and group in self.subscription.probe_groups()):
             src_ip = (
                 (request.headers.get('X-Forwarded-For', '') or '')
                 .split(',')[0].strip()

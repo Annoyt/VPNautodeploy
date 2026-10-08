@@ -30,9 +30,7 @@ from bot.core.database import Database
 from bot.core.web_server import WebAppServer
 from bot.models.user import User
 from bot.services import lockdown as lockdown_mod
-from bot.services.subscription import (
-    CLASH_PROBE_GROUPS, SubscriptionService, is_probe_group,
-)
+from bot.services.subscription import CLASH_PROBE_GROUPS, SubscriptionService
 
 pytestmark = pytest.mark.filterwarnings(
     "ignore:Database\\..*is deprecated:DeprecationWarning"
@@ -208,21 +206,23 @@ class TestProbeUrl:
         assert 'proxy-providers' not in cfg
 
     def test_every_probe_url_is_accepted_by_the_endpoint(self):
-        cfg = _build(config=_config(SUB_MIRROR_URLS='https://m1.example.net,https://m2.example.org'))
+        config = _config(SUB_MIRROR_URLS='https://m1.example.net,https://m2.example.org')
+        cfg = _build(config=config)
         urls = [g['url'] for g in cfg['proxy-groups'] if 'url' in g]
         urls += [p['health-check']['url'] for p in cfg['proxy-providers'].values()]
+        groups = SubscriptionService(config).probe_groups()
         assert len(urls) == 6
         for url in urls:
             prefix, group = url.rsplit('/', 1)
-            assert prefix == f'{WEB}/probe/{_token()}' and is_probe_group(group), url
-        assert set(CLASH_PROBE_GROUPS) == {'cascade', 'auto', 'calls', 'emergency'}
+            assert prefix == f'{WEB}/probe/{_token()}' and group in groups, url
+        assert len(groups) == 6
 
-    def test_probe_group_names(self):
-        for ok in ('cascade', 'auto', 'calls', 'emergency', 'mirror-1', 'mirror-12'):
-            assert is_probe_group(ok)
-        for bad in ('Cascade', 'vpn', 'mirror-0', 'mirror-100', 'mirror-', 'mirror-1x',
-                    '', None, 'emergency/../x'):
-            assert not is_probe_group(bad), bad
+    def test_probe_groups_are_the_emitted_ones_only(self):
+        assert set(CLASH_PROBE_GROUPS) == {'cascade', 'auto', 'calls', 'emergency'}
+        assert SubscriptionService(_config()).probe_groups() == set(CLASH_PROBE_GROUPS)
+        two = SubscriptionService(_config(
+            SUB_MIRROR_URLS='https://m1.example.net,https://m2.example.org')).probe_groups()
+        assert two == set(CLASH_PROBE_GROUPS) | {'mirror-1', 'mirror-2'}
 
     def test_singbox_profile_keeps_gstatic(self):
         sb = SubscriptionService(_config()).build_singbox_config(_user(), ALL)
@@ -501,7 +501,8 @@ def probe_srv(tmp_path):
     db = Database(str(tmp_path / 'bot.db'))
     db._users.save(User(chat_id='1', username='u1', status='demo', uuid=UUID,
                         email='u1@x', quota_gb=10.0))
-    return WebAppServer(_config(), db, xui_service=Mock()), db
+    config = _config(SUB_MIRROR_URLS='https://m1.example.net,https://m2.example.org')
+    return WebAppServer(config, db, xui_service=Mock()), db
 
 
 def _client(srv):
@@ -570,6 +571,7 @@ class TestProbeEndpoint:
         f'/probe/{UUID.replace("-", "")[:31]}/cascade',  # malformed
         '/probe/' + 'A' * 32 + '/cascade',            # not lowercase hex
         '/probe/TOKEN/vpn',                           # unknown group (token below)
+        '/probe/TOKEN/mirror-3',                      # only 2 mirrors configured
     ])
     async def test_unknown_is_204_without_a_row(self, probe_srv, path):
         srv, db = probe_srv
@@ -592,7 +594,8 @@ class TestProbeEndpoint:
         async with _client(srv) as client:
             for path in (f'/probe/{_token()[:31]}/auto', f'/probe/{_token()}0/auto',
                          f'/probe/{_token().upper()}/auto', f'/probe/{_token()}/Auto',
-                         f'/probe/{_token()}/mirror-0', f'/probe/{_token()}/auto'):
+                         f'/probe/{_token()}/mirror-0', f'/probe/{_token()}/mirror-3',
+                         f'/probe/{_token()}/auto'):
                 assert (await client.get(path)).status == 204
             await _flush(srv)
         assert seen == [(_token(), 'auto')]

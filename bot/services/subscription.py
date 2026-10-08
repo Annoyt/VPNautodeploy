@@ -36,20 +36,10 @@ from bot.services import rule_lists
 logger = logging.getLogger(__name__)
 
 # The last path segment of ``/probe/<token>/<group>`` (IMPROVEMENT_PLAN
-# E4): the Clash profile's health-checked groups and its proxy-providers
-# (``emergency``, ``mirror-<n>``). A closed set on purpose — the endpoint
-# keys an in-memory rate limit on (chat_id, group), so an open one would
-# let a token holder grow that dict without bound.
+# E4): the Clash profile's health-checked groups and the ``emergency``
+# provider; ``SubscriptionService.probe_groups`` adds one ``mirror-<n>``
+# per configured mirror.
 CLASH_PROBE_GROUPS = ('cascade', 'auto', 'calls', 'emergency')
-_PROBE_MIRROR_RE = re.compile(r'mirror-[1-9][0-9]?')
-
-
-def is_probe_group(name: str) -> bool:
-    """True for a group / provider name ``/probe`` records heartbeats for."""
-    return (
-        isinstance(name, str)
-        and (name in CLASH_PROBE_GROUPS or bool(_PROBE_MIRROR_RE.fullmatch(name)))
-    )
 
 
 class SubscriptionService:
@@ -671,6 +661,16 @@ class SubscriptionService:
                 continue
             out.append(base)
         return out
+
+    def probe_groups(self) -> frozenset:
+        """Every ``/probe/<token>/<group>`` segment this deployment's
+        profile emits. A closed set on purpose: each one is a row a
+        minute per user (and a key of the endpoint's rate-limit dict), so
+        a token holder must not be able to invent more of them."""
+        mirrors = len(self.mirror_bases())
+        return frozenset(CLASH_PROBE_GROUPS) | {
+            f'mirror-{n}' for n in range(1, mirrors + 1)
+        }
 
     def _clash_probe_url(self, token: Optional[str], group: str) -> str:
         """Health-check url of one group / provider (E4):
