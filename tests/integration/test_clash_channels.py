@@ -509,8 +509,14 @@ def _client(srv):
 
 
 async def _flush(srv):
-    while srv._bg_tasks:
-        await asyncio.gather(*list(srv._bg_tasks))
+    """Wait for the heartbeat tasks /probe spawned. Only on PENDING ones:
+    since 3.12 gather() over finished tasks completes without yielding,
+    so looping on the set until their discard callbacks run would spin."""
+    while True:
+        pending = [t for t in srv._bg_tasks if not t.done()]
+        if not pending:
+            return
+        await asyncio.wait(pending)
 
 
 def _probes(db):
@@ -536,8 +542,7 @@ class TestProbeEndpoint:
     async def test_one_row_per_group_per_minute(self, probe_srv):
         srv, db = probe_srv
         async with _client(srv) as client:
-            for group in ('cascade', 'cascade', 'Cascade', 'auto', 'cascade',
-                          'mirror-2', 'auto'):
+            for group in ('cascade', 'cascade', 'auto', 'cascade', 'mirror-2', 'auto'):
                 assert (await client.get(f'/probe/{_token()}/{group}')).status == 204
                 await _flush(srv)
             assert [r[1] for r in _probes(db)] == ['cascade', 'auto', 'mirror-2']
@@ -574,6 +579,23 @@ class TestProbeEndpoint:
             assert resp.status == 204 and await resp.read() == b''
             await _flush(srv)
         assert _probes(db) == []
+
+    @pytest.mark.asyncio
+    async def test_malformed_never_reaches_the_lookup(self, probe_srv, monkeypatch):
+        srv, _db = probe_srv
+        seen = []
+
+        async def record(token, group, src_ip):
+            seen.append((token, group))
+
+        monkeypatch.setattr(srv, '_record_probe', record)
+        async with _client(srv) as client:
+            for path in (f'/probe/{_token()[:31]}/auto', f'/probe/{_token()}0/auto',
+                         f'/probe/{_token().upper()}/auto', f'/probe/{_token()}/Auto',
+                         f'/probe/{_token()}/mirror-0', f'/probe/{_token()}/auto'):
+                assert (await client.get(path)).status == 204
+            await _flush(srv)
+        assert seen == [(_token(), 'auto')]
 
     @pytest.mark.asyncio
     async def test_answers_before_the_write(self, probe_srv, monkeypatch):
@@ -639,6 +661,22 @@ class TestProbeEndpoint:
                 await client.get(f'/probe/{n:032x}/cascade')
                 await _flush(srv)
         assert len(scans) == 1
+
+    @pytest.mark.asyncio
+    async def test_failed_rebuild_waits_a_minute_too(self, probe_srv, monkeypatch):
+        srv, db = probe_srv
+        scans = []
+
+        def broken():
+            scans.append(1)
+            raise RuntimeError('users table is gone')
+
+        monkeypatch.setattr(srv, '_probe_token_map', broken)
+        async with _client(srv) as client:
+            for _ in range(3):
+                assert (await client.get(f'/probe/{_token()}/cascade')).status == 204
+                await _flush(srv)
+        assert scans == [1] and _probes(db) == []
 
     @pytest.mark.asyncio
     async def test_map_is_rebuilt_every_ten_minutes(self, probe_srv):

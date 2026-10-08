@@ -1214,7 +1214,7 @@ class WebAppServer:
         background task.
         """
         token = request.match_info.get('token', '') or ''
-        group = (request.match_info.get('group', '') or '').lower()
+        group = request.match_info.get('group', '') or ''
         if _PROBE_TOKEN_RE.fullmatch(token) and is_probe_group(group):
             src_ip = (
                 (request.headers.get('X-Forwarded-For', '') or '')
