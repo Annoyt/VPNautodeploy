@@ -1868,6 +1868,7 @@
         container.innerHTML = rows.map(r => {
             const net = [r.country, r.asn].filter(Boolean).join(' / ') || '—';
             const traffic = r.last_traffic_ts || '—';
+            const subFetch = r.last_sub_fetch_ts || '—';
             const ackTxt = r.acked_at
                 ? `<span class="alert-ack">✓ ${esc(r.acked_at)}${r.ack_note ? ' · ' + esc(r.ack_note) : ''}</span>`
                 : `<button class="btn-ack" data-report-id="${r.id}">✓ ack</button>`;
@@ -1880,7 +1881,7 @@
                     <div class="alert-title">
                         ${esc(r.username || r.chat_id)} (${esc(r.status || '?')}) — ${esc(net)}
                     </div>
-                    <div class="alert-detail">Последний трафик: ${esc(traffic)}</div>
+                    <div class="alert-detail">Последний трафик: ${esc(traffic)} · /sub: ${esc(subFetch)} (UTC)</div>
                 </div>`;
         }).join('');
         container.querySelectorAll('.btn-ack').forEach(btn => {

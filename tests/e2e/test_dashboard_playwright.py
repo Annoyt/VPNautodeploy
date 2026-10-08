@@ -142,3 +142,27 @@ class TestDashboardSmoke:
             time.sleep(0.2)
         assert deadline_ok, 'set_quota never persisted'
         page.close()
+
+
+class TestSignalsFailureReports:
+
+    def test_report_row_shows_last_traffic_and_sub_fetch(self, page_factory, e2e_stack):
+        """The Signals triage row prints both stored facts. Until 2026-09-30
+        last_sub_fetch_ts was always NULL and never rendered, and
+        last_traffic_ts held the traffic mirror's clock, not the user's."""
+        cid = e2e_stack.seed_user('paid')
+        with e2e_stack.db._connect() as conn:
+            rid = conn.execute(
+                "INSERT INTO user_failure_reports (chat_id, country, asn, "
+                " last_sub_fetch_ts, last_traffic_ts, target_domain) "
+                "VALUES (?, 'RU', 'AS31133', '2026-09-26 08:18:18', "
+                "'2026-09-30 15:27:20', 'nothing_loads')", (cid,)).lastrowid
+            conn.commit()
+        page = page_factory()
+        page.click('[data-tab="signals"]')
+        row = page.locator('#signals-reports-list .alert-row', has_text=f'#{rid} ')
+        row.wait_for()
+        text = row.inner_text()
+        assert 'Последний трафик: 2026-09-30 15:27:20' in text
+        assert '/sub: 2026-09-26 08:18:18' in text
+        page.close()
