@@ -1060,11 +1060,17 @@ class WebAppServer:
         # ``?format=links`` (or a Happ User-Agent) gets the v2ray-style
         # share-links list — the format that renders as separate servers
         # in Happ / v2rayNG / Streisand.
+        # ``?format=clash`` gets the same profile in Clash/mihomo form for
+        # FlClash — Clash clients apply its rules, Hiddify drops them.
         fmt = (request.rel_url.query.get('format') or '').lower()
         ua = (request.headers.get('User-Agent', '') or '').lower()
-        links_body = None
-        if fmt == 'links' or (not fmt and 'happ' in ua):
-            links_body = self.subscription.build_links(user, cascade)
+        text_body = None
+        if fmt == 'clash':
+            text_body = self.subscription.build_clash_config(
+                user, cascade, lockdown=lockdown,
+            )
+        elif fmt == 'links' or (not fmt and 'happ' in ua):
+            text_body = self.subscription.build_links(user, cascade)
         elif fmt == 'xray':
             config_obj = self.subscription.build_xray_config(user, cascade)
         else:
@@ -1080,6 +1086,9 @@ class WebAppServer:
             'profile-update-interval': '6',  # refresh every 6 hours
             'profile-title': 'NekoVPN',
         }
+        if fmt == 'clash':
+            # Clash clients name the profile from the file name.
+            headers['content-disposition'] = "attachment; filename*=UTF-8''NekoVPN.yaml"
         try:
             quota_bytes = int((user.quota_gb or 0) * BYTES_PER_GB)
             traffic = await self.xui.get_client_traffic(user.email) or {}
@@ -1099,9 +1108,9 @@ class WebAppServer:
         except Exception as e:
             logger.warning(f"subscription: userinfo header skipped: {e}")
 
-        if links_body is not None:
+        if text_body is not None:
             return web.Response(
-                text=links_body, content_type='text/plain', headers=headers,
+                text=text_body, content_type='text/plain', headers=headers,
             )
         return web.json_response(config_obj, headers=headers)
 

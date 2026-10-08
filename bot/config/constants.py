@@ -28,6 +28,13 @@ DEFAULT_SECURITY = "reality"
 DEFAULT_FINGERPRINT = "chrome"
 DEFAULT_SPX = "/"
 
+# Client download pages (official). The FlClash site preselects the build
+# for the visitor's device. There is NO official FlClash on Google Play:
+# the official package com.follow.clash is not there, and the Play
+# "FlClash" is a different developer's build — never link it.
+HIDDIFY_DOWNLOAD_URL = "https://hiddify.com/"
+FLCLASH_DOWNLOAD_URL = "https://chen08209.github.io/FlClash/#download"
+
 # Traffic defaults
 DEFAULT_DEMO_TRAFFIC_GB = 10
 DEFAULT_DEMO_DAYS = 7

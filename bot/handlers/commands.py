@@ -354,6 +354,9 @@ class CommandHandler(BaseHandler):
         key. ECH is set on each outbound so the user doesn't have to
         flip the global Hiddify toggle.
         """
+        from bot.handlers.callbacks.user import (
+            client_choice_text, client_download_row,
+        )
         from bot.services.subscription import SubscriptionService
 
         user = self.db.get_user(chat_id)
@@ -405,24 +408,20 @@ class CommandHandler(BaseHandler):
             )
         elif user.lang == 'ru':
             text = (
-                "🔗 <b>Subscription URL</b>\n\n"
-                f"<code>{url}</code>\n\n"
-                "В Hiddify: «+» → «Добавить из ссылки» → вставь URL.\n"
-                "Один URL = весь каскад протоколов. Когда мы меняем "
-                "сервера, клиент сам подтягивает свежее каждые 6 часов.\n\n"
-                "💡 ECH здесь включён автоматически — глобальный тоггл "
-                "в настройках Hiddify трогать не надо."
+                "🔗 <b>Твоя подписка</b>\n\n"
+                + client_choice_text(url, 'ru')
+                + "\n\nОдна подписка = весь каскад протоколов. Когда мы "
+                "меняем сервера, клиент сам подтягивает свежее каждые 6 часов."
             )
         else:
             text = (
-                "🔗 <b>Subscription URL</b>\n\n"
-                f"<code>{url}</code>\n\n"
-                "In Hiddify: «+» → «Add from URL» → paste it.\n"
-                "One URL = the whole cascade. When we rotate servers the "
-                "client picks it up automatically every 6 hours.\n\n"
-                "💡 ECH is already on per-outbound — no need to flip the "
-                "global toggle in Hiddify settings."
+                "🔗 <b>Your subscription</b>\n\n"
+                + client_choice_text(url, 'en')
+                + "\n\nOne subscription = the whole cascade. When we rotate "
+                "servers the client picks it up automatically every 6 hours."
             )
+        if not is_ios:
+            plat_keyboard['inline_keyboard'].insert(0, client_download_row())
         self.bot.send_message(
             chat_id=chat_id, text=text, parse_mode='HTML',
             reply_markup=plat_keyboard,

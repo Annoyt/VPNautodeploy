@@ -21,6 +21,7 @@ scale; a token-cache can be added later if traffic warrants.
 import base64
 import hashlib
 import hmac
+import json
 import logging
 from typing import Optional, Tuple, List, Any
 
@@ -375,29 +376,11 @@ class SubscriptionService:
 
     # ---------- Sing-box JSON ----------
 
-    def build_singbox_config(
-        self,
-        user,
-        enabled_protocols: Tuple[str, ...],
-        *,
-        lockdown: bool = False,
-    ) -> dict:
-        """Build a complete sing-box JSON config.
-
-        ``enabled_protocols`` is the tier-filtered cascade order from
-        ``MyKeyAnswerHandler.get_cascade_order(db, user)`` — same set
-        the user gets via /mykey rotation, but all bundled at once.
-
-        For ``lang='en'`` users, adds a RU-exit outbound so they can
-        access RU-geo-blocked content (VK/Yandex/etc) from abroad.
-
-        ``lockdown`` (IMPROVEMENT_PLAN B5, ``bot/services/lockdown.py``)
-        switches ONLY the DNS profile: every lookup through the tunnel,
-        the local resolver kept for Clash "Direct" mode alone. Route
-        rules, outbounds and the cascade order are the caller's and
-        stay as they are — the order is already lockdown-projected by
-        ``get_cascade_order``. This service has no db; the flag is read
-        once per request by the /sub handler.
+    def _collect_outbounds(self, user, enabled_protocols) -> tuple:
+        """sing-box outbounds for the cascade (+ the reserve DE node for
+        paid tiers) as ``(outbounds, proxy_tags, udp_call_tags)``.
+        Shared by the sing-box and the Clash builder, so both profiles
+        carry exactly the same servers.
         """
         outbounds: List[dict] = []
         proxy_tags: List[str] = []
@@ -407,7 +390,6 @@ class SubscriptionService:
         # video isn't stranded on a CDN outbound that the auto-selector
         # happened to pick by its TCP latency probe.
         udp_call_tags: List[str] = []
-        lang = (getattr(user, 'lang', None) or 'ru') if user else 'ru'
 
         for proto in enabled_protocols:
             ob = self._build_outbound(proto, user)
@@ -456,6 +438,36 @@ class SubscriptionService:
         hy2_call_tags = [t for t in udp_call_tags if t.endswith(('-hy2', '-hy2t'))]
         if hy2_call_tags:
             udp_call_tags = hy2_call_tags
+        return outbounds, proxy_tags, udp_call_tags
+
+    def build_singbox_config(
+        self,
+        user,
+        enabled_protocols: Tuple[str, ...],
+        *,
+        lockdown: bool = False,
+    ) -> dict:
+        """Build a complete sing-box JSON config.
+
+        ``enabled_protocols`` is the tier-filtered cascade order from
+        ``MyKeyAnswerHandler.get_cascade_order(db, user)`` — same set
+        the user gets via /mykey rotation, but all bundled at once.
+
+        For ``lang='en'`` users, adds a RU-exit outbound so they can
+        access RU-geo-blocked content (VK/Yandex/etc) from abroad.
+
+        ``lockdown`` (IMPROVEMENT_PLAN B5, ``bot/services/lockdown.py``)
+        switches ONLY the DNS profile: every lookup through the tunnel,
+        the local resolver kept for Clash "Direct" mode alone. Route
+        rules, outbounds and the cascade order are the caller's and
+        stay as they are — the order is already lockdown-projected by
+        ``get_cascade_order``. This service has no db; the flag is read
+        once per request by the /sub handler.
+        """
+        outbounds, proxy_tags, udp_call_tags = self._collect_outbounds(
+            user, enabled_protocols,
+        )
+        lang = (getattr(user, 'lang', None) or 'ru') if user else 'ru'
 
         # urltest auto-selector at the top so Hiddify's default mode
         # picks the fastest live outbound, falling back along the
@@ -562,6 +574,203 @@ class SubscriptionService:
                 'auto_detect_interface': True,
             },
         }
+
+    # ---------- Main profile for Clash / mihomo (FlClash) ----------
+
+    _CLASH_TEST_URL = 'https://www.gstatic.com/generate_204'
+
+    def build_clash_config(
+        self,
+        user,
+        enabled_protocols: Tuple[str, ...],
+        *,
+        lockdown: bool = False,
+    ) -> str:
+        """The main profile for Clash/mihomo clients (FlClash) — same
+        servers, rules and DNS policy as ``build_singbox_config``. That
+        matters because Hiddify keeps only the outbounds of a sing-box
+        profile and drops everything else (calls group, RU-direct,
+        always-proxy list, lockdown DNS); Clash clients apply the profile
+        as is. Proxies are CONVERTED from the sing-box outbounds, so
+        every server parameter still lives in one place.
+
+        Not carried over: TLS ClientHello fragmentation — mihomo has no
+        such option (sing-box ``tls.fragment`` on Reality / ws / stls).
+        Emitted as JSON — a YAML 1.2 subset mihomo parses as a profile.
+        """
+        outbounds, proxy_tags, udp_call_tags = self._collect_outbounds(
+            user, enabled_protocols,
+        )
+        by_tag = {ob['tag']: ob for ob in outbounds}
+        proxies = []
+        for tag in proxy_tags:
+            proxy = self._to_clash_proxy(by_tag[tag], by_tag)
+            if proxy is None:
+                logger.warning(f'subscription: no Clash form for outbound {tag}')
+                continue
+            proxies.append(proxy)
+        names = [p['name'] for p in proxies]
+        calls = [t for t in udp_call_tags if t in names]
+
+        groups = [{'name': 'VPN', 'type': 'select',
+                   'proxies': (['Auto'] + names) if names else ['DIRECT']}]
+        if names:
+            groups.append({'name': 'Auto', 'type': 'url-test', 'proxies': names,
+                           'url': self._CLASH_TEST_URL, 'interval': 180,
+                           'tolerance': 50})
+        if calls:
+            # UDP-native only (see _collect_outbounds) — call media must
+            # never land on a TCP transport.
+            groups.append({'name': 'Calls', 'type': 'url-test', 'proxies': calls,
+                           'url': self._CLASH_TEST_URL, 'interval': 180,
+                           'tolerance': 50})
+
+        if lockdown:
+            # B5: every lookup through the tunnel; proxy hostnames still
+            # need a resolver that does not depend on the tunnel itself.
+            dns_servers = {
+                'nameserver': ['https://1.1.1.1/dns-query#VPN'],
+                'proxy-server-nameserver': ['https://1.1.1.1/dns-query', 'system'],
+            }
+        else:
+            # Russian resolver, like the sing-box 'local' final: Yandex
+            # and friends treat a foreign resolver as a VPN tell. By IP,
+            # not 'system', so TUN on desktop can't loop DNS into itself.
+            dns_servers = {'nameserver': ['77.88.8.8', '77.88.8.1']}
+
+        config = {
+            'mode': 'rule',
+            'log-level': 'warning',
+            'ipv6': False,
+            'dns': {
+                'enable': True,
+                'ipv6': False,
+                # fake-ip: a proxied name reaches the server unresolved,
+                # so nothing about it leaks to the local resolver.
+                'enhanced-mode': 'fake-ip',
+                'fake-ip-range': '198.18.0.1/16',
+                **dns_servers,
+            },
+            'sniffer': {
+                'enable': True,
+                'sniff': {
+                    'TLS': {'ports': [443, 8443]},
+                    'HTTP': {'ports': [80, 8080]},
+                    'QUIC': {'ports': [443]},
+                },
+            },
+            'proxies': proxies,
+            'proxy-groups': groups,
+            'rules': self._clash_rules('Calls' if calls else 'VPN'),
+        }
+        return json.dumps(config, ensure_ascii=False, indent=1)
+
+    def _clash_rules(self, udp_out: str) -> List[str]:
+        """``_build_route_rules`` in Clash form, same order (first match
+        wins): RU QUIC:443 direct (the VK "VPN detected" banner), every
+        other UDP to the UDP-native group (Telegram calls), Telegram by
+        IP, max.ru direct, the always-proxy list, RU direct, rest VPN."""
+        ru_quic = [f'AND,((NETWORK,UDP),(DST-PORT,443),({m})),DIRECT'
+                   for m in ('GEOSITE,category-ru', 'GEOIP,RU')]
+        tg = [f'IP-CIDR{"6" if ":" in c else ""},{c},VPN,no-resolve'
+              for c in self._TELEGRAM_IP_CIDRS]
+        always_proxy = [f'GEOSITE,{t.split("-", 1)[1]},VPN'
+                        for t in self._PROXY_RULE_SET_TAGS]
+        return (
+            ru_quic
+            + [f'NETWORK,UDP,{udp_out}']
+            + tg
+            + ['DOMAIN-SUFFIX,max.ru,DIRECT']
+            + always_proxy
+            + ['GEOSITE,category-ru,DIRECT', 'GEOIP,RU,DIRECT', 'MATCH,VPN']
+        )
+
+    @staticmethod
+    def _to_clash_proxy(ob: dict, by_tag: dict) -> Optional[dict]:
+        """One sing-box outbound → a mihomo proxy, for the shapes this
+        service builds: VLESS(+Reality), Hysteria2 (+salamander, port
+        hopping), VMess over httpupgrade, Shadowsocks behind ShadowTLS.
+        ``None`` for anything else (the caller skips it)."""
+        kind = ob.get('type')
+        tls = ob.get('tls') or {}
+        fingerprint = (tls.get('utls') or {}).get('fingerprint') or 'chrome'
+        base = {'name': ob['tag'], 'server': ob['server'], 'port': ob['server_port']}
+        if kind == 'vless':
+            proxy = {**base, 'type': 'vless', 'uuid': ob['uuid'], 'network': 'tcp',
+                     'udp': True, 'tls': True, 'servername': tls.get('server_name'),
+                     'client-fingerprint': fingerprint}
+            if ob.get('flow'):
+                proxy['flow'] = ob['flow']
+            if ob.get('packet_encoding') == 'xudp':
+                proxy['packet-encoding'] = 'xudp'
+            reality = tls.get('reality') or {}
+            if reality.get('enabled'):
+                proxy['reality-opts'] = {'public-key': reality['public_key']}
+                if reality.get('short_id'):
+                    proxy['reality-opts']['short-id'] = reality['short_id']
+            return proxy
+        if kind == 'hysteria2':
+            proxy = {**base, 'type': 'hysteria2', 'password': ob['password'],
+                     'udp': True, 'sni': tls.get('server_name')}
+            if tls.get('alpn'):
+                proxy['alpn'] = list(tls['alpn'])
+            obfs = ob.get('obfs') or {}
+            if obfs.get('type') == 'salamander':
+                proxy['obfs'] = 'salamander'
+                proxy['obfs-password'] = obfs['password']
+            if ob.get('server_ports'):
+                # sing-box ["443:443", "20000:40000"] → mihomo "443,20000-40000"
+                ranges = []
+                for r in ob['server_ports']:
+                    lo, _, hi = r.partition(':')
+                    ranges.append(lo if hi in ('', lo) else f'{lo}-{hi}')
+                proxy['ports'] = ','.join(ranges)
+                proxy['hop-interval'] = int(str(ob.get('hop_interval') or '30s').rstrip('s'))
+            if ob.get('up_mbps'):
+                proxy['up'] = f"{ob['up_mbps']} Mbps"
+            if ob.get('down_mbps'):
+                proxy['down'] = f"{ob['down_mbps']} Mbps"
+            return proxy
+        if kind == 'vmess':
+            transport = ob.get('transport') or {}
+            proxy = {**base, 'type': 'vmess', 'uuid': ob['uuid'],
+                     'alterId': ob.get('alter_id', 0),
+                     'cipher': ob.get('security') or 'auto', 'udp': True}
+            if tls.get('enabled'):
+                proxy.update({'tls': True, 'servername': tls.get('server_name'),
+                              'client-fingerprint': fingerprint})
+            if transport.get('type') in ('httpupgrade', 'ws'):
+                proxy['network'] = 'ws'
+                proxy['ws-opts'] = {
+                    'path': transport.get('path') or '/',
+                    'headers': {'Host': transport.get('host') or ob['server']},
+                }
+                if transport['type'] == 'httpupgrade':
+                    proxy['ws-opts']['v2ray-http-upgrade'] = True
+            elif transport:
+                return None
+            return proxy
+        if kind == 'shadowsocks':
+            proxy = {**base, 'type': 'ss', 'cipher': ob['method'],
+                     'password': ob['password'], 'udp': True}
+            if ob.get('detour'):
+                front = by_tag.get(ob['detour']) or {}
+                if front.get('type') != 'shadowtls':
+                    return None
+                front_tls = front.get('tls') or {}
+                proxy.update({
+                    'plugin': 'shadow-tls',
+                    'client-fingerprint':
+                        (front_tls.get('utls') or {}).get('fingerprint') or 'chrome',
+                    'plugin-opts': {'host': front_tls.get('server_name'),
+                                    'password': front['password'],
+                                    'version': front.get('version', 3)},
+                    # ShadowTLS is TCP-only, and UDP to entry:443 is the
+                    # hy2 DNAT — an SS UDP relay there would be garbage.
+                    'udp': False,
+                })
+            return proxy
+        return None
 
     # ---------- Routing rule sets (RU bypass / proxy allow-list) ----------
 

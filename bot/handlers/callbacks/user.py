@@ -245,6 +245,47 @@ class PlatformSelectHandler(BaseCallbackHandler):
             return Platform.OTHER
 
 
+def client_choice_text(url: str, lang: str) -> str:
+    """The two-client choice for Android / PC: Hiddify (simpler) or
+    FlClash (applies our routing — Hiddify keeps only the servers of a
+    profile and drops its rules, see SubscriptionService.
+    build_clash_config). Same subscription; FlClash gets the Clash form.
+    Shared by the key card and /sub."""
+    clash = html.escape(f'{url}?format=clash')
+    url = html.escape(url)
+    if lang == 'en':
+        return (
+            "<b>1. Hiddify</b> — simpler: a regular app, works right away.\n"
+            f"<code>{url}</code>\n"
+            "Hiddify: <b>+ → Add from URL → paste</b> → Connect.\n\n"
+            "<b>2. FlClash</b> — works better: our routing applies in full — "
+            "Telegram calls get the right protocol, YouTube and Instagram "
+            "always go through the VPN, Russian sites go direct. Installed "
+            "from the official site (it is not on Google Play).\n"
+            f"<code>{clash}</code>\n"
+            "FlClash: <b>Profiles → + → URL → paste</b> → turn on."
+        )
+    return (
+        "<b>1. Hiddify</b> — проще: обычное приложение, работает сразу.\n"
+        f"<code>{url}</code>\n"
+        "В Hiddify: <b>+ → Добавить из ссылки → вставить</b> → «Подключить».\n\n"
+        "<b>2. FlClash</b> — работает лучше: наши правила действуют "
+        "полностью — звонки в Telegram идут через подходящий протокол, "
+        "YouTube и Instagram всегда через VPN, российские сайты напрямую. "
+        "Ставится с официального сайта (в Google Play его нет).\n"
+        f"<code>{clash}</code>\n"
+        "В FlClash: <b>Профили → + → URL → вставить</b> → включить."
+    )
+
+
+def client_download_row() -> list:
+    """Official download pages of both clients (never a Play link for
+    FlClash — there is no official one)."""
+    from bot.config.constants import FLCLASH_DOWNLOAD_URL, HIDDIFY_DOWNLOAD_URL
+    return [{'text': '⬇️ Hiddify', 'url': HIDDIFY_DOWNLOAD_URL},
+            {'text': '⬇️ FlClash', 'url': FLCLASH_DOWNLOAD_URL}]
+
+
 def build_key_delivery_message(user, config) -> tuple:
     """    (text, keyboard) for the platform/lang-aware key delivery message.
 
@@ -293,27 +334,17 @@ def build_key_delivery_message(user, config) -> tuple:
     elif lang == 'en':
         text = (
             "✅ <b>Your VPN is ready</b>\n\n"
-            "1. Install Hiddify: https://hiddify.com/\n"
-            "2. Add this subscription URL — tap the link below to copy:\n\n"
-            f"<code>{url}</code>\n\n"
-            "3. In Hiddify: <b>+ → Add from URL → paste → Save</b>\n"
-            "4. Tap «Connect». The client picks the working outbound "
-            "automatically and switches if something dies.\n\n"
-            "💡 Don't change settings — ECH is already on, RU sites "
-            "bypass the VPN, foreign sites tunnel through us.\n\n"
+            "Pick an app — one subscription works in both:\n\n"
+        ) + client_choice_text(url, 'en') + (
+            "\n\n💡 The subscription refreshes itself — nothing to re-import.\n\n"
             "Need a raw single-protocol key (legacy client)? Send /raw."
         )
     else:
         text = (
             "✅ <b>Твой VPN готов</b>\n\n"
-            "1. Установи Hiddify: https://hiddify.com/\n"
-            "2. Добавь subscription URL — тапни по ссылке чтобы скопировать:\n\n"
-            f"<code>{url}</code>\n\n"
-            "3. В Hiddify: <b>+ → Добавить из ссылки → вставить → Сохранить</b>\n"
-            "4. Нажми «Подключить». Клиент сам выбирает рабочий "
-            "протокол и переключается если что-то падает.\n\n"
-            "💡 Ничего настраивать не надо — ECH уже включён, RU-сайты "
-            "идут напрямую, заграничные — через нас.\n\n"
+            "Выбери приложение — подписка одна, подходит к обоим:\n\n"
+        ) + client_choice_text(url, 'ru') + (
+            "\n\n💡 Подписка сама обновляется — переимпортировать ничего не надо.\n\n"
             "Нужен сырой ключ одного протокола для legacy-клиента? /raw"
         )
     btn_label = ("🆘 Не подключается? Сообщить" if lang == 'ru'
@@ -330,6 +361,8 @@ def build_key_delivery_message(user, config) -> tuple:
          {'text': '💻 ПК', 'callback_data': 'setplat:windows'}],
         [{'text': btn_label, 'callback_data': 'report_failure'}]
     ]}
+    if not is_ios:
+        keyboard['inline_keyboard'].insert(0, client_download_row())
     return text, keyboard
 
 
