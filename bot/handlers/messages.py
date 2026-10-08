@@ -18,6 +18,13 @@ logger = logging.getLogger(__name__)
 PENDING_EMAIL: dict = {}
 PENDING_EMAIL_TTL = 600  # seconds
 
+# chat_id → ts of the "📝 Другой сайт" tap in the 🆘 picker: the next
+# plain-text message names the site that does not open (IMPROVEMENT_PLAN
+# E2, bot/handlers/callbacks/rule_lists.py). Arming one prompt disarms
+# the other — the next message answers the latest tap.
+PENDING_SITE: dict = {}
+PENDING_SITE_TTL = 600  # seconds
+
 
 class MessageHandler(BaseHandler):
     """Handler for text messages from users."""
@@ -70,6 +77,10 @@ class MessageHandler(BaseHandler):
         if self._maybe_handle_pending_email(chat_id, text, user):
             return
 
+        # Pending "📝 другой сайт" prompt → this message names the site.
+        if self._maybe_handle_pending_site(chat_id, text, user):
+            return
+
         # Check if this is an admin PM reply
         if self._is_admin(chat_id) and 'reply_to_message' in message:
             self.handle_admin_reply(update)
@@ -117,6 +128,14 @@ class MessageHandler(BaseHandler):
         self.bot.send_message(chat_id=chat_id, text=msg)
         logger.info(f"User {chat_id} set contact email via pending prompt")
         return True
+
+    def _maybe_handle_pending_site(self, chat_id: str, text: str, user) -> bool:
+        """Consume a pending "📝 другой сайт" prompt (see PENDING_SITE)."""
+        if chat_id not in PENDING_SITE:
+            return False
+        from bot.handlers.callbacks.rule_lists import SiteReportFlow
+        return SiteReportFlow(self.bot, self.db, self.config).consume_pending(
+            chat_id, text, user)
 
     def handle_admin_reply(self, update: dict) -> None:
         """Handle admin replying to a user's forwarded message in PM mode."""

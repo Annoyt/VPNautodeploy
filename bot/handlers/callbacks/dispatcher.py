@@ -37,6 +37,7 @@ from bot.handlers.callbacks.admin import (
     MailRequestHandler,
 )
 from bot.handlers.callbacks.ai_model import AiModelSelectHandler
+from bot.handlers.callbacks.rule_lists import ReportSiteHandler, RuleListQueueHandler
 
 if TYPE_CHECKING:
     from bot.core.bot import Bot
@@ -82,6 +83,8 @@ class CallbackDispatcher:
         # roll off-screen.  Both must precede SupportRequestHandler so
         # their prefixes aren't swallowed by the support pattern.
         self.handlers.append(MyKeyAnswerHandler(self.bot, self.db, self.config))
+        # «📝 Другой сайт» from the 🆘 picker (IMPROVEMENT_PLAN E2).
+        self.handlers.append(ReportSiteHandler(self.bot, self.db, self.config))
         self.handlers.append(TryAltProtocolHandler(self.bot, self.db, self.config))
         self.handlers.append(SupportRequestHandler(self.bot, self.db, self.config))
         self.handlers.append(EmailPromptHandler(self.bot, self.db, self.config))
@@ -101,6 +104,8 @@ class CallbackDispatcher:
         self.handlers.append(BanFromTicketHandler(self.bot, self.db, self.config))
         self.handlers.append(AlertAckHandler(self.bot, self.db, self.config))
         self.handlers.append(MailRequestHandler(self.bot, self.db, self.config))
+        # «➕ в blocked-recent» / «✖ игнор» on site complaint cards (admin-only).
+        self.handlers.append(RuleListQueueHandler(self.bot, self.db, self.config))
         self.handlers.append(AiModelSelectHandler(self.bot, self.db, self.config))
 
         logger.info(f"Registered {len(self.handlers)} callback handlers")

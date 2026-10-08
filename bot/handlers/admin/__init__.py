@@ -14,9 +14,11 @@ from .users import AdminUsersMixin
 from .broadcast import AdminBroadcastMixin
 from .stats import AdminStatsMixin
 from .ops import AdminOpsMixin
+from .lists import AdminListsMixin
 
 
-class AdminHandler(AdminUsersMixin, AdminBroadcastMixin, AdminStatsMixin, AdminOpsMixin):
+class AdminHandler(AdminUsersMixin, AdminBroadcastMixin, AdminStatsMixin, AdminOpsMixin,
+                   AdminListsMixin):
     """Main admin handler combining all mixin functionality.
 
     Modular design (replaces the original 722-line admin.py):
@@ -27,6 +29,7 @@ class AdminHandler(AdminUsersMixin, AdminBroadcastMixin, AdminStatsMixin, AdminO
     - AdminStatsMixin: /stats, /users, /users_all, /pending, /backup
     - AdminOpsMixin: /status, /whoami, /onlines, /find, /recent, /repair_stuck,
       /topics, /quota, /expire
+    - AdminListsMixin: /list (FlClash rule lists + complaints queue)
     """
 
     # Admin command routing table (inherited from AdminHandlerBase via mixins)
@@ -47,4 +50,5 @@ __all__ = [
     'AdminBroadcastMixin',
     'AdminStatsMixin',
     'AdminOpsMixin',
+    'AdminListsMixin',
 ]

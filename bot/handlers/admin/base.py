@@ -27,6 +27,10 @@ ADMIN_HELP_TEXT = (
     "• <code>/lockdown</code> — режим белых списков (шатдаун): статус, "
     "детектор, каскады; <code>/lockdown on</code> / <code>off</code> / "
     "<code>auto</code> — зафиксировать / вернуть детектору\n"
+    "• <code>/list</code> — списки правил FlClash (always-proxy, blocked-recent, "
+    "ru-direct, ru-direct-ip) + жалобы «сайт не открывается»; "
+    "<code>/list show|add|rm &lt;список&gt; …</code>, "
+    "<code>/list auto N|off</code> — порог авто-добавления\n"
     "• <code>/stats</code> — статистика по юзерам / трафику\n"
     "• <code>/onlines</code> — кто онлайн (lastOnline панели, hy2 тоже), "
     "на каком протоколе + трафик\n"
@@ -135,6 +139,10 @@ class AdminHandlerBase(BaseHandler):
         # B1): the detector in DPIMonitor's tick raises it on its own;
         # the operator pins it on/off or hands it back here.
         '/lockdown': 'show_lockdown',
+        # FlClash rule lists (rule-providers) + the users' "site does not
+        # open" queue — added 2026-10 (IMPROVEMENT_PLAN E1/E2/E9; mixin:
+        # lists.py).
+        '/list': 'show_rule_lists',
         '/whoami': 'show_whoami',
         '/onlines': 'show_onlines',
         '/find': 'find_user',

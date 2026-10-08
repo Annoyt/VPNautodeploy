@@ -1084,6 +1084,10 @@ class MyKeyAnswerHandler(BaseCallbackHandler):
             buttons.append({'text': label, 'callback_data': f'report_target:{key}'})
         # Two columns for cleaner layout
         keyboard = {'inline_keyboard': [buttons[i:i+2] for i in range(0, len(buttons), 2)]}
+        # «📝 Другой сайт» — a named site goes to the rule-list queue
+        # (IMPROVEMENT_PLAN E2), not into the failure-report heatmap.
+        from bot.handlers.callbacks.rule_lists import site_button
+        keyboard['inline_keyboard'].append([site_button(lang)])
         self.bot.send_message(
             chat_id=chat_id, text=prompt, parse_mode='HTML', reply_markup=keyboard,
             message_thread_id=thread_id,
@@ -1795,11 +1799,13 @@ class EmailPromptHandler(BaseCallbackHandler):
         fallback (ziriki, 2026-07-25).
         """
         import time as _time
-        from bot.handlers.messages import PENDING_EMAIL
+        from bot.handlers.messages import PENDING_EMAIL, PENDING_SITE
 
         user = self.db.get_user(chat_id)
         lang = user.lang if user else 'ru'
         PENDING_EMAIL[chat_id] = _time.time()
+        # one prompt at a time: the next message answers the latest tap
+        PENDING_SITE.pop(chat_id, None)
 
         if lang == 'en':
             text = (
