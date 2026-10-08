@@ -124,6 +124,11 @@ class WebAppServer:
         # refreshes on a schedule; rotates IPs/paths without user
         # action.
         self.app.router.add_get('/sub/{token}', self.handle_subscription)
+        # Rule lists for Clash/mihomo clients (IMPROVEMENT_PLAN E1). Public
+        # like /sub — the Clash profile points its rule-providers here and
+        # FlClash pulls them hourly. Not /rule-sets/: that prefix is the
+        # .srs mirror for sing-box (Caddy may serve it statically).
+        self.app.router.add_get('/lists/clash/{name}.yaml', self.handle_rule_list)
         
         # Admin — read
         self.app.router.add_get('/api/admin/users', self.handle_admin_users)
@@ -1113,6 +1118,24 @@ class WebAppServer:
                 text=text_body, content_type='text/plain', headers=headers,
             )
         return web.json_response(config_obj, headers=headers)
+
+    async def handle_rule_list(self, request: web.Request) -> web.Response:
+        """One rule list as a mihomo rule-provider file (``format: yaml``).
+
+        404 for an unknown name; 503 while the lists cannot be read — a
+        failed fetch leaves the client its cached copy, an empty answer
+        would drop it until the next interval. ``max-age=300`` keeps a
+        burst of client refreshes off the database.
+        """
+        from bot.services import rule_lists
+        name = request.match_info.get('name', '')
+        status, body = await asyncio.to_thread(rule_lists.serve_provider, self.db, name)
+        if status != 200:
+            return web.Response(status=status, text=body)
+        return web.Response(
+            text=body, content_type='text/yaml',
+            headers={'Cache-Control': f'max-age={rule_lists.PROVIDER_CACHE_MAX_AGE_S}'},
+        )
 
     # ==================== Admin — Read ====================
 

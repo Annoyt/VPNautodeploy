@@ -30,6 +30,7 @@ from bot.services.fallback_node import (
     FALLBACK_ALLOWED_STATUSES,
     FallbackNodeService,
 )
+from bot.services import rule_lists
 
 logger = logging.getLogger(__name__)
 
@@ -597,6 +598,13 @@ class SubscriptionService:
         Not carried over: TLS ClientHello fragmentation — mihomo has no
         such option (sing-box ``tls.fragment`` on Reality / ws / stls).
         Emitted as JSON — a YAML 1.2 subset mihomo parses as a profile.
+
+        With WEBAPP_URL set the profile also points at the bot's rule
+        lists (``bot/services/rule_lists.py``, IMPROVEMENT_PLAN E1): one
+        ``rule-provider`` per list, refreshed hourly by the client — the
+        profile itself only daily — so a list change reaches FlClash
+        without a profile update. Without WEBAPP_URL there is nothing to
+        point at and the profile is exactly what it was before E1.
         """
         outbounds, proxy_tags, udp_call_tags = self._collect_outbounds(
             user, enabled_protocols,
@@ -661,27 +669,53 @@ class SubscriptionService:
             },
             'proxies': proxies,
             'proxy-groups': groups,
-            'rules': self._clash_rules('Calls' if calls else 'VPN'),
         }
+        providers = self._clash_rule_providers()
+        if providers:
+            config['rule-providers'] = providers
+        config['rules'] = self._clash_rules('Calls' if calls else 'VPN',
+                                            lists=bool(providers))
         return json.dumps(config, ensure_ascii=False, indent=1)
 
-    def _clash_rules(self, udp_out: str) -> List[str]:
+    def _clash_rule_providers(self) -> dict:
+        """The bot's rule lists as http ``rule-providers`` (E1), or ``{}``
+        when the bot does not know its public URL."""
+        base = getattr(self.config, 'WEBAPP_URL', '') or ''
+        if not isinstance(base, str) or not base.strip():
+            return {}
+        return rule_lists.clash_rule_providers(base)
+
+    def _clash_rules(self, udp_out: str, lists: bool = False) -> List[str]:
         """``_build_route_rules`` in Clash form, same order (first match
         wins): RU QUIC:443 direct (the VK "VPN detected" banner), every
         other UDP to the UDP-native group (Telegram calls), Telegram by
-        IP, max.ru direct, the always-proxy list, RU direct, rest VPN."""
+        IP, max.ru direct, the always-proxy list, RU direct, rest VPN.
+
+        ``lists`` (E1): the bot's lists join their neighbours — the VPN
+        lists right before the always-proxy geosites, the DIRECT lists
+        right before ``category-ru``, ru-direct also in the QUIC:443
+        carve-out. The operator's lists beat the generic databases, and
+        a VPN list beats a DIRECT one."""
         ru_quic = [f'AND,((NETWORK,UDP),(DST-PORT,443),({m})),DIRECT'
                    for m in ('GEOSITE,category-ru', 'GEOIP,RU')]
         tg = [f'IP-CIDR{"6" if ":" in c else ""},{c},VPN,no-resolve'
               for c in self._TELEGRAM_IP_CIDRS]
         always_proxy = [f'GEOSITE,{t.split("-", 1)[1]},VPN'
                         for t in self._PROXY_RULE_SET_TAGS]
+        list_vpn: List[str] = []
+        list_direct: List[str] = []
+        if lists:
+            ru_quic += rule_lists.clash_quic_direct_rules()
+            list_vpn = rule_lists.clash_list_rules('VPN')
+            list_direct = rule_lists.clash_list_rules('DIRECT')
         return (
             ru_quic
             + [f'NETWORK,UDP,{udp_out}']
             + tg
             + ['DOMAIN-SUFFIX,max.ru,DIRECT']
+            + list_vpn
             + always_proxy
+            + list_direct
             + ['GEOSITE,category-ru,DIRECT', 'GEOIP,RU,DIRECT', 'MATCH,VPN']
         )
 
