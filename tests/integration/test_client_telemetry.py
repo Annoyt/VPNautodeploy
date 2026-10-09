@@ -344,3 +344,121 @@ class TestProbeEndpoint:
                 await _flush(srv)
         assert _rows(db, "SELECT chat_id, grp FROM client_probe ORDER BY rowid") == [
             ('1', 'p-hy2'), ('1', 'p-ws')]
+
+
+# =====================================================================
+# mihomo itself, when the image is on this machine (never pulled here).
+# CI deselects by marker; elsewhere it skips without the image/geodata.
+# =====================================================================
+
+MIHOMO_IMAGE = 'metacubex/mihomo:latest'
+
+
+def _mihomo_ready():
+    import shutil
+    import subprocess
+    import tempfile
+    from pathlib import Path
+    geo = Path(tempfile.gettempdir()) / 'nekovpn-test-cache' / 'mihomo'
+    if not (shutil.which('docker') and (geo / 'GeoSite.dat').exists()):
+        return None
+    try:
+        ok = subprocess.run(['docker', 'image', 'inspect', MIHOMO_IMAGE],
+                            capture_output=True, timeout=20).returncode == 0
+    except Exception:
+        return None
+    return geo if ok else None
+
+
+class TestMihomo:
+
+    @pytest.mark.requires_docker
+    def test_unused_telemetry_providers_are_loaded_and_checked(self, tmp_path):
+        """The bot's real profile, served by its real WebAppServer on
+        127.0.0.1: mihomo fetches every p-<proto> provider DIRECT from
+        ``?only=`` (one server each, ``[P] `` prefix), runs their load-time
+        health check although no group uses them, and no group shows them.
+        (The servers are fake, so the checks fail; that they RUN is the
+        point. Per-interval checks of an unused provider need lazy: false —
+        verified by hand on 1.19.32, see _clash_telemetry_providers.)"""
+        geo = _mihomo_ready()
+        if geo is None:
+            pytest.skip('mihomo image or cached geodata not available')
+        import shutil
+        import socket
+        import subprocess
+        import threading
+        import time
+        import urllib.request
+        from aiohttp import web
+
+        def free_port():
+            with socket.socket() as s:
+                s.bind(('127.0.0.1', 0))
+                return s.getsockname()[1]
+
+        port, ctl = free_port(), free_port()
+        # keys mihomo can parse (it refuses a profile with a malformed one)
+        key = '4bRlZyNH8VVqnRd3w6M_sYC6a1VKyXUvt5BBvXmnmHE'
+        config = make_config(WEBAPP_URL=f'http://127.0.0.1:{port}',
+                             **{**FALLBACK, 'FALLBACK_NODE_PBK': key}, **HY2T,
+                             REALITY_PUBLIC_KEY=key,
+                             SS_SERVER_PASSWORD='c3J2LXB3LTE2Ynl0ZXMhIQ==')
+        srv, _db = _server(tmp_path, config=config)
+        _db.set_setting('cascade_protocol_order', '')          # every protocol, hy2t too
+        loop = asyncio.new_event_loop()
+        runner = web.AppRunner(srv.app)
+        loop.run_until_complete(runner.setup())
+        loop.run_until_complete(web.TCPSite(runner, '127.0.0.1', port).start())
+        threading.Thread(target=loop.run_forever, daemon=True).start()
+        home = tmp_path / 'mihomo'
+        home.mkdir()
+        for name in ('GeoSite.dat', 'geoip.metadb'):
+            if (geo / name).exists():
+                shutil.copy(geo / name, home / name)
+        token = srv.subscription.derive_token(UUID)
+        profile = json.loads(urllib.request.urlopen(
+            f'http://127.0.0.1:{port}/sub/{token}?format=clash', timeout=10).read())
+        expected = {f'p-{p}': f'[P] {NAME[p]}'
+                    for p in ('hy2t', 'stls', 'ws', 'hy2', 'reality', 'de')}
+        assert set(_telemetry(profile)) == set(expected)
+        profile['external-controller'] = f'127.0.0.1:{ctl}'      # the test's eyes only
+        (home / 'config.yaml').write_text(json.dumps(profile))
+        name = f'e8-telemetry-test-{ctl}'
+        proc = subprocess.Popen(
+            ['docker', 'run', '--rm', '--name', name, '--network', 'host',
+             '-v', f'{home}:/root/.config/mihomo', MIHOMO_IMAGE, '-d', '/root/.config/mihomo'],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            providers = {}
+            deadline = time.monotonic() + 40
+            while time.monotonic() < deadline:
+                time.sleep(0.5)
+                try:
+                    providers = json.loads(urllib.request.urlopen(
+                        f'http://127.0.0.1:{ctl}/providers/proxies', timeout=2).read()
+                    )['providers']
+                except Exception:
+                    continue
+                if all((providers.get(p) or {}).get('proxies')
+                       and all(x.get('history') for x in providers[p]['proxies'])
+                       for p in expected):
+                    break
+            for prov, proxy_name in expected.items():
+                got = providers[prov]
+                assert got['vehicleType'] == 'HTTP', prov
+                assert [x['name'] for x in got['proxies']] == [proxy_name], prov
+                assert got['proxies'][0]['history'], f'{prov}: never health-checked'
+            groups = json.loads(urllib.request.urlopen(
+                f'http://127.0.0.1:{ctl}/proxies', timeout=2).read())['proxies']
+            for group in ('VPN', 'Cascade', 'Auto', 'Calls'):
+                assert not [n for n in groups[group]['all'] if n.startswith('[P] ')], group
+        finally:
+            subprocess.run(['docker', 'stop', '-t', '1', name], capture_output=True)
+            proc.wait(timeout=30)
+            asyncio.run_coroutine_threadsafe(runner.cleanup(), loop).result(10)
+            loop.call_soon_threadsafe(loop.stop)
+            # mihomo wrote its caches as root: hand them back to the cleanup
+            subprocess.run(['docker', 'run', '--rm', '--entrypoint', 'sh', '-v',
+                            f'{home}:/w', MIHOMO_IMAGE, '-c', 'rm -rf /w/*'],
+                           capture_output=True, timeout=60)
