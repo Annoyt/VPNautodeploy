@@ -45,14 +45,17 @@ def _hermetic_geoip(monkeypatch, tmp_path_factory):
 
 @pytest.fixture(autouse=True)
 def _fresh_fallback_membership_cache():
-    """FallbackNodeService keeps its panel-membership cache on the class —
-    one per process, as in prod, where /sub builds a new service per
-    request. A check cached by one test must not answer for the next."""
+    """FallbackNodeService keeps its panel-membership cache and its panel
+    skip window on the class — one per process, as in prod, where /sub
+    builds a new service per request. A check cached, or a panel found
+    dead, by one test must not answer for the next."""
     from bot.services.fallback_node import FallbackNodeService
 
     FallbackNodeService._ensure_cache.clear()
+    FallbackNodeService._panel_skip_until = 0.0
     yield
     FallbackNodeService._ensure_cache.clear()
+    FallbackNodeService._panel_skip_until = 0.0
 
 
 @pytest.fixture
