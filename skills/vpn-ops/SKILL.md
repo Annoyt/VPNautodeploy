@@ -155,10 +155,13 @@ Rules that make or break this repair:
 
 The protocol order users get from `/sub`, the key card and `?format=links` is **no longer only the operator's
 setting**. `bot/services/dpi_monitor.py` runs inside the bot every 10 min and moves a protocol to the END of the
-order (it never removes one) when the data says it is failing: probes DARK/DEGRADED → globally; a Reality
-handshake-fail storm in `dpi_metrics` for one ASN, a hy2-auth reconnect storm from a user of that ASN, or ≥2
-"не работает" reports from one ASN → for that ASN only. It restores the protocol by itself after ~1 h of clean
-signals. So, BEFORE you "fix" an order that looks wrong:
+order (it never removes one) when the data says it is failing: probes DARK/DEGRADED → globally; the users' own
+FlClash clients (since 2026-10-09: ≥3 clients of one ASN get through other protocols but not this one for 2 h,
+none get through it — `client_probe` rows `p-<proto>`), a Reality handshake-fail storm in `dpi_metrics` for one
+ASN, a hy2-auth reconnect storm from a user of that ASN, or ≥2 "не работает" reports from one ASN → for that ASN
+only. It restores the protocol by itself after ~1 h of clean signals. A `client_dark` demotion also writes once a
+day to that ASN's users who were using the protocol ("перестал работать … обновите профиль / /sos" —
+`admin_actions` action `reverse_sos`, one line in the AI topic). So, BEFORE you "fix" an order that looks wrong:
 
 1. **A protocol at the end, or an ASN with its own order, is a finding with a stored reason — read it first.** The
    admin runs `/cascade` (or `/cascade AS31133`) in Telegram; you read the same thing from bot.db, read-only:
@@ -171,7 +174,7 @@ signals. So, BEFORE you "fix" an order that looks wrong:
    "
    ```
    `cascade_auto` holds every ACTIVE auto-demotion (`global` + per-`asn`) with `since`, `reason` (the rule id:
-   `probe_dark` / `probe_degraded` / `reality_asn` / `udp_storm_asn` / `user_reports_asn`) and `evidence` (the
+   `probe_dark` / `probe_degraded` / `client_dark` / `reality_asn` / `udp_storm_asn` / `user_reports_asn`) and `evidence` (the
    human line with the numbers);
    `admin_actions` rows by `dpi_monitor` (`cascade_auto_demote` / `cascade_auto_restore`) are the history; the AI
    topic got one message per run that changed something.
