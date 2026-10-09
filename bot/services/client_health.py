@@ -21,30 +21,44 @@ Per ASN, over the window:
 * per protocol P:
 
   * ``alive`` — clients with a ``p-P`` row;
-  * ``dead``  — clients P is OFFERED to that have rows on other protocols
-    but none on P: their client is up and checking, P does not answer;
+  * ``dead``  — clients whose profile carries P that have rows on other
+    protocols but none on P: their client is up and checking, P does not
+    answer;
   * ``rate``  — ``alive / (alive + dead)``; ``None`` when both are 0.
 
-"Offered" is the tier gate the profile is built with: ``PROTOCOL_TIER`` /
-``PAID_USER_STATUSES`` of ``MyKeyAnswerHandler`` and the DE reserve's
+"Whose profile carries P" (``offer_rules``) is what /sub builds: an active
+status (demo / paid / support_topic — /sub answers 410 to the rest), P
+enabled in the operator's cascade, and the tier — ``PROTOCOL_TIER`` /
+``PAID_USER_STATUSES`` of ``MyKeyAnswerHandler``, the DE reserve's
 ``FALLBACK_ALLOWED_STATUSES``. A demo profile carries no Reality, no Turbo
-Hy2 and no reserve, so a demo client without those rows is not a failure;
-without the gate every paid-only protocol would read as the paid share of
-the base (most of it is demo). Free-tier protocols, and any protocol this
-code does not know, are offered to everyone. ``users.status`` is the
-CURRENT status: a client upgraded inside the window starts probing its new
-protocols only after its next profile refresh.
+Hy2 and no reserve: without the gate every paid-only protocol would read as
+the paid share of the base (most of it is demo), and a protocol the
+operator switched off as dead for everyone who refreshed. A protocol this
+code does not know is taken as carried for every active client.
+``users.status`` is the CURRENT status: a client upgraded inside the window
+starts probing its new protocols only after its next profile refresh.
 
-The matrix comes from ONE query — a row per (client, group) in the window,
-joined to users — never a query per operator or per protocol.
+A success through the DE reserve counts as "the client is up" here, so a
+client that gets through ONLY via the reserve is dead on every main
+protocol it carries — what an operator cutting the whole cascade (say,
+blocking the entry IP) looks like. A rule deciding whether REORDERING the
+cascade helps may rightly read such a client as no signal; alive and the
+gate above must still mean the same there (AGENTS.md §35).
+
+The matrix comes from ONE query over client_probe — a row per (client,
+group) in the window, joined to users — plus the cascade setting; never a
+query per operator or per protocol.
 """
 
+import logging
 import re
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from typing import Iterable, Optional
 
 from bot.services.fallback_node import FALLBACK_ALLOWED_STATUSES
+
+logger = logging.getLogger(__name__)
 
 # The windows the dashboard offers, in hours. Anything else is refused:
 # the query scans the window, so an arbitrary window is an arbitrary scan.
@@ -66,6 +80,10 @@ MAX_ROWS = 200
 
 # client_probe.ts is sqlite's CURRENT_TIMESTAMP: UTC with a SPACE.
 _TS_FORMAT = '%Y-%m-%d %H:%M:%S'
+
+# The statuses /sub serves a profile to (it answers 410 to the rest) —
+# sos.SOS_STATUSES / GetKeyHandler._KEY_ALLOWED_STATUSES spell the same set.
+ACTIVE_STATUSES = frozenset({'demo', 'paid', 'support_topic'})
 
 PAIRS_SQL = (
     "SELECT p.chat_id, p.grp, p.last_ts, u.last_asn, u.last_country, u.status "
@@ -103,14 +121,26 @@ def protocol_of(grp) -> Optional[str]:
     return name if _PROTOCOL_RE.fullmatch(name) else None
 
 
-def offer_rules() -> dict:
-    """``{protocol: statuses it is offered to}``. A protocol missing from
-    the map (free tier, or one this code does not know) is offered to
-    every client."""
+def offer_rules(db=None) -> dict:
+    """``{protocol: statuses whose profile carries it}``. With ``db`` a
+    cascade protocol the operator switched off is carried by nobody; a
+    protocol missing from the map (one this code does not know) is
+    carried for every ACTIVE status (``summarize``'s default)."""
     from bot.handlers.callbacks.user import MyKeyAnswerHandler as MK
-    paid = frozenset(MK.PAID_USER_STATUSES)
-    rules = {p: paid for p, tier in MK.PROTOCOL_TIER.items() if tier != 'free'}
-    rules['de'] = frozenset(FALLBACK_ALLOWED_STATUSES)
+    enabled = None
+    if db is not None:
+        try:
+            enabled = {c['name'] for c in MK.get_cascade_config(db) if c.get('enabled')}
+        except Exception as e:      # the matrix is still worth showing
+            logger.warning(f"client_health: cascade config unreadable: {e}")
+    paid = frozenset(MK.PAID_USER_STATUSES) & ACTIVE_STATUSES
+    rules = {}
+    for p, tier in MK.PROTOCOL_TIER.items():
+        if enabled is not None and p not in enabled:
+            rules[p] = frozenset()
+        else:
+            rules[p] = ACTIVE_STATUSES if tier == 'free' else paid
+    rules['de'] = frozenset(FALLBACK_ALLOWED_STATUSES) & ACTIVE_STATUSES
     return rules
 
 
@@ -158,7 +188,7 @@ def _add(group: dict, client: dict, protocols: list, rules: dict) -> None:
         if p in seen:
             cell['alive'] += 1
             cell['last_ts'] = _later(cell['last_ts'], seen[p])
-        elif p not in rules or client['status'] in rules[p]:
+        elif client['status'] in rules.get(p, ACTIVE_STATUSES):
             cell['dead'] += 1
 
 
@@ -242,6 +272,6 @@ def collect(db, hours: int, *, now: Optional[datetime] = None,
                  conn.execute(PAIRS_SQL, (since, max_pairs + 1)).fetchall()]
     finally:
         conn.close()
-    out = summarize(pairs[:max_pairs], max_rows=max_rows)
+    out = summarize(pairs[:max_pairs], rules=offer_rules(db), max_rows=max_rows)
     out.update(hours=hours, since=since, truncated=len(pairs) > max_pairs)
     return out

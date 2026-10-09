@@ -10,18 +10,21 @@ Pinned:
 
 * rate = alive / (alive + dead) — not over every client of the operator;
 * dead = rows on OTHER protocols in the window, none on this one, and the
-  protocol is offered to the client's tier (a demo profile carries no
-  Reality / Turbo Hy2 / DE reserve);
+  client's profile carries the protocol: an active status, enabled by the
+  operator, the tier (a demo profile has no Reality / Turbo Hy2 / DE);
+  a success through the DE reserve counts as "the client is up";
 * channels (emergency, mirror-<n>) make a client count, never a protocol
   and never evidence that one failed;
 * NULL / blank ASN and clients without a users row → the unknown group,
   listed last;
 * the window is ``ts >= now - hours`` in client_probe's own format;
-* one SQL statement per request, whatever the number of operators;
+* one statement over client_probe per request (plus the cascade setting),
+  whatever the number of operators;
 * hours ∈ {1, 6, 24, 168} (default 24), anything else → 400; 401 without
   an admin.
 """
 
+import json
 from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock
 
@@ -152,8 +155,9 @@ class TestDead:
     def test_tier_gate(self, db):
         """Each client checks ws only. Paid-only protocols (reality, hy2t)
         and the DE reserve are dead for paid / support_topic only — a demo
-        profile, or a client without a users row, never had them; the free
-        hy2 is dead for everyone."""
+        profile never had them; the free hy2 is dead for every active
+        client. A client without a users row gets no profile from /sub:
+        alive counts, dead never does."""
         user(db, 'paid', status='paid')
         user(db, 'sup', status='support_topic')
         user(db, 'demo', status='demo')
@@ -171,14 +175,61 @@ class TestDead:
         ghost = row(data, None)
         assert ad(ghost['protocols']['reality']) == (0, 0)
         assert ad(ghost['protocols']['de']) == (0, 0)
-        assert ad(ghost['protocols']['hy2']) == (0, 1)
+        assert ad(ghost['protocols']['hy2']) == (0, 0)
+        assert ad(ghost['protocols']['ws']) == (1, 0)
         assert ad(data['total']['protocols']['reality']) == (1, 2)
-        assert ad(data['total']['protocols']['hy2']) == (1, 4)
+        assert ad(data['total']['protocols']['hy2']) == (1, 3)
 
-    def test_unknown_protocol_is_offered_to_everyone(self, db):
-        user(db, '1', status='demo')
+    @pytest.mark.parametrize('status', ['new', 'pending_demo', 'platform_select',
+                                        'rejected', 'banned', None])
+    def test_only_active_clients_can_be_dead(self, db, status):
+        """/sub serves demo / paid / support_topic only (410 for the rest):
+        a client in any other status keeps whatever profile it had, and
+        its silence on a protocol says nothing."""
+        user(db, '1', status=status)
+        user(db, '2', status='paid')
+        probes(db, ('1', 'p-ws', ago(hours=1)),
+               ('2', 'p-ws', ago(hours=1)), ('2', 'p-hy2', ago(hours=1)))
+        r = row(matrix(db), 'AS31133')
+        assert (r['clients'], r['probed']) == (2, 2)
+        assert ad(r['protocols']['ws']) == (2, 0)
+        assert ad(r['protocols']['hy2']) == (1, 0)
+
+    def test_protocol_switched_off_is_dead_for_nobody(self, db):
+        """The operator disabled reality in the cascade: refreshed profiles
+        no longer carry it. A stale profile still answering is alive; the
+        others are not dead on it."""
+        db.set_setting('cascade_protocol_order', json.dumps(
+            [{'name': 'reality', 'enabled': False}, {'name': 'ws', 'enabled': True}]))
+        for cid in ('1', '2', '3'):
+            user(db, cid)
+        probes(db, ('1', 'p-reality', ago(hours=1)), ('1', 'p-ws', ago(hours=1)),
+               ('2', 'p-ws', ago(hours=1)), ('3', 'p-ws', ago(hours=1)))
+        r = row(matrix(db), 'AS31133')
+        assert ad(r['protocols']['reality']) == (1, 0)
+        db.set_setting('cascade_protocol_order', json.dumps(
+            [{'name': 'reality', 'enabled': True}]))
+        assert ad(cell(matrix(db), 'AS31133', 'reality')) == (1, 2)
+
+    def test_the_reserve_counts_as_up(self, db):
+        """A paid client getting through ONLY via the DE reserve is dead on
+        every main protocol its profile carries: the whole cascade is cut
+        for it (an operator blocking the entry IP looks exactly so)."""
+        user(db, '1')
         user(db, '2', asn='AS8359')
-        probes(db, ('1', 'p-ws', ago(hours=1)), ('2', 'p-xhttp', ago(hours=1)))
+        probes(db, ('1', 'p-de', ago(hours=1)),
+               *[('2', g, ago(hours=1)) for g in ('p-reality', 'p-ws', 'p-de')])
+        r = row(matrix(db), 'AS31133')
+        assert ad(r['protocols']['de']) == (1, 0)
+        assert ad(r['protocols']['reality']) == (0, 1)
+        assert ad(r['protocols']['ws']) == (0, 1)
+
+    def test_unknown_protocol_is_carried_for_every_active_client(self, db):
+        user(db, '1', status='demo')
+        user(db, '3', status='banned')
+        user(db, '2', asn='AS8359')
+        probes(db, ('1', 'p-ws', ago(hours=1)), ('3', 'p-ws', ago(hours=1)),
+               ('2', 'p-xhttp', ago(hours=1)))
         assert ad(cell(matrix(db), 'AS31133', 'xhttp')) == (0, 1)
 
     def test_old_success_does_not_count(self, db):
@@ -386,8 +437,10 @@ class TestOneQuery:
             monkeypatch.setattr(db, '_connect', real_connect)
             return [s for s in executed if s.lstrip().upper().startswith('SELECT')]
 
-        assert len(selects(1)) == 1
-        assert len(selects(10)) == 1
+        one, ten = selects(1), selects(10)
+        assert len(one) == len(ten) == 2      # client_probe + the cascade setting
+        assert sum('client_probe' in s for s in one) == 1
+        assert sum('client_probe' in s for s in ten) == 1
 
 
 # -------------------------------------------------------------- endpoint ----
