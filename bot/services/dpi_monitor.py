@@ -53,10 +53,10 @@ Hysteresis
   30 min between two changes of the same target; at most 2 changes per
   run, ranked probe_dark > probe_degraded > client_dark > reality_asn >
   udp_storm_asn > user_reports_asn with restores after demotes (the same
-  rank decides which rule owns a target two rules fire on). "good" means the RULE
-  that demoted the target is quiet this evaluation (the rule id is kept
-  in state), so a probe-demoted protocol is not restored just because
-  no user complained.
+  rank decides which rule owns a target two rules fire on). "good" means
+  the RULE that demoted the target is quiet this evaluation (the rule id
+  is kept in state), so a probe-demoted protocol is not restored just
+  because no user complained.
 
 Guards
 ------
