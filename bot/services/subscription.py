@@ -24,6 +24,7 @@ import hmac
 import json
 import logging
 import re
+from types import SimpleNamespace
 from typing import Iterable, Optional, Tuple, List, Any
 
 from bot.config import Settings
@@ -41,6 +42,21 @@ logger = logging.getLogger(__name__)
 # probe_groups``). The groups themselves check gstatic — see
 # ``SubscriptionService._CLASH_TEST_URL``.
 CLASH_PROBE_GROUPS = ('emergency',)
+
+# Per-protocol client telemetry (IMPROVEMENT_PLAN E8). The Clash profile
+# carries one proxy-provider ``p-<proto>`` per protocol it holds — the
+# cascade protocols, and ``de`` for the reserve node of paid tiers — with
+# that protocol's server only, health-checked on ``/probe/<token>/p-<proto>``.
+# A ``client_probe`` row with grp = 'p-<proto>' therefore reads "this
+# user's client got through <proto> at ts". The closed set of names is
+# ``SubscriptionService.telemetry_protocols``; the readers are DPIMonitor
+# (R6 client_dark) and the C2 dashboard.
+CLASH_TELEMETRY_PREFIX = 'p-'
+CLASH_RESERVE_PROTOCOL = 'de'
+# Any uuid works: the builders only need one to produce a server.
+_TELEMETRY_STAND_IN = SimpleNamespace(
+    uuid='00000000-0000-4000-8000-000000000000', email='telemetry@local',
+)
 
 
 class SubscriptionService:
@@ -620,6 +636,11 @@ class SubscriptionService:
     # costs little in failover and holds /probe to one hit per proxy per
     # provider per 10 min.
     _CLASH_PROVIDER_HC_INTERVAL = 600
+    # Refresh cadence of the per-protocol telemetry providers (E8): their
+    # server list only changes with the profile, the hourly fetch keeps a
+    # rotated server (new key, new port) from reading as a dark protocol
+    # for a whole day.
+    _CLASH_TELEMETRY_INTERVAL = 3600
 
     def _clash_proxies(self, user, enabled_protocols) -> tuple:
         """The cascade as mihomo proxies: ``(proxies, call_names,
@@ -642,14 +663,31 @@ class SubscriptionService:
         calls = [t for t in udp_call_tags if t in names]
         return proxies, calls, {n: protocols.get(n) for n in names}
 
-    def build_clash_proxies(self, user, enabled_protocols: Tuple[str, ...]) -> str:
+    def build_clash_proxies(
+        self,
+        user,
+        enabled_protocols: Tuple[str, ...],
+        only: Optional[str] = None,
+    ) -> str:
         """``/sub/<token>?format=clash-proxies`` — the body of the Clash
         profile's proxy-providers (E5 mirrors, E20 emergency): only
         ``{"proxies": [...]}``, the same converter and order as the
         profile. Nothing is excluded here: the VPN group lists every
         server for the manual pick; Cascade/Auto drop auto-demoted ones
-        with their own ``exclude-filter``."""
-        proxies, _calls, _protocols = self._clash_proxies(user, enabled_protocols)
+        with their own ``exclude-filter``.
+
+        ``only`` (``&only=<proto>``, the E8 telemetry providers): just the
+        server of that protocol — a cascade protocol name, or ``de`` for
+        the reserve node. Anything else — an unknown name, an empty value,
+        a protocol this user is not given — is an empty list. ``None``
+        (no parameter) is every server, as before."""
+        proxies, _calls, protocols = self._clash_proxies(user, enabled_protocols)
+        if only is not None:
+            want = str(only).strip().lower()
+            # Every proxy of the profile is a cascade protocol or the
+            # reserve node — the one entry without a protocol name.
+            proxies = [p for p in proxies
+                       if (protocols.get(p['name']) or CLASH_RESERVE_PROTOCOL) == want]
         return json.dumps({'proxies': proxies}, ensure_ascii=False, indent=1)
 
     def mirror_bases(self) -> List[str]:
@@ -671,11 +709,60 @@ class SubscriptionService:
         """Every ``/probe/<token>/<group>`` segment this deployment's
         profile emits. A closed set on purpose: each one is a row a
         minute per user (and a key of the endpoint's rate-limit dict), so
-        a token holder must not be able to invent more of them."""
+        a token holder must not be able to invent more of them.
+
+        ``emergency``, one ``mirror-<n>`` per configured mirror, and one
+        ``p-<proto>`` per protocol a telemetry provider can exist for
+        (E8, ``telemetry_protocols``)."""
         mirrors = len(self.mirror_bases())
         return frozenset(CLASH_PROBE_GROUPS) | {
             f'mirror-{n}' for n in range(1, mirrors + 1)
+        } | {
+            f'{CLASH_TELEMETRY_PREFIX}{proto}' for proto in self.telemetry_protocols()
         }
+
+    def telemetry_protocols(self) -> frozenset:
+        """Every protocol a ``p-<proto>`` telemetry provider (E8) can exist
+        for on this deployment: each cascade protocol whose builder yields
+        a server — convertible to a mihomo proxy — with this config, plus
+        ``de`` when the reserve node is configured. Decided by the SAME
+        builders and converter the profile uses (a stand-in user supplies
+        the uuid), so the set cannot drift from what ``?format=clash``
+        emits.
+
+        Config-only on purpose: ``/probe`` checks it before its 204 and
+        must not touch the database. The per-user parts — the tier, the
+        operator's enabled flags — are not here: a profile never carries
+        a provider for a protocol the user is not given, and DPIMonitor's
+        R6 applies them itself. Quiet: a protocol whose builder raises is
+        simply absent (/sub logs that error on every fetch already)."""
+        out = set()
+        for proto, builder in self._outbound_builders().items():
+            try:
+                ob = builder(_TELEMETRY_STAND_IN.uuid, 'telemetry')
+            except Exception:
+                ob = None
+            if self._clash_convertible(ob):
+                out.add(proto)
+        try:
+            reserve = FallbackNodeService(self.config).build_outbound(_TELEMETRY_STAND_IN)
+        except Exception:
+            reserve = None
+        if self._clash_convertible(reserve):
+            out.add(CLASH_RESERVE_PROTOCOL)
+        return frozenset(out)
+
+    def _clash_convertible(self, ob: Any) -> bool:
+        """A builder's result (a dict, or a chain whose first item is the
+        server) has a Clash form."""
+        if not ob:
+            return False
+        chain = ob if isinstance(ob, list) else [ob]
+        try:
+            by_tag = {o['tag']: o for o in chain}
+            return self._to_clash_proxy(chain[0], by_tag) is not None
+        except Exception:
+            return False
 
     def _clash_probe_url(self, token: Optional[str], provider: str) -> str:
         """Health-check url of one proxy-provider (E4):
@@ -720,8 +807,9 @@ class SubscriptionService:
 
     def _clash_provider(
         self, name: str, label: str, url: str, interval: int, token: str,
+        *, lazy: Optional[bool] = None,
     ) -> dict:
-        return {
+        provider = {
             'type': 'http',
             'url': url,
             'path': f'./providers/{name}.yaml',
@@ -743,6 +831,46 @@ class SubscriptionService:
             # chosen by hand).
             'override': {'additional-prefix': f'[{label}] '},
         }
+        if lazy is not None:
+            provider['health-check']['lazy'] = lazy
+        return provider
+
+    def _clash_telemetry_providers(self, token: Optional[str], protocol_of: dict) -> dict:
+        """The per-protocol telemetry providers (IMPROVEMENT_PLAN E8): one
+        ``p-<proto>`` per protocol the profile holds (cascade order, the
+        reserve ``p-de`` last), each ``?format=clash-proxies&only=<proto>``
+        — that protocol's server alone — health-checked on
+        ``/probe/<token>/p-<proto>`` every 10 min. The rows they leave in
+        ``client_probe`` are per protocol: a protocol whose rows stop
+        while the user's other protocols keep reporting is dark for this
+        user (DPIMonitor R6, the C2 dashboard).
+
+        No group ``use``s them: the servers already sit in VPN / Cascade /
+        Auto, and a second copy of each in the UI would only confuse. That
+        works because of ``lazy: false`` — checked on mihomo 1.19.32 with a
+        provider no group uses: with ``lazy: false`` its proxies are tested
+        at load and on every interval; with the default ``lazy: true`` only
+        the load-time check runs, then "Skip once health check because we
+        are lazy" (nothing touches an unused provider). So no extra group.
+
+        Fetched DIRECT, like the channels (§32): a telemetry fetch routed
+        through the tunnel would fail exactly when the data matters. Only
+        with a public address and a token: the probe url lives there."""
+        base = (getattr(self.config, 'WEBAPP_URL', '') or '').rstrip('/')
+        if not (base and token):
+            return {}
+        allowed = self.telemetry_protocols()
+        providers = {}
+        for proto in protocol_of.values():
+            proto = proto or CLASH_RESERVE_PROTOCOL
+            name = f'{CLASH_TELEMETRY_PREFIX}{proto}'
+            if proto not in allowed or name in providers:
+                continue
+            providers[name] = self._clash_provider(
+                name, 'P', f'{base}/sub/{token}?format=clash-proxies&only={proto}',
+                self._CLASH_TELEMETRY_INTERVAL, token, lazy=False,
+            )
+        return providers
 
     @staticmethod
     def _clash_excluded(names: List[str], protocol_of: dict, demoted) -> List[str]:
@@ -796,6 +924,11 @@ class SubscriptionService:
           * ``Cascade``, ``Auto`` and ``VPN`` also take the proxies of
             the ``emergency`` / ``mirror-<n>`` providers, after the
             profile's own.
+          * telemetry (E8): one ``p-<proto>`` provider per protocol the
+            profile holds, ``lazy: false``, used by no group — each
+            health-checks only its own protocol on our ``/probe``, so
+            ``client_probe`` tells per protocol what still gets through
+            for this user (``_clash_telemetry_providers``).
 
         Not carried over: TLS ClientHello fragmentation — mihomo has no
         such option (sing-box ``tls.fragment`` on Reality / ws / stls).
@@ -887,8 +1020,11 @@ class SubscriptionService:
             'proxies': proxies,
             'proxy-groups': groups,
         }
-        if providers:
-            config['proxy-providers'] = providers
+        # E8: the telemetry providers go after the channels and into no
+        # group's ``use`` (see _clash_telemetry_providers).
+        telemetry = self._clash_telemetry_providers(token, protocol_of) if names else {}
+        if providers or telemetry:
+            config['proxy-providers'] = {**providers, **telemetry}
         rule_providers = self._clash_rule_providers()
         if rule_providers:
             config['rule-providers'] = rule_providers
@@ -1233,6 +1369,19 @@ class SubscriptionService:
         isn't fully configured on this deployment."""
         uuid = user.uuid
         email_prefix = (user.email or 'user').split('@')[0]
+        builder = self._outbound_builders().get(proto)
+        if builder is None:
+            return None
+        try:
+            return builder(uuid, email_prefix)
+        except Exception as e:
+            logger.error(f"subscription: failed to build {proto} outbound: {e}")
+            return None
+
+    def _outbound_builders(self) -> dict:
+        """Protocol short-name → builder ``(uuid, name_prefix)``. Shared by
+        ``_build_outbound`` and ``telemetry_protocols`` (E8), so the
+        telemetry set is decided by the very builders the profile uses."""
         # NOTE: 'xhttp' is deliberately absent. The :2054 inbound runs
         # Xray's XHTTP transport, which sing-box does not implement at
         # all — its similarly-named "http" transport is plain HTTP/2 and
@@ -1242,21 +1391,13 @@ class SubscriptionService:
         # carried zero sessions while ShadowTLS/Reality carried all the
         # traffic. Xray-core clients still get xhttp through
         # build_xray_config and the share-links list.
-        builders = {
+        return {
             'reality': self._build_reality,
             'hy2': self._build_hy2,
             'hy2t': self._build_hy2t,
             'ws': self._build_ws,
             'stls': self._build_stls,
         }
-        builder = builders.get(proto)
-        if builder is None:
-            return None
-        try:
-            return builder(uuid, email_prefix)
-        except Exception as e:
-            logger.error(f"subscription: failed to build {proto} outbound: {e}")
-            return None
 
     def _build_reality(self, uuid: str, name_prefix: str) -> Optional[dict]:
         cfg = self.config
