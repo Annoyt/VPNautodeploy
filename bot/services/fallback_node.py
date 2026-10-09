@@ -50,18 +50,29 @@ logger = logging.getLogger(__name__)
 FALLBACK_ALLOWED_STATUSES = ('paid', 'support_topic')
 
 # Membership re-check interval per user. The /sub handler calls
-# ensure_client on every fetch; without this cache each refresh of every
-# paid user costs a panel login + GET. Clients don't vanish from the
-# panel on their own, so a 10-minute "known good" window is safe.
+# ensure_client on every paid fetch; without this cache each refresh of
+# every paid user costs a panel login + GET. Clients don't vanish from the
+# panel on their own (revocation goes through remove_client, which drops
+# the entry), so a 10-minute "known good" window is safe.
 _ENSURE_CACHE_TTL = 600
 
 
 class FallbackNodeService:
     """Provisioning + outbound builder for the reserve node."""
 
+    # The membership cache belongs to the process, not to an instance:
+    # /sub and /kit build a fresh service for every request, so a cache on
+    # the instance never hit and every paid /sub fetch logged into the
+    # reserve panel. uuid -> (time.monotonic() of the panel check, result).
+    # Keyed by uuid, not email: a re-keyed user keeps the email, and the
+    # new uuid must be provisioned. Plain dict get/set/pop, atomic under
+    # the GIL; two fetches of one user racing past a miss cost a second,
+    # idempotent check. Size: one entry per paid uuid that fetched /sub
+    # since the process started.
+    _ensure_cache: dict = {}
+
     def __init__(self, config):
         self.config = config
-        self._ensure_cache: dict[str, float] = {}
 
     # ----- config accessors -----
 
@@ -164,22 +175,41 @@ class FallbackNodeService:
             settings = json.loads(settings)
         return {c.get('email'): c.get('id') for c in settings.get('clients', [])}
 
+    @classmethod
+    def _cached(cls, uuid: str) -> Optional[bool]:
+        """The panel's answer for this uuid while it is fresh, else None."""
+        hit = cls._ensure_cache.get(uuid)
+        if hit is None or time.monotonic() - hit[0] >= _ENSURE_CACHE_TTL:
+            return None
+        return hit[1]
+
+    @classmethod
+    def _remember(cls, uuid: str, result: bool) -> None:
+        cls._ensure_cache[uuid] = (time.monotonic(), result)
+
+    @classmethod
+    def _forget(cls, uuid: str) -> None:
+        cls._ensure_cache.pop(uuid, None)
+
     def ensure_client(self, user) -> bool:
         """Provision the user on the reserve node if missing. Idempotent.
 
         Returns True when the client is present (already or just added).
         Any panel failure is logged and returns False — the caller still
         emits the outbound; the client will just fail until the next
-        /sub refresh retries provisioning.
+        /sub refresh retries provisioning. A failure is not cached, so
+        that next refresh asks the panel again; a definite answer
+        (present, or the email taken by another uuid) is reused for
+        ``_ENSURE_CACHE_TTL`` seconds.
         """
         email = getattr(user, 'email', None)
         uuid = getattr(user, 'uuid', None)
         if not (self.enabled and self._api_configured and email and uuid):
             return False
 
-        cached = self._ensure_cache.get(email, 0)
-        if time.time() - cached < _ENSURE_CACHE_TTL:
-            return True
+        cached = self._cached(uuid)
+        if cached is not None:
+            return cached
 
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         try:
@@ -188,14 +218,14 @@ class FallbackNodeService:
                 return False
             existing = self._get_client_uuids(s)
             if existing.get(email) == uuid:
-                self._ensure_cache[email] = time.time()
+                self._remember(uuid, True)
                 return True
             if email in existing:
                 logger.warning(
                     f'fallback_node: {email} exists with a different uuid, '
                     'leaving as-is'
                 )
-                self._ensure_cache[email] = time.time()
+                self._remember(uuid, False)
                 return False
             client = {
                 'id': uuid, 'flow': '', 'email': email,
@@ -209,7 +239,7 @@ class FallbackNodeService:
             )
             ok = r.status_code == 200 and r.json().get('success') is True
             if ok:
-                self._ensure_cache[email] = time.time()
+                self._remember(uuid, True)
                 logger.info(f'fallback_node: provisioned {email}')
             else:
                 logger.warning(f'fallback_node: addClient failed: {r.json().get("msg")}')
@@ -220,6 +250,9 @@ class FallbackNodeService:
 
     def remove_client(self, uuid: str) -> bool:
         """Delete a client by uuid (revocation path). Best-effort."""
+        # Whatever the panel answers below, the next ensure_client for this
+        # uuid must ask it again instead of trusting a pre-revoke "present".
+        self._forget(uuid)
         if not (self.enabled and self._api_configured and uuid):
             return False
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)

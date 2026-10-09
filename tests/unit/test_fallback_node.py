@@ -44,6 +44,20 @@ def resp(payload, status=200):
     return r
 
 
+def panel_session(emails_to_uuids, add_ok=True):
+    s = MagicMock()
+    s.post.side_effect = lambda url, **kw: (
+        resp({'success': True}) if url.endswith('/login')
+        else resp({'success': add_ok, 'msg': '' if add_ok else 'err'})
+    )
+    s.get.return_value = resp({
+        'obj': {'settings': json.dumps({'clients': [
+            {'email': e, 'id': u} for e, u in emails_to_uuids.items()
+        ]})}
+    })
+    return s
+
+
 class TestOutbound:
     def test_builds_vless_reality_outbound(self):
         svc = FallbackNodeService(make_config())
@@ -70,17 +84,7 @@ class TestOutbound:
 
 class TestEnsureClient:
     def _session(self, emails_to_uuids, add_ok=True):
-        s = MagicMock()
-        s.post.side_effect = lambda url, **kw: (
-            resp({'success': True}) if url.endswith('/login')
-            else resp({'success': add_ok, 'msg': '' if add_ok else 'err'})
-        )
-        s.get.return_value = resp({
-            'obj': {'settings': json.dumps({'clients': [
-                {'email': e, 'id': u} for e, u in emails_to_uuids.items()
-            ]})}
-        })
-        return s
+        return panel_session(emails_to_uuids, add_ok)
 
     def test_adds_missing_client(self):
         svc = FallbackNodeService(make_config())
@@ -126,6 +130,90 @@ class TestEnsureClient:
     def test_noop_when_not_paid_flow(self):
         svc = FallbackNodeService(make_config())
         assert svc.ensure_client(make_user(email=None)) is False
+
+
+class _Clock:
+    """Stands in for the ``time`` module inside fallback_node."""
+
+    def __init__(self):
+        self.now = 1000.0
+
+    def monotonic(self):
+        return self.now
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    import bot.services.fallback_node as fallback_node
+    c = _Clock()
+    monkeypatch.setattr(fallback_node, 'time', c)
+    return c
+
+
+class TestMembershipCache:
+    """One cache per process: /sub and /kit build a new service per request,
+    so a cache on the instance never hit (every paid /sub fetch logged into
+    the reserve panel)."""
+
+    def _sessions(self, monkeypatch, *sessions):
+        factory = MagicMock(side_effect=list(sessions))
+        monkeypatch.setattr(FallbackNodeService, '_new_session', lambda self: factory())
+        return factory
+
+    def test_shared_by_every_instance(self, monkeypatch, clock):
+        factory = self._sessions(monkeypatch, panel_session({EMAIL: UUID}))
+        assert FallbackNodeService(make_config()).ensure_client(make_user()) is True
+        assert FallbackNodeService(make_config()).ensure_client(make_user()) is True
+        assert factory.call_count == 1
+
+    def test_expires_after_the_ttl(self, monkeypatch, clock):
+        factory = self._sessions(monkeypatch, *(panel_session({EMAIL: UUID}) for _ in range(2)))
+        assert FallbackNodeService(make_config()).ensure_client(make_user()) is True
+        clock.now += _ENSURE_CACHE_TTL - 1
+        assert FallbackNodeService(make_config()).ensure_client(make_user()) is True
+        assert factory.call_count == 1
+        clock.now += 1
+        assert FallbackNodeService(make_config()).ensure_client(make_user()) is True
+        assert factory.call_count == 2
+
+    def test_a_failure_is_asked_again(self, monkeypatch, clock):
+        dead = MagicMock()
+        dead.post.side_effect = Exception('panel down')
+        factory = self._sessions(monkeypatch, dead, panel_session({}))
+        assert FallbackNodeService(make_config()).ensure_client(make_user()) is False
+        assert FallbackNodeService(make_config()).ensure_client(make_user()) is True
+        assert factory.call_count == 2
+
+    def test_a_rejected_add_is_asked_again(self, monkeypatch, clock):
+        factory = self._sessions(monkeypatch, panel_session({}, add_ok=False), panel_session({}))
+        assert FallbackNodeService(make_config()).ensure_client(make_user()) is False
+        assert FallbackNodeService(make_config()).ensure_client(make_user()) is True
+        assert factory.call_count == 2
+
+    def test_keyed_by_uuid_not_email(self, monkeypatch, clock):
+        # A re-keyed user keeps the email; the new uuid must reach the panel.
+        new_uuid = '11111111-2222-3333-4444-555555555555'
+        session = panel_session({EMAIL: UUID})
+        factory = self._sessions(monkeypatch, session, panel_session({EMAIL: UUID}))
+        assert FallbackNodeService(make_config()).ensure_client(make_user()) is True
+        assert FallbackNodeService(make_config()).ensure_client(make_user(uuid=new_uuid)) is False
+        assert factory.call_count == 2
+
+    def test_email_of_another_uuid_is_remembered_as_absent(self, monkeypatch, clock):
+        factory = self._sessions(monkeypatch, panel_session({EMAIL: 'other-uuid'}))
+        assert FallbackNodeService(make_config()).ensure_client(make_user()) is False
+        assert FallbackNodeService(make_config()).ensure_client(make_user()) is False
+        assert factory.call_count == 1
+
+    def test_remove_client_forgets_the_uuid(self, monkeypatch, clock):
+        removal = MagicMock()
+        removal.post.return_value = resp({'success': True})
+        factory = self._sessions(monkeypatch, panel_session({EMAIL: UUID}), removal,
+                                 panel_session({}))
+        assert FallbackNodeService(make_config()).ensure_client(make_user()) is True
+        assert FallbackNodeService(make_config()).remove_client(UUID) is True
+        assert FallbackNodeService(make_config()).ensure_client(make_user()) is True
+        assert factory.call_count == 3
 
 
 class TestRemoveClient:
