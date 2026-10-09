@@ -211,6 +211,11 @@ class WebAppServer:
         self.app.router.add_get(
             '/api/admin/geo_points', self.handle_admin_geo_points,
         )
+        # Client-side success per protocol × ASN (IMPROVEMENT_PLAN C2) —
+        # the Signals tab's "Клиенты по операторам" table.
+        self.app.router.add_get(
+            '/api/admin/client_health', self.handle_admin_client_health,
+        )
         
         # Static files — explicit routes to avoid conflicts with API
         project_root = Path(__file__).parent.parent.parent
@@ -1481,6 +1486,44 @@ class WebAppServer:
             'traffic': traffic_summary,
             'registrations': reg_stats,
         })
+
+    async def handle_admin_client_health(self, request: web.Request) -> web.Response:
+        """``GET /api/admin/client_health?hours=1|6|24|168`` (default 24) —
+        what works for the users of each operator, from their own clients
+        (IMPROVEMENT_PLAN C2): the FlClash per-protocol health checks in
+        ``client_probe`` (``grp = 'p-<proto>'``; channels never count as a
+        protocol). Semantics live in ``bot/services/client_health.py``.
+
+        Response::
+
+            {"hours": 24, "since": "2026-10-09 12:00:00",
+             "protocols": ["reality", "ws", ...],      # seen in the window
+             "rows": [{"asn": "AS31133" | null, "country": "RU",
+                       "clients": 7, "probed": 5, "last_ts": "...",
+                       "protocols": {"ws": {"alive": 4, "dead": 1,
+                                            "rate": 0.8, "last_ts": "..."},
+                                     ...}}, ...],
+             "rows_total": 12, "total": {...same, no asn / country...},
+             "truncated": false}
+
+        Any other ``hours`` is a 400 — the window is a scan, not a knob.
+        """
+        if not self._validate_admin(request):
+            return web.json_response({'error': 'Unauthorized'}, status=401)
+        from bot.services import client_health
+        hours = client_health.parse_window(request.query.get('hours'))
+        if hours is None:
+            return web.json_response(
+                {'error': 'hours must be one of '
+                          + ', '.join(str(h) for h in client_health.WINDOWS_H)},
+                status=400,
+            )
+        try:
+            data = await asyncio.to_thread(client_health.collect, self.db, hours)
+        except Exception as e:
+            logger.exception("client_health: db read failed")
+            return web.json_response({'error': str(e)}, status=500)
+        return web.json_response(data)
 
     # ==================== Admin — Detail / Audit / System ====================
 
