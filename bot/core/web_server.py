@@ -8,6 +8,7 @@ import time
 import asyncio
 import hmac
 import hashlib
+import ipaddress
 from urllib.parse import parse_qs, unquote
 from aiohttp import web
 from pathlib import Path
@@ -54,6 +55,21 @@ BYTES_PER_GB = 1024 ** 3
 # /probe/<token>/<group>: the token is SubscriptionService.derive_token's
 # 32 lowercase hex chars — anything else is answered without a lookup.
 _PROBE_TOKEN_RE = re.compile(r'[0-9a-f]{32}')
+
+# Address space no user's network is ever seen from: loopback, RFC 1918
+# (docker bridges are 172.16/12, its default pools also 10/8 and
+# 192.168/16), link-local, carrier-grade NAT, IPv6 loopback / ULA /
+# link-local. An explicit list on purpose: ipaddress' ``is_private`` also
+# covers the documentation ranges (192.0.2.0/24, 198.51.100.0/24,
+# 203.0.113.0/24) and its definition moves between Python versions.
+_INTERNAL_NETS = tuple(ipaddress.ip_network(n) for n in (
+    '10.0.0.0/8', '100.64.0.0/10', '127.0.0.0/8', '169.254.0.0/16',
+    '172.16.0.0/12', '192.168.0.0/16',
+    '::1/128', 'fc00::/7', 'fe80::/10',
+))
+# Settings that hold the public address of one of our nodes. A value that
+# is a host name rather than an IP is skipped, never resolved.
+_OWN_NODE_SETTINGS = ('ENTRY_NODE_IP', 'EXIT_NODE_IP', 'HY2_HOST', 'FALLBACK_NODE_HOST')
 
 
 def _deployed_version() -> str:
@@ -931,6 +947,34 @@ class WebAppServer:
             ))
         return rows
 
+    def _is_own_address(self, ip: str) -> bool:
+        """Is ``ip`` ours — one of our nodes, or internal address space —
+        rather than a user's network?
+
+        A client that refreshes its profile THROUGH the tunnel reaches /sub
+        from the node the tunnel leaves by (the exit, the entry, the DE
+        reserve), and a hairpin through a docker bridge arrives as 172.x.
+        Geo-resolving such an address stamps the node's ASN and country on
+        the user, and the per-ASN cascade and DPIMonitor rules then count
+        them as a customer of our hoster.
+        """
+        try:
+            addr = ipaddress.ip_address(ip)
+        except ValueError:
+            return False
+        if addr.version == 6 and addr.ipv4_mapped:
+            addr = addr.ipv4_mapped
+        if any(addr in net for net in _INTERNAL_NETS):
+            return True
+        for name in _OWN_NODE_SETTINGS:
+            value = str(getattr(self.config, name, '') or '').strip()
+            try:
+                if value and ipaddress.ip_address(value) == addr:
+                    return True
+            except ValueError:
+                continue
+        return False
+
     def _record_sub_fetch(
         self, chat_id: str, country, asn,
         city=None, lat=None, lon=None,
@@ -995,6 +1039,13 @@ class WebAppServer:
             or (request.headers.get('X-Real-IP', '') or '').strip()
             or (request.remote or '')
         )
+        # ...unless the address is ours: a refresh through the tunnel says
+        # nothing about the user's network. No lookup then (the hy2 auth
+        # guard, same reason), so nothing below writes a network — not
+        # users.last_*, not a sub_fetches row (failure reports print its
+        # max(ts) as the age of that network) — and the cascade falls back
+        # to the user's stored one.
+        own_address = self._is_own_address(client_ip)
         country = None
         asn = None
         city = region = None
@@ -1004,7 +1055,7 @@ class WebAppServer:
                 lookup as _geo, lookup_asn as _asn,
                 lookup_city as _city,
             )
-            if client_ip:
+            if client_ip and not own_address:
                 g = await asyncio.to_thread(_geo, client_ip)
                 if g:
                     country = g[0]
