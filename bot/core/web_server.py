@@ -9,6 +9,7 @@ import asyncio
 import hmac
 import hashlib
 import ipaddress
+from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import parse_qs, unquote
 from aiohttp import web
 from pathlib import Path
@@ -126,6 +127,12 @@ class WebAppServer:
         self._hy2_quota_refreshing: set = set()
         # strong refs: the event loop keeps only weak ones to its tasks
         self._bg_tasks: set = set()
+        # DE reserve provisioning off the /sub path (see
+        # _schedule_fallback_provisioning): uuids with a call queued or
+        # running, and the one thread those calls get.
+        self._fallback_inflight: set = set()
+        self._fallback_pool = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix='fallback-node')
         # /probe heartbeats (E4): token -> chat_id, rebuilt from users on
         # a miss (at most once a minute) and every 10 min; the last row
         # time per (chat_id, group) for the one-row-a-minute limit.
@@ -995,6 +1002,47 @@ class WebAppServer:
         except Exception as e:
             logger.warning(f"sub_fetches insert failed: {e}")
 
+    def _schedule_fallback_provisioning(self, user) -> None:
+        """Provision a paid user on the DE reserve without making /sub wait.
+
+        A panel request may take its full 15-s timeout, and a failed call is
+        not cached. Awaited inline, a blackholed panel held every paid fetch
+        that missed the cache for that long. The profile carries the DE
+        outbound either way, and it authenticates once this call lands.
+
+        At most one call per uuid is queued or running, so a client that
+        retries /sub does not stack them. The calls run one at a time on a
+        thread of their own. On the default pool, a few hung calls would
+        fill the pool that every to_thread of this server shares, /sub's
+        own token lookup included. With one thread, a dead panel costs one
+        timeout: the calls queued behind it find the panel in its skip
+        window. Never raises.
+        """
+        uuid = getattr(user, 'uuid', None)
+        if not uuid or uuid in self._fallback_inflight:
+            return
+
+        async def _provision():
+            from bot.services.fallback_node import FallbackNodeService
+            try:
+                await asyncio.get_running_loop().run_in_executor(
+                    self._fallback_pool,
+                    FallbackNodeService(self.config).ensure_client, user,
+                )
+            except Exception as e:
+                logger.warning(f'sub: fallback provisioning failed for {user.chat_id}: {e}')
+            finally:
+                self._fallback_inflight.discard(uuid)
+
+        try:
+            task = asyncio.get_running_loop().create_task(_provision())
+        except Exception as e:
+            logger.warning(f'sub: could not schedule fallback provisioning: {e}')
+            return
+        self._fallback_inflight.add(uuid)
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
+
     async def handle_subscription(self, request: web.Request) -> web.Response:
         """Serve a sing-box JSON subscription for a single user.
 
@@ -1109,10 +1157,7 @@ class WebAppServer:
         # and — when we know it — ASN/country tuned. ASN wins; country
         # is the fallback.
         from bot.handlers.callbacks.user import MyKeyAnswerHandler
-        from bot.services.fallback_node import (
-            FALLBACK_ALLOWED_STATUSES,
-            FallbackNodeService,
-        )
+        from bot.services.fallback_node import FALLBACK_ALLOWED_STATUSES
         from bot.services.lockdown import is_lockdown_active
         # LOCKDOWN (IMPROVEMENT_PLAN B1/B5): read once per request and
         # handed to the sing-box builder for the DNS profile; the
@@ -1152,16 +1197,12 @@ class WebAppServer:
             )
 
         # Paid-tier users get the reserve fallback node appended by the
-        # builder below. Provision them there lazily (idempotent, cached)
-        # so the outbound actually authenticates when they switch to it.
-        # Sync HTTP to the reserve panel — must not block the loop.
+        # builder below, whatever the panel says. Provision them there
+        # lazily (idempotent, cached) so the outbound actually
+        # authenticates when they switch to it — in the background: this
+        # response never waits for the reserve panel.
         if user.status in FALLBACK_ALLOWED_STATUSES:
-            try:
-                await asyncio.to_thread(
-                    FallbackNodeService(self.config).ensure_client, user,
-                )
-            except Exception as e:
-                logger.warning(f'sub: fallback provisioning failed for {user.chat_id}: {e}')
+            self._schedule_fallback_provisioning(user)
 
         # Format selection: default is the sing-box config (Hiddify).
         # ``?format=xray`` gets the Xray-core JSON (imports into Happ as

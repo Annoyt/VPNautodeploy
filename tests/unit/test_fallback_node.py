@@ -4,11 +4,13 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+import requests
 
 from bot.services.fallback_node import (
     FALLBACK_ALLOWED_STATUSES,
     FallbackNodeService,
     _ENSURE_CACHE_TTL,
+    _PANEL_SKIP_S,
 )
 
 
@@ -214,6 +216,92 @@ class TestMembershipCache:
         assert FallbackNodeService(make_config()).remove_client(UUID) is True
         assert FallbackNodeService(make_config()).ensure_client(make_user()) is True
         assert factory.call_count == 3
+
+
+OTHER = make_user(uuid='11111111-2222-3333-4444-555555555555',
+                  email='user_other_9@nekovo.ru')
+
+
+def silent_at(step, exc):
+    """A session whose ``step`` (login / inbound / add) raises ``exc``."""
+    s = panel_session({})
+    post = s.post.side_effect
+
+    def _post(url, **kw):
+        if (step == 'login' and url.endswith('/login')) or \
+                (step == 'add' and url.endswith('/addClient')):
+            raise exc
+        return post(url, **kw)
+
+    s.post.side_effect = _post
+    if step == 'inbound':
+        s.get.side_effect = exc
+    return s
+
+
+class TestPanelSkipWindow:
+    """A panel that did not answer is left alone by every ensure_client for
+    _PANEL_SKIP_S: a blackholed panel costs one timeout, not one per user."""
+
+    def _sessions(self, monkeypatch, *sessions):
+        factory = MagicMock(side_effect=list(sessions))
+        monkeypatch.setattr(FallbackNodeService, '_new_session', lambda self: factory())
+        return factory
+
+    @pytest.mark.parametrize('step', ['login', 'inbound', 'add'])
+    @pytest.mark.parametrize('exc', [
+        requests.exceptions.ConnectTimeout('connect timed out'),
+        requests.exceptions.ReadTimeout('read timed out'),
+        requests.exceptions.ConnectionError('connection reset'),
+    ])
+    def test_silence_at_any_step_opens_the_window(self, monkeypatch, clock, step, exc):
+        factory = self._sessions(monkeypatch, silent_at(step, exc))
+        assert FallbackNodeService(make_config()).ensure_client(make_user()) is False
+        # another user, a moment later: the panel is not asked
+        assert FallbackNodeService(make_config()).ensure_client(OTHER) is False
+        assert factory.call_count == 1
+
+    @pytest.mark.parametrize('step', ['login', 'inbound', 'add'])
+    def test_an_answer_does_not(self, monkeypatch, clock, step):
+        # non-JSON from a live panel (a login page for a dropped session)
+        garbled = ValueError('Expecting value: line 1 column 1')
+        factory = self._sessions(monkeypatch, silent_at(step, garbled), panel_session({}))
+        assert FallbackNodeService(make_config()).ensure_client(make_user()) is False
+        assert FallbackNodeService(make_config()).ensure_client(OTHER) is True
+        assert factory.call_count == 2
+
+    def test_the_window_lasts_a_minute(self, monkeypatch, clock):
+        dead = silent_at('login', requests.exceptions.ConnectTimeout('timed out'))
+        factory = self._sessions(monkeypatch, dead, panel_session({}))
+        assert FallbackNodeService(make_config()).ensure_client(make_user()) is False
+        clock.now += _PANEL_SKIP_S - 1
+        assert FallbackNodeService(make_config()).ensure_client(OTHER) is False
+        assert factory.call_count == 1
+        clock.now += 1
+        assert FallbackNodeService(make_config()).ensure_client(OTHER) is True
+        assert factory.call_count == 2
+
+    def test_a_cached_answer_still_counts_inside_the_window(self, monkeypatch, clock):
+        dead = silent_at('login', requests.exceptions.ConnectTimeout('timed out'))
+        self._sessions(monkeypatch, panel_session({EMAIL: UUID}), dead)
+        assert FallbackNodeService(make_config()).ensure_client(make_user()) is True
+        assert FallbackNodeService(make_config()).ensure_client(OTHER) is False
+        assert FallbackNodeService(make_config()).ensure_client(make_user()) is True
+
+    def test_revocation_asks_inside_the_window(self, monkeypatch, clock):
+        dead = silent_at('login', requests.exceptions.ConnectTimeout('timed out'))
+        removal = MagicMock()
+        removal.post.return_value = resp({'success': True})
+        factory = self._sessions(monkeypatch, dead, removal)
+        assert FallbackNodeService(make_config()).ensure_client(make_user()) is False
+        assert FallbackNodeService(make_config()).remove_client(UUID) is True
+        assert factory.call_count == 2
+        assert any('delClient' in c.args[0] for c in removal.post.call_args_list)
+
+    def test_a_silent_panel_fails_a_revocation_quietly(self, monkeypatch, clock):
+        dead = silent_at('login', requests.exceptions.ConnectTimeout('timed out'))
+        self._sessions(monkeypatch, dead)
+        assert FallbackNodeService(make_config()).remove_client(UUID) is False
 
 
 class TestRemoveClient:
