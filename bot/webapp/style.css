@@ -1051,6 +1051,17 @@ textarea.ktext-input { resize: vertical; min-height: 36px; }
     border: 1px dashed var(--border-glass);
 }
 
+/* Signals — clients by operator (/api/admin/client_health) */
+.client-health-table .ch-n {
+    display: block;
+    margin-top: 2px;
+    font-size: 10px;
+    color: var(--text-secondary);
+}
+.client-health-table tr.ch-total td {
+    border-bottom: 2px solid var(--border-glass);
+}
+
 .alert-ack {
     color: var(--text-secondary);
     font-size: 11px;
