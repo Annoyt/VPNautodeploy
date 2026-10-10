@@ -286,7 +286,7 @@ def client_download_row() -> list:
             {'text': '⬇️ FlClash', 'url': FLCLASH_DOWNLOAD_URL}]
 
 
-def build_key_delivery_message(user, config) -> tuple:
+def build_key_delivery_message(user, config, db=None) -> tuple:
     """    (text, keyboard) for the platform/lang-aware key delivery message.
 
     Returns ``(None, None)`` when the subscription URL can't be built
@@ -295,7 +295,8 @@ def build_key_delivery_message(user, config) -> tuple:
     (re-selection from the /sub message — users switch devices). iOS gets
     Karing instructions (sing-box client — the RU App Store pulled both
     Hiddify and Happ); the URL itself is the plain sing-box subscription
-    for every platform.
+    for every platform. With ``db`` a paid user also gets the
+    "🇷🇺 RU-зона" button (bot/services/ru_exit.py).
     """
     from bot.services.subscription import SubscriptionService
     sub = SubscriptionService(config)
@@ -363,6 +364,12 @@ def build_key_delivery_message(user, config) -> tuple:
     ]}
     if not is_ios:
         keyboard['inline_keyboard'].insert(0, client_download_row())
+    if db is not None:
+        from bot.services.ru_exit import ru_zone_button_row
+        ru_row = ru_zone_button_row(db, user)
+        if ru_row:
+            # right above the failure-report row, which stays last
+            keyboard['inline_keyboard'].insert(-1, ru_row)
     return text, keyboard
 
 
@@ -578,7 +585,7 @@ class GetKeyHandler(BaseCallbackHandler):
             self.bot.send_message(chat_id=chat_id, text=text)
             return
 
-        text, keyboard = build_key_delivery_message(user, self.config)
+        text, keyboard = build_key_delivery_message(user, self.config, db=self.db)
         if text is None:
             # WEBAPP_URL missing — degrade gracefully to a single CDN
             # raw key so onboarding doesn't completely fail.
@@ -650,11 +657,92 @@ class SetPlatformHandler(BaseCallbackHandler):
         self.db.save_user(user)
         logger.info(f'User {chat_id} re-selected platform → {platform}')
 
-        text, keyboard = build_key_delivery_message(user, self.config)
+        text, keyboard = build_key_delivery_message(user, self.config, db=self.db)
         self.bot.send_message(
             chat_id=chat_id, text=text, parse_mode='HTML',
             reply_markup=keyboard, disable_web_page_preview=True,
         )
+
+
+class RuZoneHandler(BaseCallbackHandler):
+    """"🇷🇺 RU-зона" — Russian sites from abroad, for paid users
+    (``bot/services/ru_exit.py``). Sends the FlClash profile link: RU
+    sites via entry's Russian address, everything else direct.
+
+    The button is rendered only for users ``ru_exit.is_eligible`` lets
+    in. A key holder outside the rule (a stale button after the
+    subscription lapsed, crafted callback data) is pointed at /buy;
+    anyone else gets a neutral refusal. The link is a credential, so it
+    goes only to the owner's own private chat.
+    """
+
+    CALLBACK_DATA = 'ru_zone'   # == ru_exit.RU_ZONE_CALLBACK
+    KEY_STATUSES = ('demo', 'paid', 'support_topic')
+
+    def can_handle(self, callback_data: str) -> bool:
+        return callback_data == self.CALLBACK_DATA
+
+    def handle(self, update: dict, chat_id: str, user_id: str, **kwargs) -> None:
+        from bot.config.constants import FLCLASH_DOWNLOAD_URL
+        from bot.services.ru_exit import (
+            abroad_profile_url, is_eligible, ru_exit_for,
+        )
+        if str(user_id) != str(chat_id):
+            return
+        user = self.db.get_user(chat_id)
+        lang = (getattr(user, 'lang', None) or 'ru') if user else 'ru'
+        has_key = bool(user and user.status in self.KEY_STATUSES
+                       and getattr(user, 'uuid', None))
+        link = None
+        if has_key and ru_exit_for(self.db, user):
+            link = abroad_profile_url(self.config, user)
+        if not link:
+            if has_key and not is_eligible(user):
+                text = ("🇷🇺 RU zone (Russian sites from abroad) comes with "
+                        "the paid subscription: /buy" if lang == 'en' else
+                        "🇷🇺 RU-зона (российские сайты из-за границы) входит "
+                        "в платную подписку: /buy")
+            else:
+                text = ("⚠️ Not available right now." if lang == 'en'
+                        else "⚠️ Сейчас недоступно.")
+            self.bot.send_message(chat_id=chat_id, text=text)
+            return
+
+        code = html.escape(link)
+        if lang == 'en':
+            text = (
+                "🇷🇺 <b>RU zone</b> — for trips abroad\n\n"
+                "Russian sites (banks, Gosuslugi, VK, Yandex) go through "
+                "Russia, everything else goes direct, without VPN.\n\n"
+                "1. Install FlClash — button below (Android, Windows, "
+                "macOS; there is no iPhone version).\n"
+                "2. FlClash → Profiles → <b>+</b> → URL → paste "
+                "(tap the link to copy):\n"
+                f"<code>{code}</code>\n"
+                "3. Mode <b>Rule</b> (not Global), turn on TUN, start.\n\n"
+                "At home you don't need it — the usual NekoVPN subscription works there."
+            )
+            btn = "⬇️ Download FlClash"
+        else:
+            text = (
+                "🇷🇺 <b>RU-зона</b> — для поездок за границу\n\n"
+                "Российские сайты (банки, Госуслуги, VK, Яндекс) пойдут "
+                "через Россию, всё остальное — напрямую, без VPN.\n\n"
+                "1. Установи FlClash — кнопка ниже (Android, Windows, "
+                "macOS; для iPhone его нет).\n"
+                "2. FlClash → «Профили» → <b>+</b> → «URL» → вставь "
+                "ссылку (тапни, чтобы скопировать):\n"
+                f"<code>{code}</code>\n"
+                "3. Режим <b>Rule</b> (не Global), включи TUN и запускай.\n\n"
+                "Дома этот профиль не нужен — там работает обычная подписка NekoVPN."
+            )
+            btn = "⬇️ Скачать FlClash"
+        self.bot.send_message(
+            chat_id=chat_id, text=text, parse_mode='HTML',
+            reply_markup={'inline_keyboard': [[{'text': btn, 'url': FLCLASH_DOWNLOAD_URL}]]},
+            disable_web_page_preview=True,
+        )
+        logger.info(f'Sent RU-zone profile to {chat_id}')
 
 
 class MyKeyAnswerHandler(BaseCallbackHandler):

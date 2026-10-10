@@ -14,6 +14,7 @@ from bot.handlers.callbacks.user import (
     DemoRequestHandler,
     PlatformSelectHandler,
     SetPlatformHandler,
+    RuZoneHandler,
     GetKeyHandler,
     MyKeyAnswerHandler,
     TryAltProtocolHandler,
@@ -77,6 +78,8 @@ class CallbackDispatcher:
         # Platform re-selection from the key card (device switch) — must
         # precede SupportRequestHandler so 'setplat:' isn't swallowed.
         self.handlers.append(SetPlatformHandler(self.bot, self.db, self.config))
+        # "🇷🇺 RU-зона" (paid users, bot/services/ru_exit.py).
+        self.handlers.append(RuZoneHandler(self.bot, self.db, self.config))
         # /mykey Y/N answer (current UX).  The old cascading-fallback
         # button (TryAltProtocolHandler) stays registered for backward
         # compatibility with key messages already sitting in users'

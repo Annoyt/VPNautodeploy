@@ -610,6 +610,173 @@ class SubscriptionService:
             },
         }
 
+    # ---------- Abroad profile (RU zone from outside RU) ----------
+
+    # .ru / .su / .рф — caught by suffix even when a site is missing
+    # from geosite-category-ru or hosted on a foreign CDN (not geoip-ru).
+    _RU_ZONE_SUFFIXES = ('ru', 'su', 'xn--p1ai')
+
+    def build_abroad_singbox_config(self, user, ru_exit: dict) -> Optional[dict]:
+        """Reverse of the home profile, for a user OUTSIDE Russia:
+        RU sites → ``ru-zone`` (egress from entry's RU address, see
+        ``bot/services/ru_exit.py``), everything else direct.
+
+        The always-proxy list (YouTube / Google / Telegram / …) stays
+        direct ABOVE the RU rules: google.ru is a .ru suffix, and via a
+        Russian IP those services are exactly what RKN throttles.
+        DNS mirrors the routes — RU names resolve through Yandex DNS
+        over the tunnel so CDNs hand out their Russian nodes. ``None``
+        if the outbound can't be built (the caller serves the normal
+        profile then).
+
+        Only clients that honour a FULL sing-box config get this split.
+        Hiddify does not: its core keeps just the outbounds unless
+        ``enable-full-config`` is set, which the app never sets and a
+        profile header can't override — so in Hiddify everything rides
+        ru-zone. For that case there is ``build_abroad_clash_config``.
+        """
+        ob = self._build_ru_zone(getattr(user, 'uuid', None), ru_exit)
+        if ob is None:
+            return None
+        suffixes = list(self._RU_ZONE_SUFFIXES)
+        ru_sets = list(self._DIRECT_RULE_SET_TAGS)
+        always_direct = list(self._PROXY_RULE_SET_TAGS)
+        return {
+            'log': {'level': 'warn'},
+            'dns': {
+                'servers': [
+                    {'tag': 'ru', 'address': 'tcp://77.88.8.8', 'detour': ob['tag']},
+                    {'tag': 'local', 'address': 'local', 'detour': 'direct'},
+                ],
+                'rules': [
+                    {'clash_mode': 'Direct', 'server': 'local'},
+                    {'clash_mode': 'Global', 'server': 'ru'},
+                    {'rule_set': always_direct, 'server': 'local'},
+                    {'domain_suffix': suffixes, 'server': 'ru'},
+                    {'rule_set': ['geosite-category-ru'], 'server': 'ru'},
+                ],
+                'final': 'local',
+            },
+            'outbounds': [
+                {
+                    'type': 'selector',
+                    'tag': 'proxy',
+                    'outbounds': [ob['tag']],
+                    'default': ob['tag'],
+                },
+                ob,
+                {'type': 'direct', 'tag': 'direct'},
+                {'type': 'block', 'tag': 'block'},
+                {'type': 'dns', 'tag': 'dns-out'},
+            ],
+            'route': {
+                'rule_set': self._build_rule_sets(),
+                'rules': [
+                    {'protocol': 'dns', 'outbound': 'dns-out'},
+                    {'clash_mode': 'Direct', 'outbound': 'direct'},
+                    {'clash_mode': 'Global', 'outbound': 'proxy'},
+                    {'ip_cidr': list(self._TELEGRAM_IP_CIDRS), 'outbound': 'direct'},
+                    {'rule_set': always_direct, 'outbound': 'direct'},
+                    {'domain_suffix': suffixes, 'outbound': 'proxy'},
+                    {'rule_set': ru_sets, 'outbound': 'proxy'},
+                ],
+                'final': 'direct',
+                'auto_detect_interface': True,
+            },
+        }
+
+    def _build_ru_zone(self, uuid: Optional[str], ru_exit: dict) -> Optional[dict]:
+        """VLESS-Reality to the RU egress on entry. No TLS fragment —
+        the client is abroad, there is no ТСПУ on its side to dodge."""
+        host = ru_exit.get('host') or self.config.ENTRY_NODE_IP or ''
+        if not (uuid and host and ru_exit.get('port') and ru_exit.get('sni')
+                and ru_exit.get('pbk')):
+            return None
+        reality_cfg = {'enabled': True, 'public_key': ru_exit['pbk']}
+        if ru_exit.get('sid'):
+            reality_cfg['short_id'] = ru_exit['sid']
+        return {
+            'type': 'vless',
+            'tag': 'ru-zone',
+            'server': host,
+            'server_port': int(ru_exit['port']),
+            'uuid': uuid,
+            'flow': 'xtls-rprx-vision',
+            'packet_encoding': 'xudp',
+            'tls': {
+                'enabled': True,
+                'server_name': ru_exit['sni'],
+                'utls': {'enabled': True, 'fingerprint': 'chrome'},
+                'reality': reality_cfg,
+            },
+        }
+
+    # Kept direct above the RU rules (google.ru is a .ru suffix; via a
+    # Russian IP these are what RKN throttles). Only geosite codes that
+    # certainly exist — mihomo refuses the whole profile on an unknown one.
+    _CLASH_ALWAYS_DIRECT_GEOSITES = ('google', 'youtube', 'telegram')
+
+    def build_abroad_clash_config(self, user, ru_exit: dict) -> Optional[str]:
+        """The abroad profile for Clash/mihomo clients (FlClash, Clash
+        Verge): same split as ``build_abroad_singbox_config`` — RU sites
+        via ``RU-zone``, the rest direct — but Clash clients always apply
+        the profile's rules, which Hiddify does not.
+
+        Emitted as JSON: a subset of YAML 1.2 that mihomo parses as a
+        normal profile, so the bot image needs no YAML library. ``None``
+        if the proxy can't be built.
+        """
+        ob = self._build_ru_zone(getattr(user, 'uuid', None), ru_exit)
+        if ob is None:
+            return None
+        reality = ob['tls']['reality']
+        proxy = {
+            'name': 'RU-zone',
+            'type': 'vless',
+            'server': ob['server'],
+            'port': ob['server_port'],
+            'uuid': ob['uuid'],
+            'network': 'tcp',
+            'udp': True,
+            'tls': True,
+            'flow': 'xtls-rprx-vision',
+            'packet-encoding': 'xudp',
+            'servername': ob['tls']['server_name'],
+            'client-fingerprint': 'chrome',
+            'reality-opts': {'public-key': reality['public_key']},
+        }
+        if reality.get('short_id'):
+            proxy['reality-opts']['short-id'] = reality['short_id']
+        tg_rules = [f'IP-CIDR{"6" if ":" in c else ""},{c},DIRECT,no-resolve'
+                    for c in self._TELEGRAM_IP_CIDRS]
+        rules = (
+            tg_rules
+            + [f'GEOSITE,{g},DIRECT' for g in self._CLASH_ALWAYS_DIRECT_GEOSITES]
+            + [f'DOMAIN-SUFFIX,{s},RU' for s in self._RU_ZONE_SUFFIXES]
+            + ['GEOSITE,category-ru,RU', 'GEOIP,RU,RU', 'MATCH,DIRECT']
+        )
+        config = {
+            'mode': 'rule',
+            'log-level': 'warning',
+            'ipv6': False,
+            'dns': {
+                'enable': True,
+                'ipv6': False,
+                # fake-ip: a proxied name goes to the server unresolved,
+                # so entry resolves it in RU and gets the Russian CDN node.
+                'enhanced-mode': 'fake-ip',
+                'fake-ip-range': '198.18.0.1/16',
+                'default-nameserver': ['1.1.1.1', '8.8.8.8'],
+                'nameserver': ['https://1.1.1.1/dns-query', 'https://8.8.8.8/dns-query'],
+            },
+            'proxies': [proxy],
+            'proxy-groups': [
+                {'name': 'RU', 'type': 'select', 'proxies': ['RU-zone', 'DIRECT']},
+            ],
+            'rules': rules,
+        }
+        return json.dumps(config, ensure_ascii=False, indent=1)
+
     # ---------- Main profile for Clash / mihomo (FlClash) ----------
 
     # Health-check target of the GROUPS (Cascade / Auto / Calls), as in

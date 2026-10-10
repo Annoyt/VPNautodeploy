@@ -1081,6 +1081,24 @@ class WebAppServer:
         # provisioning and the panel quota read stay with profile fetches.
         provider_fetch = fmt == 'clash-proxies'
 
+        # ``?mode=abroad`` — the RU-zone profile (bot/services/ru_exit.py),
+        # paid users only. Refused before anything below records the
+        # request's network: 403 for anyone the rule leaves out, 404 while
+        # the egress is not set up. A refresh that fails leaves FlClash the
+        # profile it has; serving the home profile under this URL instead
+        # would silently send everything through the VPN. A provider
+        # refresh ignores the mode.
+        ru_exit = None
+        if not provider_fetch and (
+            (request.rel_url.query.get('mode') or '').lower() == 'abroad'
+        ):
+            from bot.services.ru_exit import is_eligible, load_ru_exit
+            if not is_eligible(user):
+                return web.Response(status=403, text='RU-zone: paid subscription only')
+            ru_exit = await asyncio.to_thread(load_ru_exit, self.db)
+            if ru_exit is None:
+                return web.Response(status=404, text='RU-zone is not available')
+
         # Geolocate the requesting client. Caddy reverse-proxies us, so
         # the real IP lives in X-Forwarded-For; fall back to peer addr.
         # Used both for the per-region cascade ordering and to update
@@ -1226,8 +1244,32 @@ class WebAppServer:
         # FlClash — Clash clients apply its rules, Hiddify drops them.
         # (``?format=clash-proxies`` was answered above.)
         ua = (request.headers.get('User-Agent', '') or '').lower()
+        # ``?mode=abroad`` — RU-zone profile (bot/services/ru_exit.py):
+        # RU sites via entry's RU address, the rest direct; gated above.
+        # ``&format=clash`` gives the same split as a Clash/mihomo profile
+        # (FlClash) — Hiddify drops a profile's routing rules, Clash
+        # clients always apply them.
+        abroad_obj = abroad_clash = None
+        if ru_exit is not None:
+            if fmt == 'clash':
+                abroad_clash = self.subscription.build_abroad_clash_config(
+                    user, ru_exit,
+                )
+            else:
+                abroad_obj = self.subscription.build_abroad_singbox_config(
+                    user, ru_exit,
+                )
+            if abroad_obj is None and abroad_clash is None:
+                # No address to give (no host, no ENTRY_NODE_IP): still
+                # never the home profile under this URL.
+                return web.Response(status=503, text='RU-zone is not available')
+        abroad = ru_exit is not None
         text_body = None
-        if fmt == 'clash':
+        if abroad_clash is not None:
+            text_body = abroad_clash
+        elif abroad_obj is not None:
+            config_obj = abroad_obj
+        elif fmt == 'clash':
             # E3: the profile's Cascade/Auto groups leave out what
             # DPIMonitor demotes for this network (VPN keeps it for the
             # manual pick). Tolerant read — junk collapses to nothing.
@@ -1252,13 +1294,16 @@ class WebAppServer:
         # the dashboard.
         headers = {
             'profile-update-interval': '6',  # refresh every 6 hours
-            # The emergency link is added NEXT TO the main subscription —
-            # its own name keeps the two apart in the client's list.
-            'profile-title': 'NekoVPN SOS' if emergency else 'NekoVPN',
+            # Separate titles keep the emergency / abroad profiles apart
+            # from the main one in the client's list (abroad wins: it is
+            # a different split, not a variant of the home profile).
+            'profile-title': ('NekoVPN RU-zone' if abroad
+                              else 'NekoVPN SOS' if emergency else 'NekoVPN'),
         }
-        if fmt == 'clash':
+        if abroad_clash is not None or fmt == 'clash':
             # Clash clients name the profile from the file name.
-            name = 'NekoVPN-SOS' if emergency else 'NekoVPN'
+            name = ('NekoVPN-RU-zone' if abroad
+                    else 'NekoVPN-SOS' if emergency else 'NekoVPN')
             headers['content-disposition'] = f"attachment; filename*=UTF-8''{name}.yaml"
         try:
             quota_bytes = int((user.quota_gb or 0) * BYTES_PER_GB)
