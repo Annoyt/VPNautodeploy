@@ -8,6 +8,8 @@ import time
 import asyncio
 import hmac
 import hashlib
+import ipaddress
+from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import parse_qs, unquote
 from aiohttp import web
 from pathlib import Path
@@ -54,6 +56,21 @@ BYTES_PER_GB = 1024 ** 3
 # /probe/<token>/<group>: the token is SubscriptionService.derive_token's
 # 32 lowercase hex chars — anything else is answered without a lookup.
 _PROBE_TOKEN_RE = re.compile(r'[0-9a-f]{32}')
+
+# Address space no user's network is ever seen from: loopback, RFC 1918
+# (docker bridges are 172.16/12, its default pools also 10/8 and
+# 192.168/16), link-local, carrier-grade NAT, IPv6 loopback / ULA /
+# link-local. An explicit list on purpose: ipaddress' ``is_private`` also
+# covers the documentation ranges (192.0.2.0/24, 198.51.100.0/24,
+# 203.0.113.0/24) and its definition moves between Python versions.
+_INTERNAL_NETS = tuple(ipaddress.ip_network(n) for n in (
+    '10.0.0.0/8', '100.64.0.0/10', '127.0.0.0/8', '169.254.0.0/16',
+    '172.16.0.0/12', '192.168.0.0/16',
+    '::1/128', 'fc00::/7', 'fe80::/10',
+))
+# Settings that hold the public address of one of our nodes. A value that
+# is a host name rather than an IP is skipped, never resolved.
+_OWN_NODE_SETTINGS = ('ENTRY_NODE_IP', 'EXIT_NODE_IP', 'HY2_HOST', 'FALLBACK_NODE_HOST')
 
 
 def _deployed_version() -> str:
@@ -110,6 +127,12 @@ class WebAppServer:
         self._hy2_quota_refreshing: set = set()
         # strong refs: the event loop keeps only weak ones to its tasks
         self._bg_tasks: set = set()
+        # DE reserve provisioning off the /sub path (see
+        # _schedule_fallback_provisioning): uuids with a call queued or
+        # running, and the one thread those calls get.
+        self._fallback_inflight: set = set()
+        self._fallback_pool = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix='fallback-node')
         # /probe heartbeats (E4): token -> chat_id, rebuilt from users on
         # a miss (at most once a minute) and every 10 min; the last row
         # time per (chat_id, group) for the one-row-a-minute limit.
@@ -210,6 +233,11 @@ class WebAppServer:
         )
         self.app.router.add_get(
             '/api/admin/geo_points', self.handle_admin_geo_points,
+        )
+        # Client-side success per protocol × ASN (IMPROVEMENT_PLAN C2) —
+        # the Signals tab's "Клиенты по операторам" table.
+        self.app.router.add_get(
+            '/api/admin/client_health', self.handle_admin_client_health,
         )
         
         # Static files — explicit routes to avoid conflicts with API
@@ -931,6 +959,34 @@ class WebAppServer:
             ))
         return rows
 
+    def _is_own_address(self, ip: str) -> bool:
+        """Is ``ip`` ours — one of our nodes, or internal address space —
+        rather than a user's network?
+
+        A client that refreshes its profile THROUGH the tunnel reaches /sub
+        from the node the tunnel leaves by (the exit, the entry, the DE
+        reserve), and a hairpin through a docker bridge arrives as 172.x.
+        Geo-resolving such an address stamps the node's ASN and country on
+        the user, and the per-ASN cascade and DPIMonitor rules then count
+        them as a customer of our hoster.
+        """
+        try:
+            addr = ipaddress.ip_address(ip)
+        except ValueError:
+            return False
+        if addr.version == 6 and addr.ipv4_mapped:
+            addr = addr.ipv4_mapped
+        if any(addr in net for net in _INTERNAL_NETS):
+            return True
+        for name in _OWN_NODE_SETTINGS:
+            value = str(getattr(self.config, name, '') or '').strip()
+            try:
+                if value and ipaddress.ip_address(value) == addr:
+                    return True
+            except ValueError:
+                continue
+        return False
+
     def _record_sub_fetch(
         self, chat_id: str, country, asn,
         city=None, lat=None, lon=None,
@@ -950,6 +1006,47 @@ class WebAppServer:
                 conn.commit()
         except Exception as e:
             logger.warning(f"sub_fetches insert failed: {e}")
+
+    def _schedule_fallback_provisioning(self, user) -> None:
+        """Provision a paid user on the DE reserve without making /sub wait.
+
+        A panel request may take its full 15-s timeout, and a failed call is
+        not cached. Awaited inline, a blackholed panel held every paid fetch
+        that missed the cache for that long. The profile carries the DE
+        outbound either way, and it authenticates once this call lands.
+
+        At most one call per uuid is queued or running, so a client that
+        retries /sub does not stack them. The calls run one at a time on a
+        thread of their own. On the default pool, a few hung calls would
+        fill the pool that every to_thread of this server shares, /sub's
+        own token lookup included. With one thread, a dead panel costs one
+        timeout: the calls queued behind it find the panel in its skip
+        window. Never raises.
+        """
+        uuid = getattr(user, 'uuid', None)
+        if not uuid or uuid in self._fallback_inflight:
+            return
+
+        async def _provision():
+            from bot.services.fallback_node import FallbackNodeService
+            try:
+                await asyncio.get_running_loop().run_in_executor(
+                    self._fallback_pool,
+                    FallbackNodeService(self.config).ensure_client, user,
+                )
+            except Exception as e:
+                logger.warning(f'sub: fallback provisioning failed for {user.chat_id}: {e}')
+            finally:
+                self._fallback_inflight.discard(uuid)
+
+        try:
+            task = asyncio.get_running_loop().create_task(_provision())
+        except Exception as e:
+            logger.warning(f'sub: could not schedule fallback provisioning: {e}')
+            return
+        self._fallback_inflight.add(uuid)
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
 
     async def handle_subscription(self, request: web.Request) -> web.Response:
         """Serve a sing-box JSON subscription for a single user.
@@ -995,6 +1092,13 @@ class WebAppServer:
             or (request.headers.get('X-Real-IP', '') or '').strip()
             or (request.remote or '')
         )
+        # ...unless the address is ours: a refresh through the tunnel says
+        # nothing about the user's network. No lookup then (the hy2 auth
+        # guard, same reason), so nothing below writes a network — not
+        # users.last_*, not a sub_fetches row (failure reports print its
+        # max(ts) as the age of that network) — and the cascade falls back
+        # to the user's stored one.
+        own_address = self._is_own_address(client_ip)
         country = None
         asn = None
         city = region = None
@@ -1004,7 +1108,7 @@ class WebAppServer:
                 lookup as _geo, lookup_asn as _asn,
                 lookup_city as _city,
             )
-            if client_ip:
+            if client_ip and not own_address:
                 g = await asyncio.to_thread(_geo, client_ip)
                 if g:
                     country = g[0]
@@ -1058,10 +1162,7 @@ class WebAppServer:
         # and — when we know it — ASN/country tuned. ASN wins; country
         # is the fallback.
         from bot.handlers.callbacks.user import MyKeyAnswerHandler
-        from bot.services.fallback_node import (
-            FALLBACK_ALLOWED_STATUSES,
-            FallbackNodeService,
-        )
+        from bot.services.fallback_node import FALLBACK_ALLOWED_STATUSES
         from bot.services.lockdown import is_lockdown_active
         # LOCKDOWN (IMPROVEMENT_PLAN B1/B5): read once per request and
         # handed to the sing-box builder for the DNS profile; the
@@ -1108,16 +1209,12 @@ class WebAppServer:
             )
 
         # Paid-tier users get the reserve fallback node appended by the
-        # builder below. Provision them there lazily (idempotent, cached)
-        # so the outbound actually authenticates when they switch to it.
-        # Sync HTTP to the reserve panel — must not block the loop.
+        # builder below, whatever the panel says. Provision them there
+        # lazily (idempotent, cached) so the outbound actually
+        # authenticates when they switch to it — in the background: this
+        # response never waits for the reserve panel.
         if user.status in FALLBACK_ALLOWED_STATUSES:
-            try:
-                await asyncio.to_thread(
-                    FallbackNodeService(self.config).ensure_client, user,
-                )
-            except Exception as e:
-                logger.warning(f'sub: fallback provisioning failed for {user.chat_id}: {e}')
+            self._schedule_fallback_provisioning(user)
 
         # Format selection: default is the sing-box config (Hiddify).
         # ``?format=xray`` gets the Xray-core JSON (imports into Happ as
@@ -1490,6 +1587,44 @@ class WebAppServer:
             'traffic': traffic_summary,
             'registrations': reg_stats,
         })
+
+    async def handle_admin_client_health(self, request: web.Request) -> web.Response:
+        """``GET /api/admin/client_health?hours=1|6|24|168`` (default 24) —
+        what works for the users of each operator, from their own clients
+        (IMPROVEMENT_PLAN C2): the FlClash per-protocol health checks in
+        ``client_probe`` (``grp = 'p-<proto>'``; channels never count as a
+        protocol). Semantics live in ``bot/services/client_health.py``.
+
+        Response::
+
+            {"hours": 24, "since": "2026-10-09 12:00:00",
+             "protocols": ["reality", "ws", ...],      # seen in the window
+             "rows": [{"asn": "AS31133" | null, "country": "RU",
+                       "clients": 7, "probed": 5, "last_ts": "...",
+                       "protocols": {"ws": {"alive": 4, "dead": 1,
+                                            "rate": 0.8, "last_ts": "..."},
+                                     ...}}, ...],
+             "rows_total": 12, "total": {...same, no asn / country...},
+             "truncated": false}
+
+        Any other ``hours`` is a 400 — the window is a scan, not a knob.
+        """
+        if not self._validate_admin(request):
+            return web.json_response({'error': 'Unauthorized'}, status=401)
+        from bot.services import client_health
+        hours = client_health.parse_window(request.query.get('hours'))
+        if hours is None:
+            return web.json_response(
+                {'error': 'hours must be one of '
+                          + ', '.join(str(h) for h in client_health.WINDOWS_H)},
+                status=400,
+            )
+        try:
+            data = await asyncio.to_thread(client_health.collect, self.db, hours)
+        except Exception as e:
+            logger.exception("client_health: db read failed")
+            return web.json_response({'error': str(e)}, status=500)
+        return web.json_response(data)
 
     # ==================== Admin — Detail / Audit / System ====================
 

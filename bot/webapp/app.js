@@ -169,7 +169,7 @@
         if (tab === 'users')    fetchUsers();
         if (tab === 'stats')    fetchStats();
         if (tab === 'alerts')   { fetchAlerts(); fetchReports(); }
-        if (tab === 'signals')  { fetchFailureReports(); fetchAsnHeatmap(); fetchGeoPoints(); }
+        if (tab === 'signals')  { fetchFailureReports(); fetchAsnHeatmap(); fetchClientHealth(); fetchGeoPoints(); }
         if (tab === 'settings') fetchSettings();
     }
 
@@ -1966,6 +1966,102 @@
         container.innerHTML = `<table class="heatmap-table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
     }
 
+    // ==================== Signals — clients by operator ====================
+    // What works for each operator's users, seen from their own clients
+    // (IMPROVEMENT_PLAN C2): /api/admin/client_health folds the FlClash
+    // per-protocol health checks (client_probe 'p-<proto>') into
+    // alive / dead per users.last_asn; rate = alive / (alive + dead) comes
+    // from the backend, null = no data. These two thresholds are the
+    // only copy of the colour bands (pinned by tests/e2e).
+    const CLIENT_RATE_GOOD = 0.75;   // rate ≥ this → green
+    const CLIENT_RATE_BAD = 0.25;    // rate < this → red, in between → yellow
+    const CLIENT_PROTO_LABEL = {
+        reality: 'REALITY', hy2: 'HY2', hy2t: 'HY2T', ws: 'WS', stls: 'STLS', de: 'DE',
+    };
+    // A window switch while the previous answer is in flight must not let
+    // the older (slower) answer paint over the newer one.
+    let _clientHealthSeq = 0;
+    // esc() leaves quotes alone; these values go inside attributes.
+    const escAttr = v => esc(v).replace(/"/g, '&quot;');
+
+    function clientRateClass(cell) {
+        const rate = cell ? cell.rate : null;
+        if (rate === null || rate === undefined) return 'heat-none';
+        if (rate >= CLIENT_RATE_GOOD) return 'heat-good';
+        if (rate >= CLIENT_RATE_BAD) return 'heat-warn';
+        return 'heat-bad';
+    }
+
+    function clientCellHtml(proto, cell) {
+        const cls = clientRateClass(cell);
+        if (cls === 'heat-none') {
+            return `<td data-proto="${escAttr(proto)}"><span class="heat-cell heat-none">—</span></td>`;
+        }
+        const alive = Number(cell.alive) || 0;
+        const n = alive + (Number(cell.dead) || 0);
+        const title = `работает у ${alive} из ${n}`
+            + (cell.last_ts ? ` · последний успех ${cell.last_ts} UTC` : '');
+        return `<td data-proto="${escAttr(proto)}">`
+            + `<span class="heat-cell ${cls}" title="${escAttr(title)}">${Math.round(Number(cell.rate) * 100)}%</span>`
+            + `<span class="ch-n">${alive}/${n}</span></td>`;
+    }
+
+    async function fetchClientHealth() {
+        const container = document.getElementById('signals-clients');
+        if (!container) return;
+        const hours = document.getElementById('signals-clients-hours')?.value || '24';
+        const seq = ++_clientHealthSeq;
+        let data;
+        try {
+            data = await apiFetch(`/api/admin/client_health?hours=${encodeURIComponent(hours)}`);
+        } catch (e) {
+            if (seq === _clientHealthSeq) {
+                container.innerHTML = `<div class="placeholder-text">⚠️ ${esc(e.message)}</div>`;
+            }
+            return;
+        }
+        if (seq !== _clientHealthSeq) return;
+        const rows = data.rows || [];
+        const protos = data.protocols || [];
+        if (!rows.length) {
+            container.innerHTML = '<div class="placeholder-text">Нет проверок от клиентов за выбранный период.</div>';
+            return;
+        }
+        const head = '<th>ASN</th><th>Страна</th><th title="клиентов с проверками за окно">👥</th>'
+            + protos.map(p => `<th>${esc(CLIENT_PROTO_LABEL[p] || String(p).toUpperCase())}</th>`).join('')
+            + '<th>посл. (UTC)</th>';
+        const rowHtml = (r, isTotal) => {
+            const key = isTotal ? '*' : (r.asn || '?');
+            const name = isTotal ? 'Σ все операторы' : (r.asn || 'неизвестно');
+            const cells = protos.map(p => clientCellHtml(p, (r.protocols || {})[p])).join('');
+            const last = r.last_ts ? String(r.last_ts).slice(5, 16) : '—';
+            return `
+                <tr class="${isTotal ? 'ch-total' : ''}" data-asn="${escAttr(key)}">
+                    <td><b>${esc(name)}</b></td>
+                    <td>${isTotal ? '' : esc(r.country || '—')}</td>
+                    <td title="${escAttr('с проверками протоколов: ' + (Number(r.probed) || 0))}">${Number(r.clients) || 0}</td>
+                    ${cells}
+                    <td title="${escAttr(r.last_ts || '')}">${esc(last)}</td>
+                </tr>`;
+        };
+        const body = (data.total ? rowHtml(data.total, true) : '')
+            + rows.map(r => rowHtml(r, false)).join('');
+        let notes = '';
+        if (!protos.length) {
+            notes += '<div class="cascade-hint">Проверок по протоколам (p-*) за окно нет — '
+                + 'клиенты видны только по каналам (emergency / mirror).</div>';
+        }
+        if ((data.rows_total || 0) > rows.length) {
+            notes += `<div class="cascade-hint">Показаны ${rows.length} операторов из ${Number(data.rows_total)}; `
+                + 'итог — по всем.</div>';
+        }
+        if (data.truncated) {
+            notes += '<div class="cascade-hint">⚠️ Строк за окно больше лимита — счётчики неполные.</div>';
+        }
+        container.innerHTML = '<table class="heatmap-table client-health-table">'
+            + `<thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>` + notes;
+    }
+
     function setupSignalsHandlers() {
         ['signals-reports-state', 'signals-reports-hours'].forEach(id => {
             const el = document.getElementById(id);
@@ -1977,6 +2073,10 @@
         if (hSel) hSel.addEventListener('change', fetchAsnHeatmap);
         const hReload = document.getElementById('signals-heat-reload');
         if (hReload) hReload.addEventListener('click', fetchAsnHeatmap);
+        const cSel = document.getElementById('signals-clients-hours');
+        if (cSel) cSel.addEventListener('change', fetchClientHealth);
+        const cReload = document.getElementById('signals-clients-reload');
+        if (cReload) cReload.addEventListener('click', fetchClientHealth);
         ['signals-map-hours'].forEach(id => {
             const el = document.getElementById(id);
             if (el) el.addEventListener('change', fetchGeoPoints);

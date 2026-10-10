@@ -11,9 +11,10 @@ to. This service provisions them on the reserve x-ui panel (mytherm,
 Design
 ------
 - **Lazy provisioning**: on a paid user's ``/sub`` fetch we check their
-  email on the fallback inbound and add the client if missing. No
-  changes to the key-issuance flow, and users who never fetch /sub
-  never touch the reserve panel.
+  email on the fallback inbound and add the client if missing — in the
+  background, /sub never waits for the panel. No changes to the
+  key-issuance flow, and users who never fetch /sub never touch the
+  reserve panel.
 - **Same uuid as the main system** — one credential per user, revocation
   is a delete-by-uuid mirroring ``user_lifecycle.revoke_user_key``.
 - **Panel is 2.8.x**: form login → session cookie, classic
@@ -50,18 +51,45 @@ logger = logging.getLogger(__name__)
 FALLBACK_ALLOWED_STATUSES = ('paid', 'support_topic')
 
 # Membership re-check interval per user. The /sub handler calls
-# ensure_client on every fetch; without this cache each refresh of every
-# paid user costs a panel login + GET. Clients don't vanish from the
-# panel on their own, so a 10-minute "known good" window is safe.
+# ensure_client on every paid fetch; without this cache each refresh of
+# every paid user costs a panel login + GET. Clients don't vanish from the
+# panel on their own (revocation goes through remove_client, which drops
+# the entry), so a 10-minute "known good" window is safe.
 _ENSURE_CACHE_TTL = 600
+
+# One panel request: the connect, then each read.
+_PANEL_TIMEOUT_S = 15
+
+# After the panel did not answer at all, ensure_client leaves it alone for
+# this long: a blackholed panel costs one timeout per window, not one per
+# paid user. An answer, even an error, is no reason to skip — that panel is
+# up, and the next call may well succeed.
+_PANEL_SKIP_S = 60
+
+# requests' "the panel did not answer": refused, reset, TLS or DNS failure
+# (ConnectionError) and connect or read timeouts (Timeout).
+_UNREACHABLE = (requests.exceptions.ConnectionError, requests.exceptions.Timeout)
 
 
 class FallbackNodeService:
     """Provisioning + outbound builder for the reserve node."""
 
+    # The membership cache belongs to the process, not to an instance:
+    # /sub and /kit build a fresh service for every request, so a cache on
+    # the instance never hit and every paid /sub fetch logged into the
+    # reserve panel. uuid -> (time.monotonic() of the panel check, result).
+    # Keyed by uuid, not email: a re-keyed user keeps the email, and the
+    # new uuid must be provisioned. Plain dict get/set/pop, atomic under
+    # the GIL; two fetches of one user racing past a miss cost a second,
+    # idempotent check. Size: one entry per paid uuid that fetched /sub
+    # since the process started.
+    _ensure_cache: dict = {}
+    # time.monotonic() before which ensure_client does not call the panel
+    # (_PANEL_SKIP_S). On the class like the cache: one panel, one window.
+    _panel_skip_until: float = 0.0
+
     def __init__(self, config):
         self.config = config
-        self._ensure_cache: dict[str, float] = {}
 
     # ----- config accessors -----
 
@@ -148,21 +176,48 @@ class FallbackNodeService:
                     'username': self._cfg('FALLBACK_NODE_XUI_USER', 'admin'),
                     'password': self._cfg('FALLBACK_NODE_XUI_PASS'),
                 },
-                timeout=15,
+                timeout=_PANEL_TIMEOUT_S,
             )
             return r.status_code == 200 and r.json().get('success') is True
+        except _UNREACHABLE:
+            raise   # no answer at all: ensure_client skips the panel for a while
         except Exception as e:
             logger.warning(f'fallback_node: panel login failed: {e}')
             return False
 
     def _get_client_uuids(self, s: requests.Session) -> dict:
         """email → uuid map of the fallback inbound."""
-        r = s.get(f'{self._base()}/panel/api/inbounds/get/{self._inbound_id()}', timeout=15)
+        r = s.get(f'{self._base()}/panel/api/inbounds/get/{self._inbound_id()}',
+                  timeout=_PANEL_TIMEOUT_S)
         obj = r.json().get('obj') or {}
         settings = obj.get('settings') or '{}'
         if isinstance(settings, str):
             settings = json.loads(settings)
         return {c.get('email'): c.get('id') for c in settings.get('clients', [])}
+
+    @classmethod
+    def _cached(cls, uuid: str) -> Optional[bool]:
+        """The panel's answer for this uuid while it is fresh, else None."""
+        hit = cls._ensure_cache.get(uuid)
+        if hit is None or time.monotonic() - hit[0] >= _ENSURE_CACHE_TTL:
+            return None
+        return hit[1]
+
+    @classmethod
+    def _remember(cls, uuid: str, result: bool) -> None:
+        cls._ensure_cache[uuid] = (time.monotonic(), result)
+
+    @classmethod
+    def _forget(cls, uuid: str) -> None:
+        cls._ensure_cache.pop(uuid, None)
+
+    @classmethod
+    def _panel_skipped(cls) -> bool:
+        return time.monotonic() < cls._panel_skip_until
+
+    @classmethod
+    def _skip_panel(cls) -> None:
+        cls._panel_skip_until = time.monotonic() + _PANEL_SKIP_S
 
     def ensure_client(self, user) -> bool:
         """Provision the user on the reserve node if missing. Idempotent.
@@ -170,16 +225,22 @@ class FallbackNodeService:
         Returns True when the client is present (already or just added).
         Any panel failure is logged and returns False — the caller still
         emits the outbound; the client will just fail until the next
-        /sub refresh retries provisioning.
+        /sub refresh retries provisioning. A failure is not cached, so
+        that next refresh asks the panel again; a definite answer
+        (present, or the email taken by another uuid) is reused for
+        ``_ENSURE_CACHE_TTL`` seconds. A panel that did not answer at all
+        is not asked by any call for ``_PANEL_SKIP_S`` seconds.
         """
         email = getattr(user, 'email', None)
         uuid = getattr(user, 'uuid', None)
         if not (self.enabled and self._api_configured and email and uuid):
             return False
 
-        cached = self._ensure_cache.get(email, 0)
-        if time.time() - cached < _ENSURE_CACHE_TTL:
-            return True
+        cached = self._cached(uuid)
+        if cached is not None:
+            return cached
+        if self._panel_skipped():
+            return False
 
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         try:
@@ -188,14 +249,14 @@ class FallbackNodeService:
                 return False
             existing = self._get_client_uuids(s)
             if existing.get(email) == uuid:
-                self._ensure_cache[email] = time.time()
+                self._remember(uuid, True)
                 return True
             if email in existing:
                 logger.warning(
                     f'fallback_node: {email} exists with a different uuid, '
                     'leaving as-is'
                 )
-                self._ensure_cache[email] = time.time()
+                self._remember(uuid, False)
                 return False
             client = {
                 'id': uuid, 'flow': '', 'email': email,
@@ -205,21 +266,33 @@ class FallbackNodeService:
             r = s.post(
                 f'{self._base()}/panel/api/inbounds/addClient',
                 json={'id': self._inbound_id(), 'settings': json.dumps({'clients': [client]})},
-                timeout=15,
+                timeout=_PANEL_TIMEOUT_S,
             )
             ok = r.status_code == 200 and r.json().get('success') is True
             if ok:
-                self._ensure_cache[email] = time.time()
+                self._remember(uuid, True)
                 logger.info(f'fallback_node: provisioned {email}')
             else:
                 logger.warning(f'fallback_node: addClient failed: {r.json().get("msg")}')
             return ok
+        except _UNREACHABLE as e:
+            self._skip_panel()
+            logger.warning(
+                f'fallback_node: panel did not answer ({e}) — provisioning '
+                f'skips it for {_PANEL_SKIP_S}s')
+            return False
         except Exception as e:
             logger.warning(f'fallback_node: ensure_client failed for {email}: {e}')
             return False
 
     def remove_client(self, uuid: str) -> bool:
-        """Delete a client by uuid (revocation path). Best-effort."""
+        """Delete a client by uuid (revocation path). Best-effort.
+
+        Always asks the panel, even inside ensure_client's skip window: a
+        revocation is rare and must not be dropped on a guess."""
+        # Whatever the panel answers below, the next ensure_client for this
+        # uuid must ask it again instead of trusting a pre-revoke "present".
+        self._forget(uuid)
         if not (self.enabled and self._api_configured and uuid):
             return False
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -229,7 +302,7 @@ class FallbackNodeService:
                 return False
             r = s.post(
                 f'{self._base()}/panel/api/inbounds/{self._inbound_id()}/delClient/{uuid}',
-                timeout=15,
+                timeout=_PANEL_TIMEOUT_S,
             )
             ok = r.status_code == 200 and r.json().get('success') is True
             if ok:

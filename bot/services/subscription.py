@@ -442,10 +442,11 @@ class SubscriptionService:
             if proto in ('reality', 'hy2', 'hy2t'):
                 udp_call_tags.append(tag)
 
-        # Reserve fallback node (DE) — paid-tier only. The client was
-        # provisioned lazily by the /sub handler before this build; here
-        # we just append the outbound so it joins the auto-selector. A
-        # broken reserve panel must never kill the whole subscription.
+        # Reserve fallback node (DE) — paid-tier only. The /sub handler
+        # provisions the client lazily, in the background; here we just
+        # append the outbound so it joins the auto-selector, whether or
+        # not that call has landed yet. A broken reserve panel must never
+        # kill the whole subscription.
         if user and getattr(user, 'status', None) in FALLBACK_ALLOWED_STATUSES:
             try:
                 fb = FallbackNodeService(self.config).build_outbound(user)
