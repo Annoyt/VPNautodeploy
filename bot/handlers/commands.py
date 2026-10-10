@@ -121,7 +121,7 @@ class CommandHandler(BaseHandler):
             notifier.notify_rejected_can_retry(chat_id, user)
         elif user.status in (UserState.DEMO.value, UserState.PAID.value, UserState.SUPPORT_TOPIC.value):
             # User already has access, show main menu
-            notifier.notify_main_menu(chat_id, user.lang)
+            notifier.notify_main_menu(chat_id, user.lang, user=user)
         elif user.status == UserState.PLATFORM_SELECT.value:
             # User was approved but hasn't selected a platform yet
             notifier.notify_approved(chat_id, user.lang)
@@ -176,7 +176,8 @@ class CommandHandler(BaseHandler):
                     "/stats - Показать статистику\n"
                     "/mykey - Получить subscription URL (=/sub)\n"
                     "/sub - Subscription URL (один линк = весь каскад)\n"
-                    "/buy - Купить подписку (100 ГБ/мес, все протоколы)\n"
+                    "/buy - Купить подписку (100 ГБ/мес, все протоколы, "
+                    "RU-зона для поездок за границу)\n"
                     "/raw - Raw-ключи для legacy-клиентов (CDN-only)\n"
                     "/sos - Не подключается? Аварийная подписка и что сейчас работает\n"
                     "/kit - Офлайн-комплект: профиль файлом (сохрани заранее)\n"
@@ -191,7 +192,8 @@ class CommandHandler(BaseHandler):
                     "/stats - Show your statistics\n"
                     "/mykey - Get subscription URL (=/sub)\n"
                     "/sub - Subscription URL (one link = full cascade)\n"
-                    "/buy - Buy a subscription (100 GB/mo, all protocols)\n"
+                    "/buy - Buy a subscription (100 GB/mo, all protocols, "
+                    "RU zone for trips abroad)\n"
                     "/raw - Raw keys for legacy clients (CDN-only)\n"
                     "/sos - Not connecting? Emergency subscription + what works now\n"
                     "/kit - Offline kit: the profile as a file (save it in advance)\n"
@@ -399,6 +401,11 @@ class CommandHandler(BaseHandler):
             {'text': '📱 Android', 'callback_data': 'setplat:android'},
             {'text': '💻 ПК', 'callback_data': 'setplat:windows'},
         ]]}
+        # Paid users only (bot/services/ru_exit.py).
+        from bot.services.ru_exit import ru_zone_button_row
+        ru_row = ru_zone_button_row(self.db, user)
+        if ru_row:
+            plat_keyboard['inline_keyboard'].append(ru_row)
 
         if is_ios and user.lang != 'en':
             text = (

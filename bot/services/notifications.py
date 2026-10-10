@@ -123,8 +123,9 @@ class NotificationService:
             logger.error(f"Failed to send pending: {e}")
             return False
     
-    def notify_main_menu(self, chat_id: str, lang: str = 'ru') -> bool:
-        """Show main menu to active users."""
+    def notify_main_menu(self, chat_id: str, lang: str = 'ru', user=None) -> bool:
+        """Show main menu to active users. With ``user`` a paid user also
+        gets the "🇷🇺 RU-zone" button (bot/services/ru_exit.py)."""
         texts = {
             'ru': '👋 Главное меню NekoVPN\n\nВыберите действие:',
             'en': '👋 NekoVPN Main Menu\n\nChoose an action:'
@@ -142,6 +143,11 @@ class NotificationService:
                 [{'text': btn_support.get(lang, btn_support['ru']), 'callback_data': 'support'}]
             ]
         }
+        if user is not None:
+            from bot.services.ru_exit import ru_zone_button_row
+            ru_row = ru_zone_button_row(self.db, user)
+            if ru_row:
+                keyboard['inline_keyboard'].insert(1, ru_row)
         
         try:
             self.bot.send_message(

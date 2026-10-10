@@ -90,7 +90,7 @@ class TestCommandHandlerEdgeCases:
                 mock_notifier = MagicMock()
                 mock_notifier_cls.return_value = mock_notifier
                 mock_command_handler.handle_start({'message': {'chat': {'id': '123'}}}, '123')
-                mock_notifier.notify_main_menu.assert_called_once_with('123', 'ru')
+                mock_notifier.notify_main_menu.assert_called_once_with('123', 'ru', user=user)
                 mock_notifier.notify_welcome.assert_not_called()
     
     def test_handle_help_admin(self, mock_command_handler):
