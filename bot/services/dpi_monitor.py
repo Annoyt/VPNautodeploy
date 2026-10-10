@@ -17,7 +17,7 @@ it stayed the second protocol demo users were handed.
 
 What it does (and deliberately does NOT do)
 -------------------------------------------
-Every ``DPI_MONITOR_INTERVAL_MIN`` (10) minutes the job reads four
+Every ``DPI_MONITOR_INTERVAL_MIN`` (10) minutes the job reads five
 signals and, with hysteresis, moves failing protocols to the END of the
 user-facing cascade. It never removes or disables a protocol, and it
 never edits the operator's own settings — ``cascade_protocol_order``,
@@ -34,6 +34,9 @@ Rules (signal → target)
                     3 runs (LIMIT 30 within 3 h, ≥15 samples);
                     alive = latency_ms IS NOT NULL OR status='ok'
   probe_degraded    outbound_health: ok/len < 0.25 over ≥25 samples  <p> globally
+  client_dark       client_probe 'p-<proto>' (E8) per users.last_asn, <p> @ASN
+                    2 h: ≥3 clients up through ANOTHER cascade
+                    protocol with no <p> row, 0 clients with one
   reality_asn       dpi_metrics inbound_tag='reality' per ASN, 2 h:  reality @ASN
                     hsfail ≥ 30 AND hsfail ≥ 2 × conn
   udp_storm_asn     hy2_auth_log: ≥30 allows / 2 h for ONE chat_id,  hy2 + hy2t @ASN
@@ -48,11 +51,12 @@ Hysteresis
   demote after 2 consecutive bad evaluations (~20 min at the 10-min
   cadence); restore after 6 consecutive good ones (~1 h); at least
   30 min between two changes of the same target; at most 2 changes per
-  run, ranked probe_dark > probe_degraded > reality_asn > udp_storm_asn
-  > user_reports_asn with restores after demotes. "good" means the RULE
-  that demoted the target is quiet this evaluation (the rule id is kept
-  in state), so a probe-demoted protocol is not restored just because
-  no user complained.
+  run, ranked probe_dark > probe_degraded > client_dark > reality_asn >
+  udp_storm_asn > user_reports_asn with restores after demotes (the same
+  rank decides which rule owns a target two rules fire on). "good" means
+  the RULE that demoted the target is quiet this evaluation (the rule id
+  is kept in state), so a probe-demoted protocol is not restored just
+  because no user complained.
 
 Guards
 ------
@@ -108,13 +112,18 @@ logger = logging.getLogger(__name__)
 # ---- rule ids --------------------------------------------------------------
 RULE_PROBE_DARK = 'probe_dark'
 RULE_PROBE_DEGRADED = 'probe_degraded'
+RULE_CLIENT_DARK = 'client_dark'
 RULE_REALITY_ASN = 'reality_asn'
 RULE_UDP_STORM_ASN = 'udp_storm_asn'
 RULE_USER_REPORTS_ASN = 'user_reports_asn'
-# Rank for the per-run cap: DARK > DEGRADED > R3 > R4 > R5.
+# Rank for the per-run cap: DARK > DEGRADED > R6 > R3 > R4 > R5. R6 is the
+# users' own clients — first-hand per protocol and per network, so it
+# outranks every server-side per-ASN inference, but not the probes (one
+# vantage, every protocol, every 15 min, pinned to the pager's numbers).
 RULES = (
     RULE_PROBE_DARK,
     RULE_PROBE_DEGRADED,
+    RULE_CLIENT_DARK,
     RULE_REALITY_ASN,
     RULE_UDP_STORM_ASN,
     RULE_USER_REPORTS_ASN,
@@ -124,6 +133,7 @@ PROBE_RULES = frozenset({RULE_PROBE_DARK, RULE_PROBE_DEGRADED})
 # Which rules go UNKNOWN (frozen) when a collector fails — see Guards.
 COLLECTOR_RULES = {
     'probe': PROBE_RULES,
+    'client_dark': frozenset({RULE_CLIENT_DARK}),
     'reality_asn': frozenset({RULE_REALITY_ASN}),
     'udp_storm_asn': frozenset({RULE_UDP_STORM_ASN}),
     'reports_asn': frozenset({RULE_USER_REPORTS_ASN}),
@@ -132,6 +142,7 @@ COLLECTOR_RULES = {
 RULE_TITLES_RU = {
     RULE_PROBE_DARK: 'пробы: протокол мёртв (DARK)',
     RULE_PROBE_DEGRADED: 'пробы: протокол деградировал (DEGRADED)',
+    RULE_CLIENT_DARK: 'клиенты: протокол тёмен в сети (ASN)',
     RULE_REALITY_ASN: 'Reality: handshake-fail по ASN',
     RULE_UDP_STORM_ASN: 'Hy2: reconnect-шторм по ASN',
     RULE_USER_REPORTS_ASN: 'жалобы «не работает» по ASN',
@@ -153,6 +164,38 @@ PROBE_WINDOW_H = 3          # only look at recent rows
 PROBE_STALE_MIN = 45        # 3 missed runs at the 15-min cadence
 PROBE_DEGRADED_OK_RATIO = 0.25   # below a quarter of the 7/10 norm…
 PROBE_DEGRADED_MIN_SAMPLES = 25  # …sustained over ~3 runs, not one dip
+
+# ---- R6: a protocol dark at an operator, as the users' clients see it ------
+# IMPROVEMENT_PLAN E8. The FlClash profile health-checks every protocol it
+# holds through its own provider ``p-<proto>`` (subscription.py,
+# _clash_telemetry_providers) every 10 min; GET /probe/<token>/p-<proto>
+# leaves a client_probe row only when the check got THROUGH that protocol.
+# The entry probes see one vantage (entry's ASN); these rows are each
+# user's own network, attributed by users.last_asn (the network of the
+# last profile fetch).
+#   dead(asn, p)  = clients up through ANOTHER cascade protocol in the
+#                   window (a live row) with no p row at all, p offered to
+#                   them (tier, operator's enabled set, built here);
+#   alive(asn, p) = clients with a p row in the window.
+# Fires on dead ≥ 3 AND alive == 0. Three distinct users of one operator:
+# one is a device, two a coincidence, three a pattern. alive == 0: a single
+# client still getting through p in that network means p is not blocked
+# there as a whole. The 2-h window is twelve check rounds: a client counts
+# as dead on p only after twelve straight failures of p while its other
+# protocols pass — a flaky mobile link drops a check or two, not twelve.
+# Slow on purpose (detection ~2 h + the 2-evaluation hysteresis): R6 is
+# the confirmation that a server-side rule cannot give, not the alarm.
+# The guard "silence is not a block": rows that are missing say nothing —
+# a closed app, a sleeping phone, a dead exit (/probe sits behind exit's
+# Caddy) all look the same. Only a client with a live row through some
+# CASCADE protocol counts at all; an operator whose clients are all silent
+# (or alive only through the DE reserve) is no signal. No production data
+# for these rows exists yet (new with E8): recalibrate once there is.
+CLIENT_DARK_WINDOW_H = 2
+CLIENT_DARK_MIN_DEAD = 3
+CLIENT_DARK_MAX_ALIVE = 0
+CLIENT_TELEMETRY_PREFIX = 'p-'     # mirrors subscription.CLASH_TELEMETRY_PREFIX
+CLIENT_ACTIVE_STATUSES = ('demo', 'paid', 'support_topic')   # /sub serves them
 
 # ---- R3: Reality handshake failures per ASN --------------------------------
 # Reality users reach exit with their real IP (PROXY protocol via entry
@@ -289,6 +332,7 @@ def empty_signals() -> dict:
             'measured': [],
             'all_dark': False,
         },
+        'client_dark': {},          # {asn: {proto: evidence}}
         'reality_asn': {},
         'udp_storm_asn': {},
         'reports_asn': {},
@@ -450,6 +494,9 @@ class DPIMonitor:
         # a lockdown.Event ('auto_on' / 'auto_off'). In dry_run it is the
         # event that WOULD have been applied.
         self.lockdown_event: Optional[_lockdown.Event] = None
+        # The reverse-SOS sender of the LAST run_once (E21), None when the
+        # run wrote to nobody — kept so tests (and callers) can join it.
+        self.reverse_sos_thread = None
 
     # ---- enable flag -------------------------------------------------------
 
@@ -583,7 +630,7 @@ class DPIMonitor:
     # ---- collectors (I/O in) ------------------------------------------------
 
     def collect_signals(self, now: Optional[datetime] = None) -> dict:
-        """Read the four sources with the documented windows. Each
+        """Read the five sources with the documented windows. Each
         collector is isolated: one failing table must not blind the
         others (the whole point is to stop being blind)."""
         now = now or datetime.utcnow()
@@ -600,6 +647,7 @@ class DPIMonitor:
         try:
             for name, fn in (
                 ('probe', self._collect_probe),
+                ('client_dark', self._collect_client_dark),
                 ('reality_asn', self._collect_reality_asn),
                 ('udp_storm_asn', self._collect_udp_storm),
                 ('reports_asn', self._collect_reports),
@@ -681,6 +729,73 @@ class DPIMonitor:
         out['all_dark'] = (
             bool(measured) and len(out['dark']) == len(measured) and len(measured) >= 2
         )
+        return out
+
+    def _client_dark_offer(self) -> Tuple[set, set, frozenset]:
+        """What a Clash profile can carry right now, for R6's eligibility:
+        ``(offered, free, paid_statuses)`` — the operator's enabled
+        cascade protocols that this deployment also builds (the telemetry
+        set of the SAME builders /sub uses, minus the reserve), the
+        free-tier part of them, and the statuses that get the paid part.
+        A client is only "dead" on a protocol its profile holds: without
+        this every demo client would read as dead on reality, and a
+        protocol the operator switched off (hy2t since 2026-09-21) as dead
+        for everyone."""
+        from bot.handlers.callbacks.user import MyKeyAnswerHandler as MK
+        from bot.services.subscription import SubscriptionService
+        enabled = {c['name'] for c in MK.get_cascade_config(self.db) if c.get('enabled')}
+        built = SubscriptionService(self.config).telemetry_protocols()
+        offered = enabled & set(built) & set(MK.PROTOCOL_METHOD_MAP)
+        free = {p for p in offered if MK.PROTOCOL_TIER.get(p) == 'free'}
+        return offered, free, frozenset(MK.PAID_USER_STATUSES)
+
+    def _collect_client_dark(self, conn, now: datetime) -> dict:
+        """R6 (E8): ``{asn: {proto: evidence}}`` for every (network,
+        protocol) the users' own clients call dark — see the R6 block of
+        constants for the definition and the guard."""
+        # client_probe.ts is sqlite CURRENT_TIMESTAMP ('YYYY-MM-DD HH:MM:SS',
+        # a SPACE) — a 'T' cutoff would sort every same-day row below it.
+        cutoff = (now - timedelta(hours=CLIENT_DARK_WINDOW_H)).strftime('%Y-%m-%d %H:%M:%S')
+        rows = conn.execute(
+            "SELECT c.chat_id, c.grp, UPPER(TRIM(u.last_asn)), u.status "
+            "FROM client_probe c JOIN users u ON u.chat_id = c.chat_id "
+            "WHERE c.ts >= ? AND substr(c.grp, 1, ?) = ? "
+            "AND u.last_asn IS NOT NULL AND TRIM(u.last_asn) != '' "
+            "GROUP BY c.chat_id, c.grp",
+            (cutoff, len(CLIENT_TELEMETRY_PREFIX), CLIENT_TELEMETRY_PREFIX),
+        ).fetchall()
+        if not rows:
+            return {}
+        offered, free, paid_statuses = self._client_dark_offer()
+        cascade = self._known_protocols()
+        seen: Dict[str, set] = {}
+        who: Dict[str, Tuple[str, str]] = {}
+        for chat_id, grp, asn, status in rows:
+            seen.setdefault(str(chat_id), set()).add(str(grp)[len(CLIENT_TELEMETRY_PREFIX):])
+            who[str(chat_id)] = (asn, status or '')
+        by_asn: Dict[str, List[Tuple[str, set]]] = {}
+        for chat_id, protos in seen.items():
+            asn, status = who[chat_id]
+            # The guard: only a client with a live row through some
+            # CASCADE protocol counts at all (rows through the DE reserve
+            # alone say the app is open, not that our cascade is reachable).
+            up = protos & cascade
+            if up:
+                by_asn.setdefault(asn, []).append((status, up))
+        out: Dict[str, Dict[str, str]] = {}
+        for asn, clients in sorted(by_asn.items()):
+            for proto in sorted(offered):
+                alive = sum(1 for _status, up in clients if proto in up)
+                dead = sum(
+                    1 for status, up in clients
+                    if proto not in up and status in CLIENT_ACTIVE_STATUSES
+                    and (proto in free or status in paid_statuses)
+                )
+                if dead >= CLIENT_DARK_MIN_DEAD and alive <= CLIENT_DARK_MAX_ALIVE:
+                    out.setdefault(asn, {})[proto] = (
+                        f"клиенты {asn}: {alive}/{alive + dead} по {proto} за "
+                        f"{CLIENT_DARK_WINDOW_H} ч, другие протоколы живы"
+                    )
         return out
 
     def _collect_reality_asn(self, conn, now: datetime) -> dict:
@@ -782,6 +897,7 @@ class DPIMonitor:
         probe_usable = not probe.get('stale', True)
         dark = probe.get('dark') or {}
         degraded = probe.get('degraded') or {}
+        client_dark = (signals or {}).get('client_dark') or {}
         reality = (signals or {}).get('reality_asn') or {}
         storms = (signals or {}).get('udp_storm_asn') or {}
         reports = (signals or {}).get('reports_asn') or {}
@@ -806,8 +922,14 @@ class DPIMonitor:
                 firing[target_key('global', None, proto)] = (RULE_PROBE_DARK, ev)
             for proto, ev in degraded.items():
                 firing.setdefault(target_key('global', None, proto), (RULE_PROBE_DEGRADED, ev))
+        # Per-ASN rules in rank order, each only where no higher-ranked
+        # rule already claimed the target (R6 and R3 can both point at
+        # reality@ASN; the owner is the rule whose silence restores it).
+        for asn, protos in client_dark.items():
+            for proto, ev in (protos or {}).items():
+                firing.setdefault(target_key('asn', asn, proto), (RULE_CLIENT_DARK, ev))
         for asn, ev in reality.items():
-            firing[target_key('asn', asn, REALITY_INBOUND_TAG)] = (RULE_REALITY_ASN, ev)
+            firing.setdefault(target_key('asn', asn, REALITY_INBOUND_TAG), (RULE_REALITY_ASN, ev))
         for asn, ev in storms.items():
             for proto in UDP_STORM_PROTOCOLS:
                 firing.setdefault(target_key('asn', asn, proto), (RULE_UDP_STORM_ASN, ev))
@@ -830,6 +952,9 @@ class DPIMonitor:
             _scope, asn, proto = parse_target_key(key)
             if rule in PROBE_RULES:
                 return proto in dark or proto in degraded
+            if rule == RULE_CLIENT_DARK:
+                # Judged per (ASN, protocol): the clients name the protocol.
+                return proto in (client_dark.get(asn) or {})
             if rule == RULE_REALITY_ASN:
                 return asn in reality
             if rule == RULE_UDP_STORM_ASN:
@@ -1011,6 +1136,24 @@ class DPIMonitor:
             event, order=_lockdown.load_lockdown_order(self.db)))
         logger.warning(f"dpi_monitor: LOCKDOWN {event.kind} — {event.evidence}")
 
+    # ---- reverse SOS (IMPROVEMENT_PLAN E21) ---------------------------------
+
+    def _reverse_sos(self, changes: List[Change], now: datetime):
+        """Users of a network whose own clients just lost a protocol (R6
+        ``client_dark`` demotions — the only rule that measures that, see
+        ``bot/services/reverse_sos.py``) get one message: refresh the
+        profile, else the emergency subscription or /sos. One line goes
+        to the AI topic next to the cascade message. Sends on a daemon
+        thread; never raises — a messaging fault must not cost the
+        cascade its run."""
+        try:
+            from bot.services import reverse_sos
+            return reverse_sos.start(self.db, self.config, self.bot, changes,
+                                     now=now, post_topic=self._send_topic)
+        except Exception as e:
+            logger.warning(f"dpi_monitor: reverse SOS failed: {e}")
+            return None
+
     # ---- entry point ---------------------------------------------------------
 
     def run_once(self, dry_run: bool = False,
@@ -1024,8 +1167,14 @@ class DPIMonitor:
         ``self.lockdown_event``. It does NOT run while the monitor is
         disabled (``/cascade off``) — the operator who paused the
         monitor has ``/lockdown on`` at hand.
+
+        Applied R6 (``client_dark``) demotions also start the reverse SOS
+        (E21, ``_reverse_sos``): the network's users whose clients were
+        using the protocol get one message; the sender thread is left in
+        ``self.reverse_sos_thread``. Not in ``dry_run``.
         """
         self.lockdown_event = None
+        self.reverse_sos_thread = None
         if not self.is_enabled():
             logger.info("dpi_monitor: disabled (dpi_monitor_enabled=0) — evaluation skipped")
             return []
@@ -1044,6 +1193,9 @@ class DPIMonitor:
             if changes:
                 logger.info("dpi_monitor: applied " + '; '.join(
                     f"{c.action} {c.key} ({c.reason})" for c in changes))
+                # E21: only after the changes landed (apply_changes raises
+                # before audit/notify when cascade_auto could not be saved).
+                self.reverse_sos_thread = self._reverse_sos(changes, now)
             else:
                 logger.debug(f"dpi_monitor: run {new_state['runs']}, no changes")
         # After the cascade work, so a lockdown flip never blocks a

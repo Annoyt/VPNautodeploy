@@ -1193,8 +1193,15 @@ class WebAppServer:
             )[:32]
             if channel:
                 logger.info(f"sub: clash-proxies channel={channel} for {user.chat_id}")
+            # ``only=<proto>`` — a per-protocol telemetry provider (E8,
+            # ``p-<proto>``): that protocol's server alone, an empty list
+            # for a name that is none of this user's. Absent = every
+            # server, exactly as before.
+            only = request.rel_url.query.get('only')
+            if only is not None:
+                only = str(only)[:32]
             return web.Response(
-                text=self.subscription.build_clash_proxies(user, cascade),
+                text=self.subscription.build_clash_proxies(user, cascade, only=only),
                 content_type='text/plain',
                 # A cached server list would defeat the point of a channel
                 # that exists to deliver server changes.
@@ -1312,7 +1319,9 @@ class WebAppServer:
     async def handle_probe(self, request: web.Request) -> web.Response:
         """``GET|HEAD /probe/<token>/<group>`` — the health-check url of
         the FlClash profile's proxy-providers (IMPROVEMENT_PLAN E4);
-        ``group`` is the provider name (emergency, mirror-<n>).
+        ``group`` is the provider name (emergency, mirror-<n>, and the
+        per-protocol telemetry providers p-<proto> of E8 — a p-<proto>
+        row means the user's client got through <proto>).
 
         mihomo sends it THROUGH each proxy it tests, so the request
         arriving here is a heartbeat "this user's client is alive through

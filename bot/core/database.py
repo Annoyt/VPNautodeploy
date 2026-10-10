@@ -883,10 +883,12 @@ class Database:
         (per-protocol client telemetry → DPIMonitor) and E21 (the bot
         writes first when a user's probes stop).
 
-        ``grp`` — group / provider name (cascade, auto, calls, emergency,
-        mirror-<n>); ``src_ip`` — the egress the probe left from (our
-        exit or the reserve node), NOT the user's address. At most one
-        row per (chat_id, grp) a minute — the endpoint rate-limits.
+        ``grp`` — the provider name (emergency, mirror-<n>, and since E8
+        ``p-<proto>``: one per protocol, ``de`` = the reserve node — a
+        ``p-<proto>`` row = "the client got through <proto> at ts");
+        ``src_ip`` — the egress the probe left from (our exit or the
+        reserve node), NOT the user's address. At most one row per
+        (chat_id, grp) a minute — the endpoint rate-limits.
         """
         try:
             with self._connect() as conn:

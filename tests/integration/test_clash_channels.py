@@ -88,6 +88,15 @@ def _names(*protos):
     return [NAME[p] for p in protos]
 
 
+# The per-protocol telemetry providers of E8 (test_client_telemetry.py)
+# sit next to the channels; these tests are about the channels.
+TELEMETRY = {'p-reality', 'p-hy2', 'p-ws', 'p-stls'}     # _config(): no hy2t, no DE
+
+
+def _channels(providers):
+    return [k for k in providers if not k.startswith('p-')]
+
+
 # ---------------------------------------------------------------- E3 ------
 
 class TestCascadeGroup:
@@ -220,19 +229,19 @@ class TestProbeUrl:
         cfg = _build(config=config)
         urls = [p['health-check']['url'] for p in cfg['proxy-providers'].values()]
         groups = SubscriptionService(config).probe_groups()
-        assert len(urls) == 3
+        assert len(urls) == 3 + len(TELEMETRY)
         for url in urls:
             prefix, group = url.rsplit('/', 1)
             assert prefix == f'{WEB}/probe/{_token()}' and group in groups, url
-        assert groups == {'emergency', 'mirror-1', 'mirror-2'}
+        assert groups == {'emergency', 'mirror-1', 'mirror-2'} | TELEMETRY
 
     def test_probe_groups_are_the_emitted_ones_only(self):
         # the provider names — the groups (cascade, auto, calls) are gone
         assert CLASH_PROBE_GROUPS == ('emergency',)
-        assert SubscriptionService(_config()).probe_groups() == {'emergency'}
+        assert SubscriptionService(_config()).probe_groups() == {'emergency'} | TELEMETRY
         two = SubscriptionService(_config(
             SUB_MIRROR_URLS='https://m1.example.net,https://m2.example.org')).probe_groups()
-        assert two == {'emergency', 'mirror-1', 'mirror-2'}
+        assert two == {'emergency', 'mirror-1', 'mirror-2'} | TELEMETRY
 
     def test_singbox_profile_keeps_gstatic(self):
         sb = SubscriptionService(_config()).build_singbox_config(_user(), ALL)
@@ -248,7 +257,7 @@ class TestProviders:
     def test_emergency_provider(self):
         p = _build()['proxy-providers']
         tok = _token()
-        assert list(p) == ['emergency']
+        assert _channels(p) == ['emergency']
         assert p['emergency'] == {
             'type': 'http',
             'url': f'{WEB}/sub/{tok}?format=clash-proxies&channel=emergency',
@@ -275,7 +284,7 @@ class TestProviders:
     def test_mirrors(self, raw, mirrors):
         p = _build(config=_config(SUB_MIRROR_URLS=raw))['proxy-providers']
         tok = _token()
-        assert list(p) == ['emergency'] + [f'mirror-{n}' for n in range(1, len(mirrors) + 1)]
+        assert _channels(p) == ['emergency'] + [f'mirror-{n}' for n in range(1, len(mirrors) + 1)]
         for n, base in enumerate(mirrors, 1):
             assert p[f'mirror-{n}'] == {
                 'type': 'http',
