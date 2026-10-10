@@ -6,6 +6,8 @@
 #   setup_ru_exit.sh           set up, or re-run: Reality keys (once), the
 #                              config, the `ru-exit` container,
 #                              app_settings.ru_exit and the sync timer
+#                              (re-run it after this script changes: the
+#                              timer runs a root-owned copy, see below)
 #   setup_ru_exit.sh --sync    what the timer runs every 2 minutes: the
 #                              user list from the bot, a new container only
 #                              when it changed
@@ -29,6 +31,11 @@
 # one waits for a hand-run setup. A stopped container is brought back by
 # the next --sync; to switch the egress off use --remove.
 #
+# The timer runs as root, so it runs /usr/local/sbin/ru-exit-sync, a
+# root-owned copy setup installs, never this file: /opt/vpn-bot is an
+# rsync target the deploy account can write, and a root timer must not
+# execute a file another account can change.
+#
 # The egress refuses private addresses (docker bridges, hermes :4097, the
 # panel), BitTorrent and outbound SMTP :25 — all of it leaves from the
 # address the whole service enters by, and an abuse report against that
@@ -41,10 +48,11 @@ set -euo pipefail
 # Byte order for sort/comm: the user names are compared as Python sorts them.
 export LC_ALL=C
 
-# RU_EXIT_DIR / RU_EXIT_UNIT_DIR / RU_EXIT_SETTLE_S exist for the tests
-# (tests/unit/test_setup_ru_exit_sh.py); prod runs the defaults.
+# RU_EXIT_DIR / RU_EXIT_UNIT_DIR / RU_EXIT_BIN / RU_EXIT_SETTLE_S exist for
+# the tests (tests/unit/test_setup_ru_exit_sh.py); prod runs the defaults.
 DIR="${RU_EXIT_DIR:-/etc/ru-exit}"
 UNIT_DIR="${RU_EXIT_UNIT_DIR:-/etc/systemd/system}"
+BIN="${RU_EXIT_BIN:-/usr/local/sbin/ru-exit-sync}"
 NAME=ru-exit
 BOT=vpn-bot
 UNIT=ru-exit-sync
@@ -89,7 +97,7 @@ if [ "$mode" = remove ]; then
   # The bot stops offering the RU-zone first, then the server goes.
   set_bot_setting '' || die "could not clear app_settings.ru_exit"
   systemctl disable --now "$UNIT.timer" >/dev/null 2>&1 || true
-  rm -f "$UNIT_DIR/$UNIT.service" "$UNIT_DIR/$UNIT.timer"
+  rm -f "$UNIT_DIR/$UNIT.service" "$UNIT_DIR/$UNIT.timer" "$BIN"
   systemctl daemon-reload
   docker rm -f "$NAME" >/dev/null 2>&1 || true
   echo "ru-exit removed: container, sync timer, app_settings.ru_exit (keys kept in $DIR)"
@@ -269,6 +277,11 @@ if [ "$mode" = setup ]; then
     "sid": sys.argv[4]}))' "$PORT" "$SNI" "$PUBLIC_KEY" "$SHORT_ID")
   set_bot_setting "$setting" || die "could not write app_settings.ru_exit"
 
+  # The root-owned copy the timer runs (see the header).
+  if [ "$SELF" != "$(readlink -f "$BIN" 2>/dev/null || echo "$BIN")" ]; then
+    cp "$SELF" "$BIN.new" && chown root:root "$BIN.new" && chmod 755 "$BIN.new" \
+      && mv "$BIN.new" "$BIN" || { rm -f "$BIN.new"; die "could not install $BIN"; }
+  fi
   cat > "$UNIT_DIR/$UNIT.service" <<EOF
 [Unit]
 Description=RU-zone egress: paid users into the ru-exit container
@@ -276,7 +289,7 @@ After=docker.service
 
 [Service]
 Type=oneshot
-ExecStart=$SELF --sync
+ExecStart=$BIN --sync
 EOF
   cat > "$UNIT_DIR/$UNIT.timer" <<EOF
 [Unit]
@@ -292,6 +305,6 @@ WantedBy=timers.target
 EOF
   systemctl daemon-reload
   systemctl enable --now "$UNIT.timer" >/dev/null
-  echo "app_settings.ru_exit written; $UNIT.timer runs '$SELF --sync' every 2 minutes"
+  echo "app_settings.ru_exit written; $UNIT.timer runs '$BIN --sync' every 2 minutes"
   echo "client profile: the user's /sub link + '?mode=abroad&format=clash' (the bot's 🇷🇺 button)"
 fi
