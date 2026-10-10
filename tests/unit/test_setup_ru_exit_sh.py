@@ -117,6 +117,11 @@ echo "systemctl $*" >> "$FAKE_STATE/calls.log"
 
 FAKE_ID = '#!/bin/sh\necho 0\n'
 
+FAKE_CHOWN = r'''#!/bin/sh
+echo "chown $*" >> "$FAKE_STATE/calls.log"
+[ ! -e "$FAKE_STATE/chown_fail" ]
+'''
+
 
 class Env:
     def __init__(self, root: Path):
@@ -125,11 +130,13 @@ class Env:
         self.state = root / 'state'
         self.dir = root / 'etc-ru-exit'
         self.units = root / 'units'
-        for d in (self.bin, self.state, self.units):
+        self.sbin = root / 'sbin'
+        self.copy = self.sbin / 'ru-exit-sync'
+        for d in (self.bin, self.state, self.units, self.sbin):
             d.mkdir()
         for name, body in (('docker', FAKE_DOCKER), ('ss', FAKE_SS),
                            ('openssl', FAKE_OPENSSL), ('systemctl', FAKE_SYSTEMCTL),
-                           ('id', FAKE_ID)):
+                           ('id', FAKE_ID), ('chown', FAKE_CHOWN)):
             p = self.bin / name
             p.write_text(body)
             p.chmod(0o755)
@@ -152,14 +159,17 @@ class Env:
         p = self.state / name
         p.write_text(text) if text is not None else p.touch()
 
-    def run(self, *args):
+    def env(self, **extra):
         env = dict(os.environ)
-        env.update(PATH=f'{self.bin}:{env["PATH"]}', FAKE_STATE=str(self.state),
-                   RU_EXIT_DIR=str(self.dir), RU_EXIT_UNIT_DIR=str(self.units),
-                   RU_EXIT_SETTLE_S='0')
         for k in ('RU_EXIT_PORT', 'RU_EXIT_SNI', 'RU_EXIT_IMAGE'):
             env.pop(k, None)
-        return subprocess.run(['bash', str(SCRIPT), *args], env=env,
+        env.update(PATH=f'{self.bin}:{env["PATH"]}', FAKE_STATE=str(self.state),
+                   RU_EXIT_DIR=str(self.dir), RU_EXIT_UNIT_DIR=str(self.units),
+                   RU_EXIT_BIN=str(self.copy), RU_EXIT_SETTLE_S='0', **extra)
+        return env
+
+    def run(self, *args, script=SCRIPT, **extra):
+        return subprocess.run(['bash', str(script), *args], env=self.env(**extra),
                               capture_output=True, text=True, timeout=60)
 
     def calls(self):
@@ -222,12 +232,36 @@ class TestSetup:
         assert json.loads((env.state / 'setting').read_text()) == {
             'port': 8445, 'sni': 'www.google.com', 'pbk': 'fake-public-key',
             'sid': '0123456789abcdef'}
-        assert 'ExecStart=' + str(SCRIPT) + ' --sync' in (
+        assert f'ExecStart={env.copy} --sync' in (
             env.units / 'ru-exit-sync.service').read_text()
         timer = (env.units / 'ru-exit-sync.timer').read_text()
         assert 'OnUnitActiveSec=2min' in timer and 'WantedBy=timers.target' in timer
         assert ['systemctl', 'enable', '--now', 'ru-exit-sync.timer'] in env.calls()
         assert '1 user(s) (+1 -0)' in r.stdout
+
+    def test_timer_runs_a_root_owned_copy(self, env):
+        # /opt/vpn-bot is an rsync target the deploy account can write: the
+        # root timer must never execute the repo file itself.
+        assert env.run().returncode == 0
+        assert env.copy.read_bytes() == SCRIPT.read_bytes()
+        assert env.copy.stat().st_mode & 0o777 == 0o755
+        assert ['chown', 'root:root', f'{env.copy}.new'] in env.calls()
+        unit = (env.units / 'ru-exit-sync.service').read_text()
+        assert str(SCRIPT) not in unit
+        assert not (env.sbin / 'ru-exit-sync.new').exists()
+
+    def test_setup_from_the_copy_itself(self, set_up):
+        r = set_up.run(script=set_up.copy)
+        assert r.returncode == 0, r.stderr
+        assert f'ExecStart={set_up.copy} --sync' in (
+            set_up.units / 'ru-exit-sync.service').read_text()
+
+    def test_copy_that_cannot_be_owned_by_root(self, env):
+        env.touch('chown_fail')
+        r = env.run()
+        assert r.returncode != 0 and 'could not install' in r.stderr
+        assert not env.copy.exists() and not (env.sbin / 'ru-exit-sync.new').exists()
+        assert not (env.units / 'ru-exit-sync.service').exists()
 
     def test_route_guards(self, set_up):
         rules = set_up.config()['route']['rules']
@@ -369,12 +403,7 @@ class TestSync:
         assert not env.docker_calls('exec')
 
     def test_sync_keeps_the_setup_parameters(self, env):
-        e = dict(os.environ)
-        e.update(PATH=f'{env.bin}:{e["PATH"]}', FAKE_STATE=str(env.state),
-                 RU_EXIT_DIR=str(env.dir), RU_EXIT_UNIT_DIR=str(env.units),
-                 RU_EXIT_SETTLE_S='0', RU_EXIT_PORT='9445', RU_EXIT_SNI='www.bing.com')
-        r = subprocess.run(['bash', str(SCRIPT)], env=e, capture_output=True,
-                           text=True, timeout=60)
+        r = env.run(RU_EXIT_PORT='9445', RU_EXIT_SNI='www.bing.com')
         assert r.returncode == 0, r.stderr
         env.users([U1, U2])
         # The timer runs without the knobs: server.env must carry them.
@@ -403,6 +432,7 @@ class TestRemove:
         assert ['systemctl', 'disable', '--now', 'ru-exit-sync.timer'] in set_up.calls()
         assert not (set_up.units / 'ru-exit-sync.service').exists()
         assert not (set_up.units / 'ru-exit-sync.timer').exists()
+        assert not set_up.copy.exists()
         assert not (set_up.state / 'ru_exit_exists').exists()
         assert (set_up.dir / 'keys.env').exists()
 
