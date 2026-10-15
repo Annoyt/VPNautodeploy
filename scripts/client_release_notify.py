@@ -25,6 +25,7 @@ and that row also keeps a second run from messaging the same tester twice.
 import argparse
 import html
 import json
+import os
 import sys
 import time
 
@@ -227,4 +228,7 @@ def main(argv=None, *, db=None, tg=None, fetch=fetch_release, out=sys.stdout):
 
 
 if __name__ == '__main__':
+    # Run as a file, its own directory leads sys.path; the bot package sits
+    # one level up (/app in the container).
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     sys.exit(main())
