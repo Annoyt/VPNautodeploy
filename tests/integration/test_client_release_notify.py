@@ -88,6 +88,25 @@ def audits(db):
             "ORDER BY id", (crn.ACTION,)).fetchall()
 
 
+class TestRunAsAFile:
+    """The documented call: `python3 scripts/client_release_notify.py`,
+    no PYTHONPATH. Its first live run failed on `import bot`."""
+
+    def test_set_testers_from_a_bare_interpreter(self, tmp_path):
+        import subprocess
+        import sys
+        env = {k: v for k, v in os.environ.items() if k != 'PYTHONPATH'}
+        env['DB_PATH'] = str(tmp_path / 'bot.db')
+        r = subprocess.run(
+            [sys.executable, os.path.join('scripts', 'client_release_notify.py'),
+             '--set-testers', '5,6'],
+            cwd=ROOT, env=env, capture_output=True, text=True, timeout=120)
+        assert r.returncode == 0, r.stderr
+        assert 'testers: 5, 6' in r.stdout
+        db = Database(env['DB_PATH'])
+        assert json.loads(db.get_setting(crn.SETTING_KEY)) == ['5', '6']
+
+
 class TestWhatsNew:
 
     def test_items_between_the_markers_only(self):
