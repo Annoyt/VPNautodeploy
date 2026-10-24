@@ -365,6 +365,11 @@ def build_key_delivery_message(user, config, db=None) -> tuple:
     if not is_ios:
         keyboard['inline_keyboard'].insert(0, client_download_row())
     if db is not None:
+        # NekoVPN testers: add the subscription to the app in one tap.
+        from bot.services.neko_client import open_button_row
+        neko_row = open_button_row(db, config, user)
+        if neko_row:
+            keyboard['inline_keyboard'].insert(0, neko_row)
         from bot.services.ru_exit import ru_zone_button_row
         ru_row = ru_zone_button_row(db, user)
         if ru_row:

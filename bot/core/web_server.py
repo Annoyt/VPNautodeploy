@@ -1,5 +1,6 @@
 """Aiohttp web server for Telegram Mini App and API"""
 
+import base64
 import logging
 import json
 import re
@@ -160,6 +161,9 @@ class WebAppServer:
         # refreshes on a schedule; rotates IPs/paths without user
         # action.
         self.app.router.add_get('/sub/{token}', self.handle_subscription)
+        # One-tap import into the NekoVPN app (bot/services/neko_client.py):
+        # Telegram buttons take only https, the page carries the app link.
+        self.app.router.add_get('/open/{token}', self.handle_open)
         # Rule lists for Clash/mihomo clients (IMPROVEMENT_PLAN E1). Public
         # like /sub — the Clash profile points its rule-providers here and
         # FlClash pulls them hourly. Not /rule-sets/: that prefix is the
@@ -1329,6 +1333,45 @@ class WebAppServer:
                 text=text_body, content_type='text/plain', headers=headers,
             )
         return web.json_response(config_obj, headers=headers)
+
+    async def handle_open(self, request: web.Request) -> web.Response:
+        """``GET /open/<token>`` — adds the subscription to the NekoVPN app
+        in one tap (bot/services/neko_client.py): a page whose button opens
+        the app with the user's FlClash-format profile. The token, the 404
+        and the 410 are /sub's. Never cached, no referrer (the download
+        link must not carry the token away), not indexed; the CSP allows
+        the page's one script by hash and nothing else."""
+        from bot.services import neko_client
+        token = request.match_info.get('token', '')
+        user = await asyncio.to_thread(
+            self.subscription.find_user_by_token, self.db, token,
+        )
+        if not user:
+            return web.Response(status=404, text='Not found')
+        if user.status not in neko_client.KEY_STATUSES:
+            return web.Response(status=410, text='Subscription inactive')
+        url = neko_client.profile_url(self.config, user)
+        if not url:
+            return web.Response(status=503, text='Not configured')
+        script_hash = base64.b64encode(
+            hashlib.sha256(neko_client.OPEN_PAGE_SCRIPT.encode()).digest(),
+        ).decode()
+        logger.info(f"open: NekoVPN import page for {user.chat_id}")
+        return web.Response(
+            text=neko_client.render_open_page(url, getattr(user, 'lang', None)),
+            content_type='text/html',
+            headers={
+                'Cache-Control': 'no-store',
+                'Referrer-Policy': 'no-referrer',
+                'X-Robots-Tag': 'noindex',
+                'X-Frame-Options': 'DENY',
+                'Content-Security-Policy': (
+                    "default-src 'none'; style-src 'unsafe-inline'; "
+                    f"script-src 'sha256-{script_hash}'; base-uri 'none'; "
+                    "form-action 'none'; frame-ancestors 'none'"
+                ),
+            },
+        )
 
     async def handle_rule_list(self, request: web.Request) -> web.Response:
         """One rule list as a mihomo rule-provider file (``format: yaml``).

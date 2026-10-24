@@ -439,6 +439,11 @@ class CommandHandler(BaseHandler):
             )
         if not is_ios:
             plat_keyboard['inline_keyboard'].insert(0, client_download_row())
+        # NekoVPN testers: add the subscription to the app in one tap.
+        from bot.services.neko_client import open_button_row
+        neko_row = open_button_row(self.db, self.config, user)
+        if neko_row:
+            plat_keyboard['inline_keyboard'].insert(0, neko_row)
         self.bot.send_message(
             chat_id=chat_id, text=text, parse_mode='HTML',
             reply_markup=plat_keyboard,
