@@ -62,6 +62,8 @@ MAIL_SOS_DEDUP_S = 3600         # one mail SOS reply per address per hour
 # ---- storage -----------------------------------------------------------------
 SOS_TARGET = 'sos'              # user_failure_reports.target_domain
 MAIL_SOS_TARGET = 'sos_mail'
+APP_SOS_TARGET = 'sos_app'      # the NekoVPN app's SOS button
+APP_REPORT_MAX_DELAYS = 30
 MAIL_SOS_STATUS = 'sos'         # email_requests.status of an SOS letter
 
 # ---- mail trigger -------------------------------------------------------------
@@ -436,6 +438,50 @@ def status_lines(probes: dict, net: Optional[dict], lang: str, *,
                      f"за {NETWORK_REPORTS_WINDOW_H} ч — мы видим." if ru else
                      f"{net['reports']} more people on your network reported problems "
                      f"in the last {NETWORK_REPORTS_WINDOW_H} h — we see it.")
+    return lines
+
+
+def app_report_lines(report) -> List[str]:
+    """What the NekoVPN app measured (``POST /api/neko/sos``), as report
+    lines for the operators (HTML). Only the known fields, each cut short:
+    the body comes from the user's device."""
+    if not isinstance(report, dict):
+        return []
+
+    def field(key, limit=40):
+        value = report.get(key)
+        if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+            return None
+        text = str(value).strip()[:limit]
+        return html.escape(text) if text else None
+
+    parts = [f"NekoVPN {field('app') or '?'}"]
+    for key, label in (('platform', ''), ('network', 'сеть '),
+                       ('settings_version', 'настройки v')):
+        value = field(key)
+        if value:
+            parts.append(f'{label}{value}')
+    running = report.get('vpn_running')
+    if isinstance(running, bool):
+        parts.append('VPN включён' if running else 'VPN выключен')
+    minutes = report.get('profile_age_min')
+    if isinstance(minutes, int) and not isinstance(minutes, bool) and minutes >= 0:
+        parts.append(f'профиль обновлён {minutes} мин назад')
+    lines = ['📱 Приложение: ' + ', '.join(parts)]
+    delays = report.get('delays')
+    if isinstance(delays, list) and delays:
+        shown = []
+        for item in delays[:APP_REPORT_MAX_DELAYS]:
+            if not isinstance(item, dict):
+                continue
+            name = item.get('name')
+            ms = item.get('ms')
+            if not isinstance(name, str) or not name.strip():
+                continue
+            ok = isinstance(ms, int) and not isinstance(ms, bool) and ms > 0
+            shown.append(f"{html.escape(name.strip()[:40])} {f'{ms} мс' if ok else '—'}")
+        if shown:
+            lines.append('Задержки в приложении: ' + ', '.join(shown))
     return lines
 
 
@@ -1059,6 +1105,53 @@ class SosService:
         logger.info(f"sos: user={user.chat_id} asn={getattr(user, 'last_asn', None)} "
                     f"report_id={report_id} agent={agent}")
         return report_id
+
+    # ---- E16/E23: the NekoVPN app's SOS button ----
+
+    def handle_app_sos(self, user, report, *, now: Optional[datetime] = None) -> dict:
+        """``POST /api/neko/sos/<token>``: the /sos report for the operators
+        plus what the app measured; for the app, the status lines and the
+        emergency profile. One report per user per 10 min, like /sos (the
+        ``sos_app`` row is the limiter); a repeat still gets the status."""
+        lang = user_lang(user)
+        if not has_active_key(user):
+            return {'status': 'no_key', 'lines': [no_key_text(lang)]}
+        now = now or utcnow()
+        probes, net, order = self._status(user, now)
+        answer = {
+            'status': 'reported',
+            # The letter's plain, formal lines; "step 2" belongs to /sos.
+            'lines': [line.replace(' (шаг 2)', '').replace(' (step 2)', '')
+                      for line in status_lines(probes, net, lang, rich=False)],
+        }
+        try:
+            urls = emergency_urls(self.config, user)
+        except Exception as e:
+            logger.warning(f"app sos: emergency url failed: {e}")
+            urls = None
+        if urls:
+            answer['emergency'] = urls[1]       # the app reads the FlClash format
+        last = self._last_report_at(user.chat_id, APP_SOS_TARGET)
+        if last is not None and (now - last).total_seconds() < SOS_RATE_LIMIT_S:
+            answer['status'] = 'repeat'
+            return answer
+
+        facts, fact_lines = self._facts(user)
+        fact_lines = fact_lines + app_report_lines(report)
+        report_id = self._record(user, APP_SOS_TARGET, facts)
+        agent, gate = self._kick_agent(user, report_id, 'app', fact_lines, order)
+        try:
+            lines = self._report_lines(user, report_id, 'приложение NekoVPN',
+                                       fact_lines, order, net)
+            lines.append(self._agent_line(agent))
+            self._post_report(lines)
+        finally:
+            if gate is not None:
+                gate.set()
+        answer['report_id'] = report_id
+        logger.info(f"app sos: user={user.chat_id} asn={getattr(user, 'last_asn', None)} "
+                    f"report_id={report_id} agent={agent}")
+        return answer
 
     # ---- E27: /kit ----
 
