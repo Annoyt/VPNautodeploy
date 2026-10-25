@@ -61,7 +61,9 @@ def make_config(**over):
         AGENT_BACKEND='hermes', HERMES_URL='', DB_PATH='',
     )
     cfg.update(over)
-    return SimpleNamespace(**cfg)
+    ns = SimpleNamespace(**cfg)
+    ns.is_admin = lambda user_id: str(user_id) == '1'
+    return ns
 
 
 @pytest.fixture(autouse=True)
@@ -237,3 +239,32 @@ class TestEndpoint:
     def test_route(self, server):
         routes = {(r.method, r.resource.canonical) for r in server.app.router.routes()}
         assert ('POST', '/api/neko/sos/{token}') in routes
+
+
+class TestStartSos:
+    """``t.me/<bot>?start=sos`` — the app's link when it reached nothing."""
+
+    def _start(self, db, config, bot, text):
+        from bot.handlers.commands import CommandHandler
+        handler = CommandHandler(bot, db, config)
+        update = {'message': {'text': text, 'chat': {'id': int(CID), 'type': 'private'},
+                              'from': {'id': int(CID), 'username': 'ziriki'}}}
+        handler.handle_start(update, CID)
+
+    def test_start_sos_runs_sos(self, db, config, bot, monkeypatch):
+        add_user(db)
+        calls = []
+        monkeypatch.setattr(SosService, 'handle_sos',
+                            lambda self, chat_id, user: calls.append(chat_id))
+        self._start(db, config, bot, '/start sos')
+        assert calls == [CID]
+
+    def test_plain_start_does_not(self, db, config, bot, monkeypatch):
+        add_user(db)
+        calls = []
+        monkeypatch.setattr(SosService, 'handle_sos',
+                            lambda self, chat_id, user: calls.append(chat_id))
+        self._start(db, config, bot, '/start')
+        self._start(db, config, bot, '/start promo')
+        assert calls == []
+

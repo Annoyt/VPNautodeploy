@@ -586,4 +586,5 @@ The app posts what it measured. The bot reports it like `/sos` (§33): a `user_f
   - `emergency` is the FlClash emergency profile URL.
   - One report per user per 10 min (`sos_app` row = limiter); a repeat still gets `lines` and `emergency`.
 - **Gates:** the /sub token (404 / 410), a body of at most 16 KB checked before parsing (413 by Content-Length or by the read itself), JSON (400). Only known report fields are read, each cut short and HTML-escaped, because the body comes from the user's device.
-- **Tests:** `tests/integration/test_neko_app_sos.py` (real sqlite); 14 mutants killed with a positional restore.
+- **`t.me/<bot>?start=sos`** (`/start sos`) runs `/sos`. The app offers this link when it reached no origin.
+- **Tests:** `tests/integration/test_neko_app_sos.py` (real sqlite); 16 mutants killed with a positional restore.
