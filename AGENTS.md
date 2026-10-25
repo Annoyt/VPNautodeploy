@@ -557,3 +557,22 @@ Client 0.9.2-neko.1 (`Annoyt/vpnautodeploy_client` PR #8) acts on two headers of
   - A mirror must reverse-proxy `/sub/` to this bot, as `sub.nekoweather.xyz:2096` does.
 - **A fetch through the Cloudflare mirror says nothing about the user's network.** Caddy on exit `:2096` sees the CF edge, not the client, so such a request resolves to AS13335. `CDN_HOP_ASNS` (`web_server.py`, Cloudflare) makes `/sub` treat it like our own addresses (§29): nothing is recorded, and the stored network orders the profile. WARP users are covered by the same rule. Before 2026-10-25 these fetches stamped AS13335 on the user, and the mirror fallback would have multiplied that.
 - Tests: `TestMirrorsHeader` in `tests/integration/test_clash_channels.py` and `TestCdnHop` in `tests/integration/test_sub_own_address.py`; 6 mutants killed by reverse text replacement (§28).
+
+### 40. Signed remote settings for the NekoVPN app (2026-10-25, client plan E14)
+
+`GET /neko/settings` serves `bot/neko/settings.json` byte for byte (`public, max-age=300`, 404 when the file is missing). The file is signed OFFLINE: the Ed25519 key is `~/.config/nekovpn-signing/neko-settings-ed25519.pem` on the dev machine, next to the APK key, and never on a server. Neither a mirror, a CDN edge nor this server can forge settings. The app accepts only a document signed with the public key it was built with (`scripts/neko_settings.py` `PUBLIC_KEY` = client `nekoSettingsPublicKey`), and only with a bigger `version`.
+
+- **Edit, sign, publish:**
+  1. Edit `bot/neko/settings.source.json`.
+  2. Run `python3 scripts/neko_settings.py sign`. It validates, sets `version` = signed version + 1 and `signed_at`, and writes `settings.json` as `{kid, doc: base64(compact sorted JSON), sig}`.
+  3. Run `python3 scripts/neko_settings.py verify`.
+  4. Commit and deploy (`scripts/deploy_to_entry.sh`).
+
+  `test_is_the_source_signed` fails while source and signed file differ.
+- **Fields (schema 1):**
+  - `endpoints`: 1–10 https origins where the app fetches `/neko/settings`; the main domain and the CF mirror today.
+  - `min_version`: `x.y.z-neko.n` or null; below it the app asks the user to update.
+  - `message`: `{id, ru, en?, url?}` or null; shown once per `id`, so give every new message a new id.
+  - `flags`: bool / number / string values that later features read.
+- **Key loss or rotation** needs a client release carrying the new public key first, because apps trust only the key they carry. Back up the key offline with the APK key.
+- **Tests:** `tests/integration/test_neko_settings.py`. It checks the committed file against the key and the source, the validation, a round trip and tampering, the version, and the endpoint. 12 mutants killed with a positional restore. `cryptography` is in requirements-dev.txt only, never in the image.

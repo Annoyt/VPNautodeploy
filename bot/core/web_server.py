@@ -91,6 +91,9 @@ def _deployed_version() -> str:
         return 'dev'
 
 
+# scripts/neko_settings.py signs it on the dev machine; deployed with bot/.
+NEKO_SETTINGS_PATH = Path(__file__).resolve().parents[1] / 'neko' / 'settings.json'
+
 # Networks whose addresses are a hop in front of the client, never the
 # client's own network (see handle_subscription).
 CDN_HOP_ASNS = frozenset({'AS13335'})  # Cloudflare
@@ -169,6 +172,8 @@ class WebAppServer:
         # One-tap import into the NekoVPN app (bot/services/neko_client.py):
         # Telegram buttons take only https, the page carries the app link.
         self.app.router.add_get('/open/{token}', self.handle_open)
+        # The NekoVPN app's signed remote settings (client plan E14).
+        self.app.router.add_get('/neko/settings', self.handle_neko_settings)
         # Rule lists for Clash/mihomo clients (IMPROVEMENT_PLAN E1). Public
         # like /sub — the Clash profile points its rule-providers here and
         # FlClash pulls them hourly. Not /rule-sets/: that prefix is the
@@ -1361,6 +1366,21 @@ class WebAppServer:
         path = f'/sub/{token}' + (f'?{query}' if query else '')
         return [base + path for base in self.subscription.mirror_bases()
                 if base.lower().startswith('https://')]
+
+    async def handle_neko_settings(self, request: web.Request) -> web.Response:
+        """``GET /neko/settings`` — the NekoVPN app's remote settings, as
+        signed OFFLINE by scripts/neko_settings.py (the key never reaches
+        this server). Served byte for byte; the app checks the signature.
+        Public like /sub, short cache: mirrors and CDN edges may hold it,
+        and a signed copy is as good from them as from here."""
+        try:
+            body = await asyncio.to_thread(NEKO_SETTINGS_PATH.read_bytes)
+        except OSError:
+            return web.Response(status=404, text='Not found')
+        return web.Response(
+            body=body, content_type='application/json',
+            headers={'Cache-Control': 'public, max-age=300'},
+        )
 
     async def handle_open(self, request: web.Request) -> web.Response:
         """``GET /open/<token>`` — adds the subscription to the NekoVPN app

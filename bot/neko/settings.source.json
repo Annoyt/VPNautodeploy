@@ -1,0 +1,10 @@
+{
+ "schema": 1,
+ "endpoints": [
+  "https://autonekovpn.duckdns.org:9443",
+  "https://sub.nekoweather.xyz:2096"
+ ],
+ "min_version": null,
+ "message": null,
+ "flags": {}
+}
