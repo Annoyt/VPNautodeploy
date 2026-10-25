@@ -18,3 +18,7 @@ fastapi>=0.115
 httpx>=0.28
 tenacity>=9.0
 PyYAML>=6.0
+# scripts/neko_settings.py signs the NekoVPN app's remote settings on the
+# dev machine (never in the prod image); its tests verify the committed
+# signature with it.
+cryptography>=41
