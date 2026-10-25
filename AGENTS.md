@@ -545,3 +545,14 @@ The client (FlClash fork, `Annoyt/vpnautodeploy_client`) ships test builds as Gi
 ### 38. One-tap import into NekoVPN: `/open/<token>` (2026-10-25)
 
 The client registers `nekovpn://install-config?url=<profile>` (Android manifest: VIEW + BROWSABLE) and answers it with one «Добавить профиль?» dialog. Telegram buttons take only http(s), so `bot/services/neko_client.py` + `WebAppServer.handle_open` serve `GET /open/<token>` (the /sub token, its 404 / 410): a page whose button is an Android intent link `intent://install-config?url=<FlClash-format /sub>#Intent;scheme=nekovpn;package=com.nekovpn.client;S.browser_fallback_url=<release page>;end` — the installed app opens with the profile, Chrome falls back to the release page otherwise; a copy-the-link fallback below. No automatic jump to the app: Chrome wants a user gesture for app links, and Telegram's in-app browser may replace the page with an error. Headers: `no-store`, `Referrer-Policy: no-referrer` (the download link must not carry the token away), `noindex`, CSP with the page's only script allowed by hash. The «📲 Открыть в NekoVPN» button is the FIRST row of the key card and /sub for `app_settings.client_testers` (the §37 list) with a key, not on iOS; every other keyboard is unchanged. Tests: `tests/integration/test_neko_client.py` (the intent parsed back the way Android and the app's LinkManager read it, the CSP hash recomputed from the served script); 14 mutants killed by reverse text replacement (§28).
+
+### 39. NekoVPN reads the profile's headers: refresh interval, mirrors (2026-10-25)
+
+Client 0.9.2-neko.1 (`Annoyt/vpnautodeploy_client` PR #8) acts on two headers of the `?format=clash` answer. Other clients ignore both, and response bodies are unchanged.
+
+- **`profile-update-interval`** (the bot has always sent `6`): the app sets the profile's auto-update interval from it on every fetch, clamped to 1 h–7 d. FlClash ignores the header and refreshes once a day.
+- **`nekovpn-mirrors`** (clash format only, the one the app fetches): this very profile on each https `SUB_MIRROR_URLS` base, with the same token and the same query (`WebAppServer._profile_mirror_urls`).
+  - The app stores the list per profile. When the profile's own URL fails, it fetches from these in order.
+  - http mirrors are left out because the URL carries the token.
+  - A mirror must reverse-proxy `/sub/` to this bot, as `sub.nekoweather.xyz:2096` does.
+- Tests: `TestMirrorsHeader` in `tests/integration/test_clash_channels.py`; 3 mutants killed by reverse text replacement (§28).

@@ -789,8 +789,8 @@ class SubscriptionService:
     # Group health-check cadence, seconds (Cascade / Auto / Calls).
     _CLASH_GROUP_INTERVAL = 180
     # proxy-provider refresh cadence, seconds. FlClash refreshes the
-    # profile itself once a day and does not read profile-update-interval,
-    # but it honours provider intervals — so the emergency channel (E20)
+    # profile itself once a day and does not read profile-update-interval
+    # (NekoVPN does since 0.9.2-neko.1: 6 h), but it honours provider intervals — so the emergency channel (E20)
     # is how a server change reaches a loaded profile within ten minutes;
     # mirrors (E5) are the slow reserve for a blocked main domain.
     _CLASH_EMERGENCY_INTERVAL = 600
