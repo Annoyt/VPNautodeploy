@@ -282,3 +282,45 @@ class TestIsOwnAddress:
         _served(await _sub(srv, DE))
         assert _network(db) == STORED_NET
         assert geo == []
+
+
+class TestCdnHop:
+    """A Cloudflare edge in front of the client (the mirror domain, or the
+    user's WARP) is not the user's network: nothing recorded, the stored
+    network orders the profile."""
+
+    CF_EDGE = '172.70.10.20'
+    CF_NET = ('BR', 'AS13335', 'Sao Paulo')
+
+    @pytest.fixture
+    def cf_geo(self, monkeypatch):
+        from bot.services import geoip
+
+        def net(ip):
+            return self.CF_NET if ip == self.CF_EDGE else REAL_NET
+
+        monkeypatch.setattr(geoip, 'lookup', lambda ip: (net(ip)[0], ''))
+        monkeypatch.setattr(geoip, 'lookup_asn', lambda ip: (net(ip)[1], 'Cloudflare'))
+        monkeypatch.setattr(geoip, 'lookup_city',
+                            lambda ip: (net(ip)[2], 'region', -23.5, -46.6))
+
+    @pytest.mark.asyncio
+    async def test_nothing_recorded(self, tmp_path, cf_geo):
+        srv, db = _server(tmp_path)
+        _served(await _sub(srv, self.CF_EDGE))
+        assert _network(db) == STORED_NET
+        assert _fetches(db) == []
+
+    @pytest.mark.asyncio
+    async def test_ordered_by_the_stored_network(self, tmp_path, cf_geo):
+        srv, db = _server(tmp_path)
+        db.set_setting('cascade_by_asn', json.dumps({'AS8359': ['ws', 'stls', 'reality', 'hy2']}))
+        resp = await _sub(srv, self.CF_EDGE, query={'format': 'links'})
+        assert resp.text.splitlines()[0].startswith('vmess://')
+
+    @pytest.mark.asyncio
+    async def test_a_real_client_still_counts(self, tmp_path, cf_geo):
+        srv, db = _server(tmp_path)
+        _served(await _sub(srv, REAL))
+        assert _network(db) == REAL_NET
+        assert _fetches(db) == [REAL_NET]

@@ -91,6 +91,11 @@ def _deployed_version() -> str:
         return 'dev'
 
 
+# Networks whose addresses are a hop in front of the client, never the
+# client's own network (see handle_subscription).
+CDN_HOP_ASNS = frozenset({'AS13335'})  # Cloudflare
+
+
 class WebAppServer:
     """Lightweight web server for Mini App."""
     
@@ -1142,6 +1147,15 @@ class WebAppServer:
                     city, region, lat, lon = c
         except Exception:
             pass
+        # A CDN edge is a hop, not the user's network: a fetch through the
+        # mirror domain (SUB_MIRROR_URLS behind Cloudflare; the NekoVPN app
+        # falls back to it when the main domain fails, AGENTS.md §39)
+        # arrives from a Cloudflare address, and so does a WARP user. Same
+        # as our own addresses: nothing is recorded, the stored network
+        # orders the profile.
+        if asn in CDN_HOP_ASNS:
+            country = asn = city = region = None
+            lat = lon = None
         # Best-effort write-through so /mykey resolves the same region
         # the next time the same user hits the cascade flow over TG DM.
         cur_country = user.last_country or ''
