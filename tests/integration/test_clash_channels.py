@@ -743,3 +743,41 @@ class TestClientProbeSchema:
         db2 = Database(path)
         with db2._connect() as conn:
             assert conn.execute("SELECT count(*) FROM client_probe").fetchone()[0] == 1
+
+
+class TestMirrorsHeader:
+    """``nekovpn-mirrors`` — this very profile on each mirror, for the
+    NekoVPN app to fetch when its own URL does not answer."""
+
+    MIRRORS = 'https://m1.example.net, http://plain.example.net,https://m2.example.org/'
+
+    @pytest.mark.asyncio
+    async def test_the_profile_on_every_https_mirror(self, tmp_path, geo):
+        srv, _db = _server(tmp_path, config=_config(**FALLBACK, SUB_MIRROR_URLS=self.MIRRORS))
+        resp = await _sub(srv, {'format': 'clash'})
+        token = srv.subscription.derive_token(UUID)
+        assert resp.headers['nekovpn-mirrors'] == (
+            f'https://m1.example.net/sub/{token}?format=clash, '
+            f'https://m2.example.org/sub/{token}?format=clash')
+
+    @pytest.mark.asyncio
+    async def test_same_query_as_the_request(self, tmp_path, geo):
+        srv, _db = _server(tmp_path, config=_config(**FALLBACK, SUB_MIRROR_URLS='https://m1.example.net'))
+        resp = await _sub(srv, {'format': 'clash', 'emergency': '1'})
+        token = srv.subscription.derive_token(UUID)
+        assert resp.headers['nekovpn-mirrors'] == (
+            f'https://m1.example.net/sub/{token}?format=clash&emergency=1')
+
+    @pytest.mark.asyncio
+    async def test_only_the_clash_profile_carries_it(self, tmp_path, geo):
+        srv, _db = _server(tmp_path, config=_config(**FALLBACK, SUB_MIRROR_URLS='https://m1.example.net'))
+        for query in ({}, {'format': 'links'}, {'format': 'xray'}, {'format': 'clash-proxies'}):
+            assert 'nekovpn-mirrors' not in (await _sub(srv, query)).headers, query
+
+    @pytest.mark.asyncio
+    async def test_no_mirrors_no_header(self, tmp_path, geo):
+        srv, _db = _server(tmp_path)
+        assert 'nekovpn-mirrors' not in (await _sub(srv, {'format': 'clash'})).headers
+        srv2, _db2 = _server(tmp_path / 'b', config=_config(
+            **FALLBACK, SUB_MIRROR_URLS='http://plain.example.net'))
+        assert 'nekovpn-mirrors' not in (await _sub(srv2, {'format': 'clash'})).headers

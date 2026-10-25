@@ -11,10 +11,10 @@ import hmac
 import hashlib
 import ipaddress
 from concurrent.futures import ThreadPoolExecutor
-from urllib.parse import parse_qs, unquote
+from urllib.parse import parse_qs, unquote, urlencode
 from aiohttp import web
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 from bot.config import Settings
 from bot.config.constants import UserState
@@ -1309,6 +1309,9 @@ class WebAppServer:
             name = ('NekoVPN-RU-zone' if abroad
                     else 'NekoVPN-SOS' if emergency else 'NekoVPN')
             headers['content-disposition'] = f"attachment; filename*=UTF-8''{name}.yaml"
+            mirrors = self._profile_mirror_urls(request, token)
+            if mirrors:
+                headers['nekovpn-mirrors'] = ', '.join(mirrors)
         try:
             quota_bytes = int((user.quota_gb or 0) * BYTES_PER_GB)
             traffic = await self.xui.get_client_traffic(user.email) or {}
@@ -1333,6 +1336,17 @@ class WebAppServer:
                 text=text_body, content_type='text/plain', headers=headers,
             )
         return web.json_response(config_obj, headers=headers)
+
+    def _profile_mirror_urls(self, request: web.Request, token: str) -> List[str]:
+        """This very profile on each https /sub mirror (SUB_MIRROR_URLS,
+        E5): same token, same query. The NekoVPN app fetches the profile
+        from them when its own URL does not answer (client
+        ``lib/neko/mirrors.dart``); other clients ignore the header. http
+        mirrors are left out: the URL carries the token."""
+        query = urlencode(list(request.rel_url.query.items()))
+        path = f'/sub/{token}' + (f'?{query}' if query else '')
+        return [base + path for base in self.subscription.mirror_bases()
+                if base.lower().startswith('https://')]
 
     async def handle_open(self, request: web.Request) -> web.Response:
         """``GET /open/<token>`` — adds the subscription to the NekoVPN app
