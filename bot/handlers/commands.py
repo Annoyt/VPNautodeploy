@@ -110,7 +110,14 @@ class CommandHandler(BaseHandler):
         if not user:
             logger.error("Failed to get or create user")
             return
-        
+
+        # t.me/<bot>?start=sos: the NekoVPN app's last resort when it could
+        # not reach the service (client plan E16/E23, AGENTS.md section 41).
+        words = ((update.get('message') or {}).get('text') or '').split()
+        if len(words) > 1 and words[1].lower() == 'sos':
+            self.handle_sos(update, chat_id)
+            return
+
         notifier = NotificationService(self.bot, self.db, self.config)
         
         if user.status == UserState.NEW.value:

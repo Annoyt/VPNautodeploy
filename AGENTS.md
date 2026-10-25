@@ -576,3 +576,15 @@ Client 0.9.2-neko.1 (`Annoyt/vpnautodeploy_client` PR #8) acts on two headers of
   - `flags`: bool / number / string values that later features read.
 - **Key loss or rotation** needs a client release carrying the new public key first, because apps trust only the key they carry. Back up the key offline with the APK key.
 - **Tests:** `tests/integration/test_neko_settings.py`. It checks the committed file against the key and the source, the validation, a round trip and tampering, the version, and the endpoint. 12 mutants killed with a positional restore. `cryptography` is in requirements-dev.txt only, never in the image.
+
+### 41. The NekoVPN app's SOS button: POST /api/neko/sos/<token> (2026-10-25, client plan E16/E23)
+
+The app posts what it measured. The bot reports it like `/sos` (§33): a `user_failure_reports` row with target `sos_app`, which DPIMonitor R5 counts like any report, and one post to TOPIC_SUPPORT headed `SOS #id · приложение NekoVPN`. The post carries the usual facts plus `app_report_lines`: app version, platform, network, VPN on/off, profile age, settings version, and up to 30 proxy delays. The agent kick is the /sos one.
+
+- **Answer** (`SosService.handle_app_sos`, `no-store`): `{status: reported|repeat|no_key, lines, emergency, report_id?}`.
+  - `lines` are the SOS letter's plain «вы» status lines (`status_lines(rich=False)`) without the /sos-only "(шаг 2)".
+  - `emergency` is the FlClash emergency profile URL.
+  - One report per user per 10 min (`sos_app` row = limiter); a repeat still gets `lines` and `emergency`.
+- **Gates:** the /sub token (404 / 410), a body of at most 16 KB checked before parsing (413 by Content-Length or by the read itself), JSON (400). Only known report fields are read, each cut short and HTML-escaped, because the body comes from the user's device.
+- **`t.me/<bot>?start=sos`** (`/start sos`) runs `/sos`. The app offers this link when it reached no origin.
+- **Tests:** `tests/integration/test_neko_app_sos.py` (real sqlite); 16 mutants killed with a positional restore.

@@ -91,6 +91,9 @@ def _deployed_version() -> str:
         return 'dev'
 
 
+# The NekoVPN app's SOS report body cap (POST /api/neko/sos/<token>).
+NEKO_SOS_MAX_BODY = 16 * 1024
+
 # scripts/neko_settings.py signs it on the dev machine; deployed with bot/.
 NEKO_SETTINGS_PATH = Path(__file__).resolve().parents[1] / 'neko' / 'settings.json'
 
@@ -174,6 +177,8 @@ class WebAppServer:
         self.app.router.add_get('/open/{token}', self.handle_open)
         # The NekoVPN app's signed remote settings (client plan E14).
         self.app.router.add_get('/neko/settings', self.handle_neko_settings)
+        # The NekoVPN app's SOS button (client plan E16/E23).
+        self.app.router.add_post('/api/neko/sos/{token}', self.handle_neko_sos)
         # Rule lists for Clash/mihomo clients (IMPROVEMENT_PLAN E1). Public
         # like /sub — the Clash profile points its rule-providers here and
         # FlClash pulls them hourly. Not /rule-sets/: that prefix is the
@@ -1381,6 +1386,34 @@ class WebAppServer:
             body=body, content_type='application/json',
             headers={'Cache-Control': 'public, max-age=300'},
         )
+
+    async def handle_neko_sos(self, request: web.Request) -> web.Response:
+        """``POST /api/neko/sos/<token>`` — the NekoVPN app's SOS button.
+        The /sub token authenticates (same 404 / 410); the JSON body is what
+        the app measured, at most 16 KB. Reported like /sos
+        (``SosService.handle_app_sos``); the answer is the status lines and
+        the emergency profile the app shows."""
+        token = request.match_info.get('token', '')
+        user = await asyncio.to_thread(
+            self.subscription.find_user_by_token, self.db, token,
+        )
+        if not user:
+            return web.Response(status=404, text='Not found')
+        if user.status not in ('demo', 'paid', 'support_topic'):
+            return web.Response(status=410, text='Subscription inactive')
+        if (request.content_length or 0) > NEKO_SOS_MAX_BODY:
+            return web.Response(status=413, text='Too large')
+        raw = await request.content.read(NEKO_SOS_MAX_BODY + 1)
+        if len(raw) > NEKO_SOS_MAX_BODY:        # a body without a length
+            return web.Response(status=413, text='Too large')
+        try:
+            report = json.loads(raw.decode('utf-8')) if raw else {}
+        except (ValueError, UnicodeDecodeError):
+            return web.Response(status=400, text='Bad report')
+        from bot.services.sos import SosService
+        sos = SosService(self.bot, self.db, self.config)
+        answer = await asyncio.to_thread(sos.handle_app_sos, user, report)
+        return web.json_response(answer, headers={'Cache-Control': 'no-store'})
 
     async def handle_open(self, request: web.Request) -> web.Response:
         """``GET /open/<token>`` — adds the subscription to the NekoVPN app
