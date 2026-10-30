@@ -320,6 +320,7 @@ class TestTexts:
         text, _kb = build_key_delivery_message(seed(db, 1), config())
         assert 'Демо: 5 ГБ в месяц, с приложением NekoVPN — 10 ГБ' in text
         assert RELEASES_URL in text and FLCLASH_RU in text
+        assert 'подписка в нём та же, что для FlClash' in text
 
     def test_the_iphone_card_names_no_flclash(self, db):
         from bot.handlers.callbacks.user import build_key_delivery_message

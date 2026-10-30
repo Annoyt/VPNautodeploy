@@ -145,9 +145,13 @@ def demo_terms(config, lang: str, ios: bool = False) -> str:
     if lang == 'en':
         head = (f"🎁 <b>Demo: {other_gb} GB a month, {app_gb} GB with the NekoVPN "
                 f"app.</b> NekoVPN is Android-only for now: {_download_url()}")
+        if not ios:   # a FlClash fork: it reads the FlClash link
+            head += " — it takes the same link as FlClash."
     else:
         head = (f"🎁 <b>Демо: {other_gb} ГБ в месяц, с приложением NekoVPN — "
                 f"{app_gb} ГБ.</b> NekoVPN пока только для Android: {_download_url()}")
+        if not ios:
+            head += " — подписка в нём та же, что для FlClash."
     return f"{head}\n{vpn_only_note(lang, ios=ios)}"
 
 
