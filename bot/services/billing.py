@@ -93,7 +93,7 @@ def _paid_client_values(user, config, expiry_ms: int) -> dict:
     }
 
 
-def _paid_until_ms(expiry) -> int:
+def paid_until_ms(expiry) -> int:
     """``subscription_expiry`` in ms the way ``grant_paid_access`` sends
     it (``paid_until.timestamp()``), so the panel gets the date the
     payment wrote. 0 = no expiry, for no date or one that does not
@@ -135,7 +135,7 @@ def tier_client_values(user, config,
     now = now or datetime.now(timezone.utc).replace(tzinfo=None)
     expiry = getattr(user, 'subscription_expiry', None)
     if is_eligible(user, now):
-        return _paid_client_values(user, config, _paid_until_ms(expiry))
+        return _paid_client_values(user, config, paid_until_ms(expiry))
     status = getattr(user, 'status', None)
     if status == UserState.PAID.value or (
             status == UserState.SUPPORT_TOPIC.value and expiry):

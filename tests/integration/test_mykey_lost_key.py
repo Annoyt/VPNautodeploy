@@ -6,18 +6,13 @@ used to come back as a never-expiring 10 GB key whatever the tier: a
 lapsed payer got a free key, an active payer lost their quota and date.
 
 Real sqlite (users); the panel is faked with the semantics of the exit
-panel's fork (AGENTS.md §23, the 2026-08-19 notes):
-
-- an add of an email the panel still has is delete + re-add: a fresh
-  traffic row, used bytes zeroed (the bot's duplicate path);
-- an add of a detached email re-attaches the record and leaves its
-  client_traffics row, the gate xray/hy2 obey, as it was;
-- an in-place update rewrites quota, expiry, enable and limit of that
-  row, never its used bytes; only resetTraffic zeroes them.
+panel's fork (``relational_panel.Panel``): an add of an email the panel
+still has is delete + re-add (used bytes zeroed), an add of a detached
+email leaves its traffic row as it was, an update never touches used
+bytes.
 """
 
 import asyncio
-import time
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
@@ -29,6 +24,8 @@ from bot.core.database import Database
 from bot.handlers.callbacks.user import GetKeyHandler
 from bot.models.user import User
 from bot.services.billing import grant_paid_access
+
+from .relational_panel import Panel, now_ms
 
 pytestmark = pytest.mark.filterwarnings(
     "ignore:Database\\..*is deprecated:DeprecationWarning"
@@ -65,10 +62,6 @@ def ms_of(iso):
     return int(datetime.fromisoformat(iso).timestamp() * 1000)
 
 
-def now_ms():
-    return int(time.time() * 1000)
-
-
 @pytest.fixture
 def db(tmp_path):
     return Database(str(tmp_path / 'bot.db'))
@@ -80,77 +73,6 @@ def seed(db, chat_id, status='paid', **extra):
         uuid=f'00000000-0000-0000-0000-{int(chat_id):012d}',
         email=f'user_{chat_id}@x', **extra))
     return db.get_user(chat_id)
-
-
-class Panel:
-    """Client records and their traffic rows, keyed by email."""
-
-    def __init__(self, fail_add=False, fail_update=False):
-        self.attached = set()
-        self.rows = {}
-        self.records = {}
-        self.calls = []
-        self.fail_add = fail_add
-        self.fail_update = fail_update
-
-    def has(self, email, *, used=0, total=10 * GB, expiry=0, enable=True,
-            limit=1, attached=True):
-        self.rows[email] = {'used': used, 'total': total, 'expiry': expiry,
-                            'enable': enable, 'limit': limit}
-        if attached:
-            self.attached.add(email)
-
-    def client_attached_sync(self, email):
-        self.calls.append(('attached?', email))
-        return email in self.attached
-
-    def add_client_sync(self, client, inbound_id=None):
-        email = client['email']
-        self.calls.append(('add', email))
-        if self.fail_add:
-            return False
-        fresh = {'used': 0, 'total': client['totalGB'],
-                 'expiry': client['expiryTime'], 'enable': client['enable'],
-                 'limit': client['limitIp']}
-        if email in self.attached:
-            self.calls.append(('delete+re-add', email))
-            self.rows[email] = fresh
-        elif email not in self.rows:
-            self.rows[email] = fresh
-        self.attached.add(email)
-        self.records[email] = dict(client)
-        return True
-
-    def sync_client_settings_sync(self, email, updates):
-        self.calls.append(('update', email))
-        if self.fail_update or email not in self.attached:
-            return False
-        row = self.rows[email]
-        for key, field in (('totalGB', 'total'), ('expiryTime', 'expiry'),
-                           ('enable', 'enable'), ('limitIp', 'limit')):
-            if key in updates:
-                row[field] = updates[key]
-        self.records[email].update(updates)
-        return True
-
-    def reset_client_traffic_sync(self, email):
-        self.calls.append(('reset', email))
-        self.rows[email]['used'] = 0
-        return True
-
-    async def sync_user(self, chat_id, client):
-        self.calls.append(('sync_user', client['email']))
-        return self.add_client_sync(client)
-
-    def works(self, email):
-        row = self.rows.get(email)
-        return bool(
-            email in self.attached and row and row['enable']
-            and (not row['expiry'] or row['expiry'] > now_ms())
-            and (not row['total'] or row['used'] < row['total']))
-
-    def writes(self, email):
-        return [c for c, e in self.calls if e == email and c != 'attached?']
 
 
 def press(db, panel, chat_id, cfg=None):
