@@ -152,6 +152,56 @@ class TestSyncRetry:
             await handler._sync_to_xui('12345', {'id': 'abc'})
 
 
+class TestLostKeyReaddIsOneAttempt:
+    """The retries above are for a NEW key. Re-adding a key the panel
+    lost makes one attempt: after an add that went through but lost its
+    answer, a retry would be an add of a client the panel has again —
+    delete + re-add, which zeroes the key's traffic."""
+
+    @pytest.fixture
+    def lost(self, handler):
+        handler.config.INBOUND_ID = 1
+        xui = handler.bot.services['xui']
+        xui.client_attached_sync = Mock(return_value=False)
+        xui.sync_user = AsyncMock(return_value=True)
+        user = Mock(uuid='aa11bb22-cc33-dd44-ee55-ff66aa77bb88',
+                    email='u@nekovo.ru', status='demo', limit_ip=1,
+                    subscription_expiry=None, previous_state=None, lang='ru')
+        handler.validator.validate_user_exists = Mock(return_value=user)
+        return xui
+
+    @pytest.mark.asyncio
+    async def test_a_failed_add_is_not_retried(self, handler, lost):
+        lost.add_client_sync = Mock(return_value=False)
+        await handler._async_handle_get_key('12345')
+        assert lost.add_client_sync.call_count == 1
+        text = handler.bot.send_message.call_args.kwargs.get('text', '')
+        assert 'Не удалось восстановить' in text
+
+    @pytest.mark.asyncio
+    async def test_a_failing_panel_is_not_retried(self, handler, lost):
+        lost.add_client_sync = Mock(side_effect=ConnectionError('boom'))
+        with patch.object(handler, '_send_key_to_user', new_callable=AsyncMock) as sent:
+            await handler._async_handle_get_key('12345')
+        assert lost.add_client_sync.call_count == 1
+        sent.assert_not_awaited()
+        text = handler.bot.send_message.call_args.kwargs.get('text', '')
+        assert 'Не удалось восстановить' in text
+        assert '12345' not in handler._inflight_chat_ids
+
+    @pytest.mark.asyncio
+    async def test_the_readd_skips_sync_user(self, handler, lost):
+        # sync_user also reloads xray and reports a failed reload as a
+        # failed add; the panel API applies the add itself.
+        lost.add_client_sync = Mock(return_value=True)
+        lost.sync_client_settings_sync = Mock(return_value=True)
+        with patch.object(handler, '_send_key_to_user', new_callable=AsyncMock):
+            await handler._async_handle_get_key('12345')
+        lost.sync_user.assert_not_called()
+        assert lost.add_client_sync.call_count == 1
+        assert lost.sync_client_settings_sync.call_count == 1
+
+
 class TestSendKeyValidation:
     """_send_key_to_user must refuse to ship a broken VLESS link."""
 

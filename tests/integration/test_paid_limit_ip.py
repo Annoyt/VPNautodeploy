@@ -86,7 +86,7 @@ class FakePanel:
             self.limits[email] = updates['limitIp']
         return True
 
-    def add_client_sync(self, client):
+    def add_client_sync(self, client, inbound_id=None):
         self.added.append(dict(client))
         return True
 
@@ -165,9 +165,7 @@ class TestMyKey:
         GetKeyHandler._inflight_chat_ids.clear()
         bot = Mock()
         bot.services = {'xui': panel}
-        cfg = Mock()
-        cfg.DEMO_TRAFFIC_GB = 10
-        handler = GetKeyHandler(bot, db, cfg)
+        handler = GetKeyHandler(bot, db, config())
         with patch.object(handler, '_send_key_to_user', new_callable=AsyncMock) as sent:
             import asyncio
             asyncio.run(handler._process_key_request(chat_id))

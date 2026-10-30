@@ -134,6 +134,7 @@ Files with this mark: `test_database.py`, `test_security.py`, `test_state_machin
 | `bot/core/state_machine.py` | `tests/unit/test_state_machine.py` |
 | `bot/handlers/callbacks/user*.py` | Corresponding unit + integration callback tests |
 | `bot/services/xui_service.py` | `tests/integration/test_xui_service.py`, `tests/integration/test_code_review_fixes.py` |
+| `bot/services/billing.py` | `tests/unit/test_billing.py`, `tests/integration/test_paid_limit_ip.py`, `tests/integration/test_mykey_lost_key.py` (the key re-add uses its values) |
 | `bot/core/database.py` schema | `tests/integration/test_migration.py`, `tests/unit/test_database.py` |
 | `bot/models/vpn_node.py` | All cluster tests using `VPNNode` |
 
@@ -594,6 +595,20 @@ The app posts what it measured. The bot reports it like `/sos` (§33): a `user_f
 The exit panel enforces `limitIp` with fail2ban (jail `3x-ipl` inside the 3x-ui container). When a key goes over its limit, the older address is banned for 30 min. Paid keys got the new-key default of 1, so a payer on a phone and a laptop, or on the app's two-networks mode, kept losing one of them.
 
 - **`PAID_LIMIT_IP`** (default 5, passed by compose; 0 = no limit). `billing.paid_limit_ip(user, config)` = the larger of the stored limit and `PAID_LIMIT_IP`; an admin's 0 (`/set_limit @user 0`, the dashboard) stays 0. It is written to `users.limit_ip` and to the panel by `grant_paid_access` (every payment: the in-place update and the re-add) and by `/addmail` for paid keys. Demo keys keep 1.
-- **«🔑 Мой ключ»** (main menu → `GetKeyHandler`) no longer re-adds a key the panel still has. On the relational panel a re-add is delete + re-add: it zeroed the key's traffic and rewrote it with demo values (1 address, 10 GB, no expiry). A key the panel lost is still re-added, with the user's own limit.
+- **«🔑 Мой ключ»** (main menu → `GetKeyHandler`) no longer re-adds a key the panel still has. On the relational panel a re-add is delete + re-add: it zeroed the key's traffic and rewrote it with demo values (1 address, 10 GB, no expiry). A key the panel lost is still re-added, with its tier's values (§43).
 - **Keys paid before:** `docker exec -w /app vpn-bot python3 scripts/paid_limit_ip.py` is a dry run; `--apply` updates. The script reads each key's limit from the panel, because the panel had drifted from the bot: keys it took in before the camelCase fix are unlimited (0) there. Every change is audited as `admin_actions('owner', 'paid_limit_ip', <chat_id>, 'old->new')`.
 - **Tests:** `tests/integration/test_paid_limit_ip.py` (real sqlite) and `TestPaidLimitIp` in `tests/unit/test_billing.py`. 30 mutants killed with a positional restore.
+
+### 43. «🔑 Мой ключ»: a lost key comes back with its tier, a lapsed payer's stays off (2026-10-30)
+
+When the panel has lost a key holder's client (3x-ui detaches long-expired clients from every inbound; a panel wipe), `GetKeyHandler._resync_existing_key` puts it back. Until now it used demo values for every tier: 10 GB, no expiry. A lapsed payer got a free key that never expired, and an active payer lost their quota and paid-until date.
+
+- **Values** come from `billing.tier_client_values(user, config)`:
+  - A payer (`ru_exit.is_eligible`) gets what a payment writes (`_paid_client_values`): `paid_quota_gb`, the paid-until date in ms converted the way `grant_paid_access` does it, and `paid_limit_ip`. No date = no expiry.
+  - A lapsed payer (status `paid` after the date, or `support_topic` with a passed date) gets `None`: nothing is written to the panel. The user gets «Платная подписка закончилась DD.MM.YYYY…» with /buy and a «💳 Продлить подписку» button (`buy_menu`), not the key card. A re-add with the past expiry would only put back a key that is off. A payment re-adds a lost client itself, under the same uuid.
+  - A demo user gets the key `_create_new_key` issues: DEMO_TRAFFIC_GB, DEMO_DAYS from now, and their own address limit.
+- **Re-add:** `billing.readd_client` (add under the same uuid, then the in-place update), shared with `grant_paid_access`. The update is required: the add of a detached client only re-attaches its relational record, and the stale `client_traffics` row (enable=0, old expiry) keeps gating the key. The old button re-add had no update, so a detached key it restored stayed off.
+- **One attempt**, not `_sync_to_xui`'s three, and not through `sync_user`. When an add went through but its answer was lost, a retry adds a client the panel has again: delete + re-add, zeroed traffic. `sync_user` also reports a failed xray reload (entry's sidecar) as a failed add.
+- **No second demo quota in a month:** an attached client, a spent one included, is never re-added. The add of a detached client keeps its traffic row, and the update never touches used bytes; only resetTraffic does, and only the monthly job calls it. Limit: a panel that lost the row too (a wipe) has no usage left to keep, so such a key comes back with the full quota.
+- **Unchanged:** a lapsed payer whose client is still attached gets the key card, as with `/mykey`. **Not done:** a payer's first key (`_create_new_key`, no uuid yet) is still built from demo values.
+- **Tests:** `tests/integration/test_mykey_lost_key.py` (real sqlite; the fake panel has the fork's relational semantics), the lost-key cases in `tests/unit/test_user_callbacks.py`, and `TestLostKeyReaddIsOneAttempt` in `tests/unit/test_get_key_handler_phase1.py`. 37 mutants killed (PR #32's re-add put back among them), restored byte for byte with a hash check.
