@@ -212,8 +212,10 @@ class TestMailRequestCallback:
             import time
             time.sleep(0.2)   # sender worker thread
 
+        # A demo key by mail starts on the other-clients allowance; the
+        # NekoVPN app raises it (bot/services/demo_tiers.py).
         AH.return_value._provision_email_user.assert_called_once_with(
-            'ivan@mail.ru', 10, 30, status='demo')
+            'ivan@mail.ru', 5, 30, status='demo')
         mailer.send_key.assert_called_once()
         with h.db._connect() as c:
             assert c.execute("SELECT status FROM email_requests WHERE id=7"

@@ -231,15 +231,19 @@ class Settings:
         # Demo limits. Freemium: the demo allowance renews monthly (the
         # demo_quota_reset job pushes expiry +30d on the 1st), so a fresh
         # key must live at least until the next run — 7 days would strand
-        # mid-month signups until the next reset.
+        # mid-month signups until the next reset. DEMO_TRAFFIC_GB is the
+        # allowance with the NekoVPN app, DEMO_OTHER_TRAFFIC_GB with any
+        # other client (bot/services/demo_tiers.py).
         try:
             self.DEMO_TRAFFIC_GB: int = int(os.getenv('DEMO_TRAFFIC_GB', '10'))
+            self.DEMO_OTHER_TRAFFIC_GB: int = int(os.getenv('DEMO_OTHER_TRAFFIC_GB', '5'))
             self.DEMO_DAYS: int = int(os.getenv('DEMO_DAYS', '30'))
             # Monthly allowance a paid grant floors the quota to
             # (grant_paid_access never lowers a higher hand-set quota).
             self.PAID_TRAFFIC_GB: int = int(os.getenv('PAID_TRAFFIC_GB', '100'))
         except ValueError:
             self.DEMO_TRAFFIC_GB = 10
+            self.DEMO_OTHER_TRAFFIC_GB = 5
             self.DEMO_DAYS = 30
             self.PAID_TRAFFIC_GB = 100
 

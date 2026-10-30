@@ -836,7 +836,8 @@ class MailRequestHandler(BaseCallbackHandler):
         if cb_id:
             self.bot.answer_callback_query(cb_id, text="Выдаю ключ…")
 
-        demo_gb = int(getattr(self.config, 'DEMO_TRAFFIC_GB', 10) or 10)
+        from bot.services.demo_tiers import demo_traffic_gb
+        demo_gb = demo_traffic_gb(self.config, in_app=False)
         try:
             from bot.handlers.admin import AdminHandler
             admin = AdminHandler(self.bot, self.db, self.config)

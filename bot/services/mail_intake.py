@@ -303,7 +303,8 @@ class MailIntakeService:
 
     def _notify_admin(self, req_id: int, addr: str, subject: str,
                       known_status: Optional[str]) -> None:
-        demo_gb = int(getattr(self.config, 'DEMO_TRAFFIC_GB', 10) or 10)
+        from bot.services.demo_tiers import demo_traffic_gb
+        demo_gb = demo_traffic_gb(self.config, in_app=False)
         lines = [
             "📨 <b>Заявка на ключ с почты</b>",
             f"От: <code>{addr}</code>",

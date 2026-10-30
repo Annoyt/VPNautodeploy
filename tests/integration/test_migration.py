@@ -1,5 +1,7 @@
 """Tests for database migrations"""
 
+import sqlite3
+
 import pytest
 from bot.core.database import Database
 
@@ -30,6 +32,21 @@ class TestMigrationV3:
         
         conn.close()
     
+    def test_client_apps_table(self, mock_bot_db):
+        """Which app fetched a user's profile (bot/services/demo_tiers.py):
+        one row per (chat_id, app), the newest fetch wins."""
+        conn = mock_bot_db._connect()
+        try:
+            cols = [(r[1], r[2], r[3], r[5]) for r in
+                    conn.execute("PRAGMA table_info(client_apps)")]
+            conn.execute("INSERT INTO client_apps VALUES ('1', 'nekovpn', '0.9.2', 't1')")
+            with pytest.raises(sqlite3.IntegrityError):
+                conn.execute("INSERT INTO client_apps VALUES ('1', 'nekovpn', '0.9.3', 't2')")
+        finally:
+            conn.close()
+        assert cols == [('chat_id', 'TEXT', 1, 1), ('app', 'TEXT', 1, 2),
+                        ('version', 'TEXT', 0, 0), ('last_seen', 'TEXT', 1, 0)]
+
     def test_client_probe_table(self, mock_bot_db):
         """FlClash health-check heartbeats (IMPROVEMENT_PLAN E4) — written
         by GET /probe/<token>/<grp>, one row per (chat_id, grp) a minute."""
