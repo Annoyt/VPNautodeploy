@@ -99,18 +99,20 @@ class TestVPNServiceEdgeCases:
         assert '#no-at-sign' in link
     
     def test_create_client_config_defaults(self):
-        """Test create_client_config uses defaults from config."""
+        """A new client starts on the demo allowance for other clients;
+        the NekoVPN app raises it (bot/services/demo_tiers.py)."""
         config = MagicMock()
         config.ENTRY_NODE_IP = '1.1.1.1'
         config.REALITY_PUBLIC_KEY = 'pk'
         config.SNI_VALUE = 'sni'
         config.DEMO_TRAFFIC_GB = 10
+        config.DEMO_OTHER_TRAFFIC_GB = 5
         config.DEMO_DAYS = 14
         vpn = VPNService(config)
         
         client = vpn.create_client_config('123')
         assert client['limitIp'] == 1
-        assert client['totalGB'] == 10 * 1073741824
+        assert client['totalGB'] == 5 * 1073741824
         # expiry_days defaults to None, which means 0 (no expiry)
         assert client['expiryTime'] == 0
     

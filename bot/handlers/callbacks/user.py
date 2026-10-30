@@ -348,6 +348,10 @@ def build_key_delivery_message(user, config, db=None) -> tuple:
             "\n\n💡 Подписка сама обновляется — переимпортировать ничего не надо.\n\n"
             "Нужен сырой ключ одного протокола для legacy-клиента? /raw"
         )
+    if (getattr(user, 'status', '') or '') == 'demo':
+        from bot.services.demo_tiers import demo_terms
+        text += "\n\n" + demo_terms(
+            config, 'en' if lang == 'en' else 'ru', ios=is_ios)
     btn_label = ("🆘 Не подключается? Сообщить" if lang == 'ru'
                  else "🆘 Not connecting? Report it")
     email_btn_label = ("📧 Указать email" if lang == 'ru'
@@ -503,17 +507,22 @@ class GetKeyHandler(BaseCallbackHandler):
         X-UI, so the next request starts fresh instead of resyncing a
         ghost identifier.
         """
+        # A new key starts on the other-clients allowance; the NekoVPN
+        # app's first profile fetch raises it (demo_tiers).
+        from bot.services.demo_tiers import demo_traffic_gb
+        demo_gb = demo_traffic_gb(self.config, in_app=False)
         vpn = VPNService(self.config)
         client = vpn.create_client_config(
             chat_id=chat_id,
             username=user.username,
-            traffic_gb=self.config.DEMO_TRAFFIC_GB,
+            traffic_gb=demo_gb,
             expiry_days=self.config.DEMO_DAYS,
             comment=getattr(user, 'contact_email', None) or ''
         )
 
         user.uuid = client['id']
         user.email = client['email']
+        user.quota_gb = float(demo_gb)
 
         await self._sync_to_xui(chat_id, client)
         self.db.save_user(user)
@@ -1794,13 +1803,14 @@ class StatsRequestHandler(BaseCallbackHandler):
             traffic = xui.get_client_traffic_sync(user.email)
 
             if traffic:
+                from bot.services.demo_tiers import demo_traffic_gb, stats_footer
                 used_traffic_bytes = (
                     traffic.get('upload', 0) + traffic.get('download', 0)
                 )
                 # Real per-client quota from the panel; only fall back
                 # to the demo default when the panel has none.
                 total_limit_bytes = traffic.get('total') or (
-                    self.config.DEMO_TRAFFIC_GB * 1024 * 1024 * 1024
+                    demo_traffic_gb(self.config, in_app=False) * 1024 * 1024 * 1024
                 )
 
                 percentage = 0
@@ -1814,6 +1824,7 @@ class StatsRequestHandler(BaseCallbackHandler):
                     f"📈 Total Used: {format_bytes(used_traffic_bytes)} / {format_bytes(total_limit_bytes)}\n"
                     f"({percentage:.2f}%)"
                 )
+                text += "\n\n" + stats_footer(user, self.config, total_limit_bytes)
             else:
                 text = "Could not retrieve traffic statistics for your account."
 

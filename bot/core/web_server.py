@@ -145,6 +145,11 @@ class WebAppServer:
         self._fallback_inflight: set = set()
         self._fallback_pool = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix='fallback-node')
+        # NekoVPN app profile fetches (_schedule_neko_app), same shape:
+        # uuids queued or running, one thread of their own.
+        self._neko_inflight: set = set()
+        self._neko_pool = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix='neko-app')
         # /probe heartbeats (E4): token -> chat_id, rebuilt from users on
         # a miss (at most once a minute) and every 10 min; the last row
         # time per (chat_id, group) for the one-row-a-minute limit.
@@ -1067,6 +1072,39 @@ class WebAppServer:
         self._bg_tasks.add(task)
         task.add_done_callback(self._bg_tasks.discard)
 
+    def _schedule_neko_app(self, user, version: str) -> None:
+        """A profile fetch by the NekoVPN app: record it, and raise a demo
+        key to the app allowance (bot/services/demo_tiers.py) without
+        making /sub wait. The panel call may take its 15-s timeout, so
+        it runs like the reserve provisioning above: at most one call per
+        uuid queued or running, on a thread of its own. Never raises."""
+        uuid = getattr(user, 'uuid', None)
+        if not uuid or uuid in self._neko_inflight:
+            return
+
+        def _work():
+            from bot.services import demo_tiers
+            demo_tiers.mark_app_seen(self.db, user.chat_id, version)
+            if demo_tiers.grant_app_allowance(self.db, self.config, self.xui, user.chat_id):
+                logger.info(f'sub: {user.chat_id} got the NekoVPN demo allowance')
+
+        async def _run():
+            try:
+                await asyncio.get_running_loop().run_in_executor(self._neko_pool, _work)
+            except Exception as e:
+                logger.warning(f'sub: NekoVPN app bookkeeping failed for {user.chat_id}: {e}')
+            finally:
+                self._neko_inflight.discard(uuid)
+
+        try:
+            task = asyncio.get_running_loop().create_task(_run())
+        except Exception as e:
+            logger.warning(f'sub: could not schedule NekoVPN app bookkeeping: {e}')
+            return
+        self._neko_inflight.add(uuid)
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
+
     async def handle_subscription(self, request: web.Request) -> web.Response:
         """Serve a sing-box JSON subscription for a single user.
 
@@ -1261,6 +1299,13 @@ class WebAppServer:
         # response never waits for the reserve panel.
         if user.status in FALLBACK_ALLOWED_STATUSES:
             self._schedule_fallback_provisioning(user)
+
+        # Fetched by our NekoVPN app: a demo key gets the app allowance
+        # (demo_tiers). Profile fetches only, in the background as well.
+        from bot.services.demo_tiers import neko_app_version
+        neko_version = neko_app_version(request.headers.get('User-Agent'))
+        if neko_version:
+            self._schedule_neko_app(user, neko_version)
 
         # Format selection: default is the sing-box config (Hiddify).
         # ``?format=xray`` gets the Xray-core JSON (imports into Happ as
@@ -1952,7 +1997,7 @@ class WebAppServer:
         public_keys = [
             'MODE', 'FORUM_ENABLED', 'FORUM_GROUP_ID',
             'ENTRY_NODE_IP', 'SNI_VALUE', 'SID_VALUE',
-            'DEMO_TRAFFIC_GB', 'DEMO_DAYS',
+            'DEMO_TRAFFIC_GB', 'DEMO_OTHER_TRAFFIC_GB', 'DEMO_DAYS',
             'TOPIC_REQUESTS', 'TOPIC_USERS', 'TOPIC_DEMO',
             'TOPIC_REJECTED', 'TOPIC_STATS', 'TOPIC_PAYMENTS',
             'TOPIC_SUPPORT', 'TOPIC_SOLVED', 'TOPIC_AI',
