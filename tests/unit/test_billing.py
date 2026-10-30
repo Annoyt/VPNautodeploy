@@ -9,7 +9,7 @@ never synced / synced via the traffic-wiping add path).
 from datetime import datetime
 from unittest.mock import MagicMock, Mock, patch
 
-from bot.services.billing import grant_paid_access
+from bot.services.billing import grant_paid_access, paid_quota_gb
 from bot.config.constants import BYTES_PER_GB
 
 PAID_UNTIL = datetime(2026, 12, 31, 23, 59)
@@ -73,6 +73,21 @@ class TestGrantPaidAccess:
         _email, updates = xui.sync_client_settings_sync.call_args[0]
         assert updates['totalGB'] == 500 * BYTES_PER_GB
         assert result['panel_ok'] is True
+
+    def test_an_admins_unlimited_quota_stays_unlimited(self):
+        # /quota @user 0 = unlimited (totalGB 0 on the panel). A payment
+        # used to floor it to 100 GB.
+        user = _user(status='paid', quota=0.0)
+        db = MagicMock()
+        db.get_user.return_value = user
+        xui = Mock()
+        xui.sync_client_settings_sync.return_value = True
+
+        grant_paid_access(db, _config(), xui, '42', PAID_UNTIL)
+
+        assert user.quota_gb == 0.0
+        _email, updates = xui.sync_client_settings_sync.call_args[0]
+        assert updates['totalGB'] == 0
 
     def test_already_paid_skips_transition(self):
         user = _user(status='paid')
@@ -159,6 +174,24 @@ class TestGrantPaidAccess:
 
         assert result['status_ok'] is False
         assert result['user'] is None
+
+
+class TestPaidQuotaGb:
+    """The paid floor, a hand-raised quota, and an admin's 0 (unlimited)."""
+
+    def test_the_floor(self):
+        assert paid_quota_gb(_user(quota=5.0), _config()) == 100.0
+
+    def test_a_raised_quota_survives(self):
+        assert paid_quota_gb(_user(quota=500.0), _config()) == 500.0
+
+    def test_zero_is_unlimited(self):
+        assert paid_quota_gb(_user(quota=0.0), _config()) == 0.0
+
+    def test_a_missing_quota_is_not_unlimited(self):
+        from types import SimpleNamespace
+        assert paid_quota_gb(SimpleNamespace(), _config()) == 100.0
+        assert paid_quota_gb(SimpleNamespace(quota_gb='n/a'), _config()) == 100.0
 
 
 class TestPaidLimitIp:
