@@ -9,8 +9,10 @@ Focus areas:
 
 import asyncio
 import pytest
+from datetime import datetime, timedelta
 from unittest.mock import Mock, patch, AsyncMock
 
+from bot.config.constants import BYTES_PER_GB
 from bot.handlers.callbacks.user import (
     GetKeyHandler,
     TryAltProtocolHandler,
@@ -470,32 +472,82 @@ class TestGetKeyHandler:
         mock_xui.sync_user.assert_not_called()
         sent.assert_awaited_once()
 
-    @pytest.mark.asyncio
-    async def test_resyncs_existing_key_when_uuid_present(self, mock_bot, mock_db, mock_config, sample_user):
-        """A key the panel lost is re-added with the same UUID."""
-        handler = GetKeyHandler(mock_bot, mock_db, mock_config)
-        handler.SYNC_TIMEOUT_SEC = 0.5
-        handler.SYNC_BASE_BACKOFF_SEC = 0.01
-
+    @staticmethod
+    def _lost_key_panel(mock_bot, mock_config):
+        """A panel that lost the user's client; tier settings set."""
+        mock_config.INBOUND_ID = 1
+        mock_config.PAID_TRAFFIC_GB = 100
+        mock_config.PAID_LIMIT_IP = 5
         mock_xui = Mock()
         mock_xui.client_attached_sync = Mock(return_value=False)
+        mock_xui.add_client_sync = Mock(return_value=True)
+        mock_xui.sync_client_settings_sync = Mock(return_value=True)
         mock_xui.sync_user = AsyncMock(return_value=True)
         mock_bot.services = {'xui': mock_xui}
+        return mock_xui
 
+    @pytest.mark.asyncio
+    async def test_resyncs_existing_key_when_uuid_present(self, mock_bot, mock_db, mock_config, sample_user):
+        """A demo key the panel lost is re-added with the same UUID and
+        its own monthly quota (users.quota_gb), then updated in place:
+        the add alone leaves the stale traffic row gating it."""
+        handler = GetKeyHandler(mock_bot, mock_db, mock_config)
+        mock_xui = self._lost_key_panel(mock_bot, mock_config)
+        mock_config.DEMO_OTHER_TRAFFIC_GB = 5
+        sample_user.quota_gb = 10.0            # an app key (demo_tiers)
         mock_db.get_user = Mock(return_value=sample_user)
 
-        with patch('bot.services.subscription.SubscriptionService') as MockSub:
-            mock_sub = Mock()
-            mock_sub.build_subscription_url.return_value = 'https://example.com/sub/test'
-            MockSub.return_value = mock_sub
-
+        with patch.object(handler, '_send_key_to_user', new_callable=AsyncMock) as sent:
             await handler._process_key_request(sample_user.chat_id)
 
-        # Should sync existing UUID
-        mock_xui.sync_user.assert_called_once()
-        call_args = mock_xui.sync_user.call_args
-        assert call_args[0][0] == sample_user.chat_id
-        assert call_args[0][1]['id'] == sample_user.uuid
+        client, inbound = mock_xui.add_client_sync.call_args[0]
+        assert client['id'] == sample_user.uuid
+        assert client['email'] == sample_user.email
+        assert client['totalGB'] == 10 * BYTES_PER_GB
+        assert client['expiryTime'] > 0 and inbound == 1
+        email, updates = mock_xui.sync_client_settings_sync.call_args[0]
+        assert email == sample_user.email and updates['totalGB'] == 10 * BYTES_PER_GB
+        mock_xui.sync_user.assert_not_called()
+        sent.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_a_payers_lost_key_comes_back_paid(self, mock_bot, mock_db, mock_config, paid_user):
+        """Not the demo 10 GB with no expiry: the paid quota, the
+        paid-until date and the paid address limit."""
+        handler = GetKeyHandler(mock_bot, mock_db, mock_config)
+        mock_xui = self._lost_key_panel(mock_bot, mock_config)
+        paid_until = datetime.now() + timedelta(days=20)
+        paid_user.subscription_expiry = paid_until.isoformat()
+        mock_db.get_user = Mock(return_value=paid_user)
+
+        with patch.object(handler, '_send_key_to_user', new_callable=AsyncMock) as sent:
+            await handler._process_key_request(paid_user.chat_id)
+
+        client = mock_xui.add_client_sync.call_args[0][0]
+        assert client['id'] == paid_user.uuid
+        assert client['totalGB'] == 100 * BYTES_PER_GB
+        assert client['expiryTime'] == int(paid_until.timestamp() * 1000)
+        assert client['limitIp'] == 5
+        sent.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_a_lapsed_payers_lost_key_is_not_readded(self, mock_bot, mock_db, mock_config, paid_user):
+        """A lapsed payer keeps status 'paid'; the key stays off and the
+        user is pointed at /buy instead of getting a key card."""
+        handler = GetKeyHandler(mock_bot, mock_db, mock_config)
+        mock_xui = self._lost_key_panel(mock_bot, mock_config)
+        paid_user.subscription_expiry = (datetime.now() - timedelta(days=10)).isoformat()
+        mock_db.get_user = Mock(return_value=paid_user)
+
+        with patch.object(handler, '_send_key_to_user', new_callable=AsyncMock) as sent:
+            await handler._process_key_request(paid_user.chat_id)
+
+        mock_xui.add_client_sync.assert_not_called()
+        mock_xui.sync_client_settings_sync.assert_not_called()
+        mock_xui.sync_user.assert_not_called()
+        sent.assert_not_awaited()
+        text = mock_bot.send_message.call_args.kwargs['text']
+        assert '/buy' in text      # paid_user is lang='en'
 
     @pytest.mark.asyncio
     async def test_english_language_in_key_message(self, mock_bot, mock_db, mock_config):

@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Optional
 from bot.config import Platform, UserState, BYTES_PER_GB
 from bot.core.state_machine import StateMachine
 from bot.handlers.callbacks.base import BaseCallbackHandler
+from bot.services.billing import readd_client, tier_client_values
 from bot.services.lockdown import (
     apply_lockdown_order, is_lockdown_active, load_lockdown_order,
 )
@@ -493,8 +494,8 @@ class GetKeyHandler(BaseCallbackHandler):
 
         if not user.uuid:
             await self._create_new_key(chat_id, user)
-        else:
-            await self._resync_existing_key(chat_id, user)
+        elif not await self._resync_existing_key(chat_id, user):
+            return
 
         await self._send_key_to_user(chat_id, user)
 
@@ -527,27 +528,80 @@ class GetKeyHandler(BaseCallbackHandler):
         await self._sync_to_xui(chat_id, client)
         self.db.save_user(user)
 
-    async def _resync_existing_key(self, chat_id: str, user) -> None:
+    async def _resync_existing_key(self, chat_id: str, user) -> bool:
         """Put an existing key back on the panel if the panel lost it.
+        False when the key stays off: no key card then.
 
         A client the panel still has is left alone. «🔑 Мой ключ» on the
         main menu lands here, and on the relational panel a re-add is
-        delete + re-add: it zeroed the key's traffic and rewrote it with
-        the demo values below, so a paid key came back with one address,
-        10 GB and no expiry. A lost client is re-added with the user's own
-        address limit."""
+        delete + re-add, which zeroes the key's traffic.
+
+        A lost client (3x-ui detaches long-expired ones) comes back under
+        its uuid with its tier's values (``billing.tier_client_values``):
+        a payer's quota, paid-until date and address limit, or a demo
+        key. A lapsed payer gets nothing back and is pointed at /buy; a
+        payment re-adds the key itself (``grant_paid_access``).
+
+        One attempt, unlike ``_sync_to_xui``: after an add that went
+        through but lost its answer, a retry would be delete + re-add."""
         xui = self.bot.services.get('xui')
         if xui and await asyncio.to_thread(xui.client_attached_sync, user.email):
-            return
-        await self._sync_to_xui(chat_id, {
-            "id": user.uuid,
-            "flow": "xtls-rprx-vision",
-            "email": user.email,
-            "limitIp": getattr(user, 'limit_ip', 1),
-            "totalGB": self.config.DEMO_TRAFFIC_GB * BYTES_PER_GB,
-            "expiryTime": 0,
-            "enable": True
-        })
+            return True
+        values = tier_client_values(user, self.config)
+        if values is None:
+            self._send_lapsed_notice(chat_id, user)
+            return False
+        if not xui:
+            raise VPNBotError(
+                "X-UI service unavailable",
+                user_message="⚠️ Сервис VPN временно недоступен. Попробуйте позже."
+            )
+        try:
+            ok = await asyncio.to_thread(
+                readd_client, xui, self.config, user, values)
+        except Exception as e:
+            logger.warning(f"Re-add of the lost key of {chat_id} failed: {e}")
+            ok = False
+        if not ok:
+            raise VPNBotError(
+                f"Re-add of the lost key of {chat_id} failed",
+                user_message="⚠️ Не удалось восстановить VPN-ключ. Попробуйте через минуту."
+            )
+        logger.info(
+            f"Lost key of {chat_id} re-added: {values['totalGB'] // BYTES_PER_GB} GB, "
+            f"expiry {values['expiryTime']}, {values['limitIp']} addresses"
+        )
+        return True
+
+    def _send_lapsed_notice(self, chat_id: str, user) -> None:
+        """A lapsed payer's «🔑 Мой ключ»: when the subscription ended and
+        how to renew it. A payment brings the same key back, with the
+        uuid the user's apps already hold."""
+        until = _parse_utc(getattr(user, 'subscription_expiry', None))
+        day = until.strftime('%d.%m.%Y') if until else ''
+        if (getattr(user, 'lang', None) or 'ru') == 'en':
+            text = (
+                f"⌛ Your paid subscription ended{' on ' + day if day else ''}, "
+                "so the key is off.\n"
+                "Renew it with /buy: the same key works again after "
+                "payment, nothing to reinstall."
+            )
+            button = '💳 Renew subscription'
+        else:
+            text = (
+                f"⌛ Платная подписка закончилась{' ' + day if day else ''}, "
+                "ключ выключен.\n"
+                "Продлить — /buy: после оплаты заработает этот же ключ, "
+                "переустанавливать ничего не нужно."
+            )
+            button = '💳 Продлить подписку'
+        self.bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            reply_markup={'inline_keyboard': [
+                [{'text': button, 'callback_data': 'buy_menu'}],
+            ]},
+        )
 
     async def _sync_to_xui(self, chat_id: str, client_config: dict) -> None:
         """Sync client config to X-UI with bounded retries.
