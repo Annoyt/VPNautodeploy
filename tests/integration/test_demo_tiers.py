@@ -33,8 +33,9 @@ pytestmark = pytest.mark.filterwarnings(
 
 GB = BYTES_PER_GB
 NEKO_UA = 'NekoVPN/v0.9.2-neko.3 clash-verge Platform/android'
-NOTE_RU = 'Считается только трафик через VPN.'
-FLCLASH_RU = 'В NekoVPN и FlClash российские сайты открываются напрямую'
+NOTE_RU = 'учитывается ТОЛЬКО трафик вне РФ'
+IOS_NOTE_RU = 'Учитывается только трафик через VPN.'
+FLCLASH_RU = 'В NekoVPN и FlClash учитывается ТОЛЬКО трафик вне РФ'
 
 
 def _now():
@@ -325,7 +326,7 @@ class TestTexts:
     def test_the_iphone_card_names_no_flclash(self, db):
         from bot.handlers.callbacks.user import build_key_delivery_message
         text, _kb = build_key_delivery_message(seed(db, 1, platform='ios'), config())
-        assert NOTE_RU in text and 'FlClash' not in text
+        assert IOS_NOTE_RU in text and 'FlClash' not in text
 
     def test_a_paid_card_has_no_demo_terms(self, db):
         from bot.handlers.callbacks.user import build_key_delivery_message
