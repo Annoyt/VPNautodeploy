@@ -519,12 +519,22 @@ class GetKeyHandler(BaseCallbackHandler):
         self.db.save_user(user)
 
     async def _resync_existing_key(self, chat_id: str, user) -> None:
-        """Resync existing key to X-UI."""
+        """Put an existing key back on the panel if the panel lost it.
+
+        A client the panel still has is left alone. «🔑 Мой ключ» on the
+        main menu lands here, and on the relational panel a re-add is
+        delete + re-add: it zeroed the key's traffic and rewrote it with
+        the demo values below, so a paid key came back with one address,
+        10 GB and no expiry. A lost client is re-added with the user's own
+        address limit."""
+        xui = self.bot.services.get('xui')
+        if xui and await asyncio.to_thread(xui.client_attached_sync, user.email):
+            return
         await self._sync_to_xui(chat_id, {
             "id": user.uuid,
             "flow": "xtls-rprx-vision",
             "email": user.email,
-            "limitIp": 1,
+            "limitIp": getattr(user, 'limit_ip', 1),
             "totalGB": self.config.DEMO_TRAFFIC_GB * BYTES_PER_GB,
             "expiryTime": 0,
             "enable": True

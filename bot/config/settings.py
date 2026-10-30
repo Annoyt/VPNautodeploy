@@ -242,6 +242,15 @@ class Settings:
             self.DEMO_TRAFFIC_GB = 10
             self.DEMO_DAYS = 30
             self.PAID_TRAFFIC_GB = 100
+
+        # Addresses a paid key may use at once: the panel's limitIp,
+        # enforced on exit by 3x-ui's fail2ban jail (one address over the
+        # limit bans the older one for 30 min). 0 = no limit. Payments and
+        # /addmail raise a key to it (billing.paid_limit_ip), never lower.
+        try:
+            self.PAID_LIMIT_IP: int = int(os.getenv('PAID_LIMIT_IP', '5'))
+        except ValueError:
+            self.PAID_LIMIT_IP = 5
             
         # Rejection settings
         try:

@@ -451,13 +451,34 @@ class TestGetKeyHandler:
         mock_db.save_user.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_leaves_a_key_the_panel_still_has(self, mock_bot, mock_db, mock_config, sample_user):
+        """A re-add of a key the panel has is delete + re-add: zeroed
+        traffic and demo values. The key card is sent all the same."""
+        handler = GetKeyHandler(mock_bot, mock_db, mock_config)
+
+        mock_xui = Mock()
+        mock_xui.client_attached_sync = Mock(return_value=True)
+        mock_xui.sync_user = AsyncMock(return_value=True)
+        mock_bot.services = {'xui': mock_xui}
+
+        mock_db.get_user = Mock(return_value=sample_user)
+
+        with patch.object(handler, '_send_key_to_user', new_callable=AsyncMock) as sent:
+            await handler._process_key_request(sample_user.chat_id)
+
+        mock_xui.client_attached_sync.assert_called_once_with(sample_user.email)
+        mock_xui.sync_user.assert_not_called()
+        sent.assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_resyncs_existing_key_when_uuid_present(self, mock_bot, mock_db, mock_config, sample_user):
-        """Test that existing key is resynced when user has UUID."""
+        """A key the panel lost is re-added with the same UUID."""
         handler = GetKeyHandler(mock_bot, mock_db, mock_config)
         handler.SYNC_TIMEOUT_SEC = 0.5
         handler.SYNC_BASE_BACKOFF_SEC = 0.01
 
         mock_xui = Mock()
+        mock_xui.client_attached_sync = Mock(return_value=False)
         mock_xui.sync_user = AsyncMock(return_value=True)
         mock_bot.services = {'xui': mock_xui}
 
