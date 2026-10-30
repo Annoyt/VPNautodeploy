@@ -126,6 +126,13 @@ class TestPayer:
         assert panel.rows['user_13@x']['total'] == 500 * GB
         assert panel.rows['user_13@x']['limit'] == 10
 
+    def test_an_admins_unlimited_quota_stays(self, db):
+        # /quota @user 0: unlimited, totalGB 0 on the panel.
+        seed(db, '18', subscription_expiry=iso_in(20), quota_gb=0.0)
+        panel = Panel()
+        press(db, panel, '18')
+        assert panel.rows['user_18@x']['total'] == 0
+
     def test_an_admins_no_limit_stays(self, db):
         seed(db, '14', subscription_expiry=iso_in(20), limit_ip=0)
         panel = Panel()
@@ -248,6 +255,12 @@ class TestDemo:
         panel = Panel()
         press(db, panel, '37')
         assert panel.rows['user_37@x']['total'] == 110 * GB
+
+    def test_an_unlimited_demo_key_stays_unlimited(self, db):
+        seed(db, '39', status='demo', quota_gb=0.0)
+        panel = Panel()
+        press(db, panel, '39')
+        assert panel.rows['user_39@x']['total'] == 0
 
     def test_no_quota_below_the_other_allowance(self, db):
         seed(db, '38', status='demo', quota_gb=2.0)

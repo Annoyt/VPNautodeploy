@@ -58,14 +58,29 @@ def paid_limit_ip(user, config) -> int:
     return max(current, floor)
 
 
+def _stored_quota_gb(user) -> Optional[float]:
+    """users.quota_gb, None when missing or not a number. 0 is an admin's
+    "unlimited" (/quota @user 0; the column defaults to 5.0), which the
+    panel reads from totalGB 0."""
+    try:
+        value = getattr(user, 'quota_gb', None)
+        return None if value is None else float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def paid_quota_gb(user, config) -> float:
     """A paid key's monthly quota in GB: PAID_TRAFFIC_GB, never below a
-    higher quota an admin set by hand (a hand-raised 500 GB survives)."""
+    higher quota an admin set by hand (a hand-raised 500 GB survives),
+    and an admin's 0 (unlimited) stays 0, like paid_limit_ip's."""
     try:
         paid_gb = float(getattr(config, 'PAID_TRAFFIC_GB', 100) or 100)
     except (TypeError, ValueError):
         paid_gb = 100.0
-    return max(float(getattr(user, 'quota_gb', 0) or 0), paid_gb)
+    stored = _stored_quota_gb(user)
+    if stored == 0:
+        return 0.0
+    return max(stored or 0.0, paid_gb)
 
 
 def _paid_client_values(user, config, expiry_ms: int) -> dict:
@@ -110,7 +125,8 @@ def tier_client_values(user, config,
     - Everyone else holds a demo key: its own monthly quota
       (``users.quota_gb``, which the monthly reset, the NekoVPN app's
       raise and an admin's gift write; never below the other-clients
-      allowance, see ``demo_tiers``), DEMO_DAYS from now like a new key,
+      allowance, see ``demo_tiers``, and an admin's 0, unlimited, stays
+      0), DEMO_DAYS from now like a new key,
       the user's own address limit. The monthly demo job renews it on
       the 1st.
     """
@@ -124,11 +140,9 @@ def tier_client_values(user, config,
     if status == UserState.PAID.value or (
             status == UserState.SUPPORT_TOPIC.value and expiry):
         return None
-    try:
-        demo_gb = float(getattr(user, 'quota_gb', 0) or 0)
-    except (TypeError, ValueError):
-        demo_gb = 0.0
-    demo_gb = max(demo_gb, float(demo_traffic_gb(config, in_app=False)))
+    demo_gb = _stored_quota_gb(user)
+    if demo_gb != 0:
+        demo_gb = max(demo_gb or 0.0, float(demo_traffic_gb(config, in_app=False)))
     try:
         days = int(getattr(config, 'DEMO_DAYS', 30))
     except (TypeError, ValueError):

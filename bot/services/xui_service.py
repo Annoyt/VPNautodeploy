@@ -808,7 +808,19 @@ class XUIService:
         if iid is None:
             return True
         ids = self._client_inbound_ids(iid)
-        return await self._read_client_merged_async(email, ids) is not None
+        # The first read alone warms the login, as in
+        # _read_client_merged_async; the rest concurrently.
+        inbounds = [await self.api.get_inbound(ids[0])]
+        if ids[1:]:
+            inbounds.extend(await asyncio.gather(
+                *(self.api.get_inbound(i) for i in ids[1:])))
+        if any(self._find_client_by_email(inbound, email)
+               for inbound in inbounds):
+            return True
+        # get_inbound answers None on any error (a timeout, a refused
+        # login), not only for an inbound that does not exist, and every
+        # id here is a configured one. A failed read is not a lost key.
+        return any(inbound is None for inbound in inbounds)
 
     def client_attached_sync(self, email: str) -> bool:
         """Is the client still attached to at least one inbound?
@@ -821,7 +833,11 @@ class XUIService:
         gate: only a truly absent client may be re-added.
 
         Errs on the side of "attached" when it cannot tell: skipping a
-        revival is recoverable next month, wiping counters is not.
+        revival is recoverable next month, wiping counters is not. That
+        includes an inbound read that failed: until 2026-10-30 one read
+        as "not on that inbound", so a panel hiccup made an attached
+        client look lost. A configured inbound id the panel does not
+        have blocks every re-add the same way; fix the id.
         """
         if not self.api:
             return True
