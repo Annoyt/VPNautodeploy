@@ -7,8 +7,10 @@ is not set up) and the user list ``setup_ru_exit.sh --sync`` feeds the
 server — the CLI is run as the timer runs it, from a bare interpreter.
 """
 
+import gc
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -250,6 +252,14 @@ class TestCli:
 
     def test_read_only(self, db):
         _seed(db, '1')
+        # Settle the test's own writes in the file first. sqlite3's `with`
+        # commits but does not close; the GC closes the connection later,
+        # and the last close checkpoints the WAL into the file. In a full
+        # run that landed during the CLI call and failed the compare.
+        gc.collect()
+        conn = sqlite3.connect(db.db_path)
+        conn.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+        conn.close()
         before = Path(db.db_path).read_bytes()
         assert self._run('users', db_path=db.db_path).returncode == 0
         assert Path(db.db_path).read_bytes() == before
