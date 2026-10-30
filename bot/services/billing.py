@@ -9,10 +9,10 @@ gated on the dead local-DB mode. Route every grant through
 ``grant_paid_access`` so the tier is one coherent thing:
 
   bot.db:   status='paid', subscription_expiry, quota_gb floor,
-            subscriptions.expires_at
-  panel:    expiryTime, enable=1, totalGB — via the in-place update,
-            with a full re-provision fallback for clients the panel
-            has already purged.
+            limit_ip floor, subscriptions.expires_at
+  panel:    expiryTime, enable=1, totalGB, limitIp — via the in-place
+            update, with a full re-provision fallback for clients the
+            panel has already purged.
 """
 
 import logging
@@ -23,6 +23,33 @@ from bot.config.constants import BYTES_PER_GB
 from bot.core.state_machine import StateMachine
 
 logger = logging.getLogger(__name__)
+
+# Addresses a paid key may use at once unless PAID_LIMIT_IP says otherwise.
+DEFAULT_PAID_LIMIT_IP = 5
+
+
+def paid_limit_ip(user, config) -> int:
+    """The panel's limitIp for a paid user: PAID_LIMIT_IP (5 by default),
+    never below a higher value an admin set by hand (/set_limit, the
+    dashboard), and an admin's 0 (no limit) stays 0. PAID_LIMIT_IP 0 or
+    less means no limit for every payer.
+
+    The exit panel enforces limitIp with fail2ban: an address over the
+    limit gets the older one banned for 30 min, so a payer on a phone, a
+    laptop and the app's two-networks mode needs room."""
+    try:
+        floor = int(getattr(config, 'PAID_LIMIT_IP', DEFAULT_PAID_LIMIT_IP))
+    except (TypeError, ValueError):
+        floor = DEFAULT_PAID_LIMIT_IP
+    if floor <= 0:
+        return 0
+    try:
+        current = int(getattr(user, 'limit_ip', 1))
+    except (TypeError, ValueError):
+        current = 1
+    if current == 0:
+        return 0
+    return max(current, floor)
 
 
 def grant_paid_access(db, config, xui, chat_id: str,
@@ -50,6 +77,7 @@ def grant_paid_access(db, config, xui, chat_id: str,
     user.subscription_expiry = paid_until.isoformat()
     # Floor, never a downgrade: a hand-raised 500 GB quota survives.
     user.quota_gb = max(float(getattr(user, 'quota_gb', 0) or 0), paid_gb)
+    user.limit_ip = paid_limit_ip(user, config)
     db.save_user(user)
 
     if (getattr(user, 'status', '') or '') != UserState.PAID.value:
@@ -80,6 +108,7 @@ def grant_paid_access(db, config, xui, chat_id: str,
             'expiryTime': expiry_ms,
             'enable': True,
             'totalGB': int(user.quota_gb * BYTES_PER_GB),
+            'limitIp': user.limit_ip,
         }
         try:
             ok = xui.sync_client_settings_sync(user.email, updates)
@@ -91,7 +120,7 @@ def grant_paid_access(db, config, xui, chat_id: str,
                     'id': user.uuid,
                     'flow': 'xtls-rprx-vision',
                     'email': user.email,
-                    'limitIp': int(getattr(user, 'limit_ip', 1) or 1),
+                    'limitIp': updates['limitIp'],
                     'totalGB': updates['totalGB'],
                     'expiryTime': expiry_ms,
                     'enable': True,

@@ -2022,6 +2022,7 @@ class AdminOpsMixin(AdminHandlerBase):
 
         from bot.config.constants import UserState, Platform, BYTES_PER_GB
         from bot.models.user import User
+        from bot.services.billing import paid_limit_ip
         from bot.services.vpn import VPNService
         from bot.services.subscription import SubscriptionService
 
@@ -2040,6 +2041,11 @@ class AdminOpsMixin(AdminHandlerBase):
 
         user = self.db.get_user(target_chat) or User(chat_id=target_chat, username=None)
 
+        # A paid key gets the paid address limit (5 by default), demo one.
+        limit_ip = 1
+        if status != 'demo':
+            limit_ip = user.limit_ip = paid_limit_ip(user, self.config)
+
         vpn = VPNService(self.config)
         expiry_ms = int((datetime.now() + timedelta(days=days)).timestamp() * 1000)
         if not user.uuid:
@@ -2048,13 +2054,14 @@ class AdminOpsMixin(AdminHandlerBase):
                 traffic_gb=gb, expiry_days=days,
                 comment=email,
             )
+            client['limitIp'] = limit_ip
             user.uuid = client['id']
             user.email = client['email']
         else:
             # Re-issue: keep the UUID so an already-installed key still works.
             client = {
                 "id": user.uuid, "flow": "xtls-rprx-vision", "email": user.email,
-                "limitIp": 1, "totalGB": gb * BYTES_PER_GB,
+                "limitIp": limit_ip, "totalGB": gb * BYTES_PER_GB,
                 "expiryTime": expiry_ms, "enable": True,
                 "comment": email,
             }

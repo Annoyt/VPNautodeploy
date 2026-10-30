@@ -41,6 +41,15 @@ class TestSettings:
         s1.DEMO_TRAFFIC_GB = 99
         assert s2.DEMO_TRAFFIC_GB == 10
 
+    def test_paid_limit_ip(self, monkeypatch):
+        """Addresses a paid key may use at once: 5 unless set."""
+        monkeypatch.delenv('PAID_LIMIT_IP', raising=False)
+        assert Settings().PAID_LIMIT_IP == 5
+        monkeypatch.setenv('PAID_LIMIT_IP', '3')
+        assert Settings().PAID_LIMIT_IP == 3
+        monkeypatch.setenv('PAID_LIMIT_IP', 'many')
+        assert Settings().PAID_LIMIT_IP == 5
+
     def test_validate_empty_token(self):
         """Test validation with empty BOT_TOKEN"""
         s = Settings()

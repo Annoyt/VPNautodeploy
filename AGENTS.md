@@ -588,3 +588,12 @@ The app posts what it measured. The bot reports it like `/sos` (§33): a `user_f
 - **Gates:** the /sub token (404 / 410), a body of at most 16 KB checked before parsing (413 by Content-Length or by the read itself), JSON (400). Only known report fields are read, each cut short and HTML-escaped, because the body comes from the user's device.
 - **`t.me/<bot>?start=sos`** (`/start sos`) runs `/sos`. The app offers this link when it reached no origin.
 - **Tests:** `tests/integration/test_neko_app_sos.py` (real sqlite); 16 mutants killed with a positional restore.
+
+### 42. Paid keys: 5 addresses, not 1 (2026-10-30)
+
+The exit panel enforces `limitIp` with fail2ban (jail `3x-ipl` inside the 3x-ui container). When a key goes over its limit, the older address is banned for 30 min. Paid keys got the new-key default of 1, so a payer on a phone and a laptop, or on the app's two-networks mode, kept losing one of them.
+
+- **`PAID_LIMIT_IP`** (default 5, passed by compose; 0 = no limit). `billing.paid_limit_ip(user, config)` = the larger of the stored limit and `PAID_LIMIT_IP`; an admin's 0 (`/set_limit @user 0`, the dashboard) stays 0. It is written to `users.limit_ip` and to the panel by `grant_paid_access` (every payment: the in-place update and the re-add) and by `/addmail` for paid keys. Demo keys keep 1.
+- **«🔑 Мой ключ»** (main menu → `GetKeyHandler`) no longer re-adds a key the panel still has. On the relational panel a re-add is delete + re-add: it zeroed the key's traffic and rewrote it with demo values (1 address, 10 GB, no expiry). A key the panel lost is still re-added, with the user's own limit.
+- **Keys paid before:** `docker exec -w /app vpn-bot python3 scripts/paid_limit_ip.py` is a dry run; `--apply` updates. The script reads each key's limit from the panel, because the panel had drifted from the bot: keys it took in before the camelCase fix are unlimited (0) there. Every change is audited as `admin_actions('owner', 'paid_limit_ip', <chat_id>, 'old->new')`.
+- **Tests:** `tests/integration/test_paid_limit_ip.py` (real sqlite) and `TestPaidLimitIp` in `tests/unit/test_billing.py`. 30 mutants killed with a positional restore.

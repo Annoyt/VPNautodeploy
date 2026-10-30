@@ -159,3 +159,54 @@ class TestGrantPaidAccess:
 
         assert result['status_ok'] is False
         assert result['user'] is None
+
+
+class TestPaidLimitIp:
+    """The panel's limitIp for paid keys: 5 by default (fail2ban on exit
+    bans the older address when a key goes over its limit)."""
+
+    def _grant(self, user, config=None):
+        db = MagicMock()
+        db.get_user.return_value = user
+        xui = Mock()
+        xui.sync_client_settings_sync.return_value = True
+        grant_paid_access(db, config or _config(), xui, '42', PAID_UNTIL)
+        return xui.sync_client_settings_sync.call_args[0][1]
+
+    def test_a_paid_key_gets_five_addresses(self):
+        user = _user()
+        updates = self._grant(user)
+        assert user.limit_ip == 5
+        assert updates['limitIp'] == 5
+
+    def test_never_lowers_a_hand_raised_limit(self):
+        user = _user(status='paid')
+        user.limit_ip = 10
+        assert self._grant(user)['limitIp'] == 10
+        assert user.limit_ip == 10
+
+    def test_an_admins_no_limit_stays(self):
+        # /set_limit @user 0 = no limit, the most a key can have.
+        user = _user(status='paid')
+        user.limit_ip = 0
+        assert self._grant(user)['limitIp'] == 0
+        assert user.limit_ip == 0
+
+    def test_the_setting_decides_and_zero_means_no_limit(self):
+        config = _config()
+        config.PAID_LIMIT_IP = 3
+        assert self._grant(_user(), config)['limitIp'] == 3
+        config.PAID_LIMIT_IP = 0
+        assert self._grant(_user(), config)['limitIp'] == 0
+
+    def test_reprovision_carries_the_limit(self):
+        user = _user(status='paid')
+        db = MagicMock()
+        db.get_user.return_value = user
+        xui = Mock()
+        xui.sync_client_settings_sync.side_effect = [False, True]
+        xui.add_client_sync.return_value = True
+        grant_paid_access(db, _config(), xui, '42', PAID_UNTIL)
+        client = xui.add_client_sync.call_args[0][0]
+        assert client['limitIp'] == 5
+
