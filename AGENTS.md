@@ -400,7 +400,7 @@ RU App Store purged proxy clients in waves: first Hiddify, then Happ (verified g
 
 (Перенесено из удалённого PROJECT_CONTEXT.md; полная хроника — в памяти агента.)
 
-**Тарифы.** Демо = freemium 10 ГБ/мес навсегда (DEMO_TRAFFIC_GB=10, DEMO_DAYS=30); paid = 100 ГБ/мес (PAID_TRAFFIC_GB, floor) до даты `users.subscription_expiry`. Единственное определение paid-тира — `bot/services/billing.py:grant_paid_access()` — через него ходят Stars-оплата, /approve_payment и дашборд. Месячный сброс счётчиков (демо+paid) — ботовская джоба 1-го числа 00:00 UTC; панельный rolling reset отключён.
+**Тарифы.** Демо = freemium навсегда: 10 ГБ/мес с приложением NekoVPN, 5 ГБ/мес с другими клиентами (с 2026-11-01, §43; DEMO_DAYS=30); paid = 100 ГБ/мес (PAID_TRAFFIC_GB, floor) до даты `users.subscription_expiry`. Единственное определение paid-тира — `bot/services/billing.py:grant_paid_access()` — через него ходят Stars-оплата, /approve_payment и дашборд. Месячный сброс счётчиков (демо+paid) — ботовская джоба 1-го числа 00:00 UTC; панельный rolling reset отключён.
 
 **Учёт трафика.** Панель exit считает все xray-протоколы в одну строку client_traffics на email (держится на api-инбаунде dokodemo 127.0.0.1:62789 в xrayTemplateConfig). Hy2 доливает systemd-мост `hy2-traffic-collector` на exit (hysteria trafficStats API), он же кикает over-quota live-сессии и бампает last_online. Бот зеркалирует цифры в users.traffic_* каждые 10 мин и шлёт предупреждения на 80%/100% квоты (ext-юзерам — письмом).
 
@@ -595,11 +595,34 @@ The app posts what it measured. The bot reports it like `/sos` (§33): a `user_f
 The exit panel enforces `limitIp` with fail2ban (jail `3x-ipl` inside the 3x-ui container). When a key goes over its limit, the older address is banned for 30 min. Paid keys got the new-key default of 1, so a payer on a phone and a laptop, or on the app's two-networks mode, kept losing one of them.
 
 - **`PAID_LIMIT_IP`** (default 5, passed by compose; 0 = no limit). `billing.paid_limit_ip(user, config)` = the larger of the stored limit and `PAID_LIMIT_IP`; an admin's 0 (`/set_limit @user 0`, the dashboard) stays 0. It is written to `users.limit_ip` and to the panel by `grant_paid_access` (every payment: the in-place update and the re-add) and by `/addmail` for paid keys. Demo keys keep 1.
-- **«🔑 Мой ключ»** (main menu → `GetKeyHandler`) no longer re-adds a key the panel still has. On the relational panel a re-add is delete + re-add: it zeroed the key's traffic and rewrote it with demo values (1 address, 10 GB, no expiry). A key the panel lost is still re-added, with its tier's values (§43).
+- **«🔑 Мой ключ»** (main menu → `GetKeyHandler`) no longer re-adds a key the panel still has. On the relational panel a re-add is delete + re-add: it zeroed the key's traffic and rewrote it with demo values (1 address, 10 GB, no expiry). A key the panel lost is still re-added, with its tier's values (§44).
 - **Keys paid before:** `docker exec -w /app vpn-bot python3 scripts/paid_limit_ip.py` is a dry run; `--apply` updates. The script reads each key's limit from the panel, because the panel had drifted from the bot: keys it took in before the camelCase fix are unlimited (0) there. Every change is audited as `admin_actions('owner', 'paid_limit_ip', <chat_id>, 'old->new')`.
 - **Tests:** `tests/integration/test_paid_limit_ip.py` (real sqlite) and `TestPaidLimitIp` in `tests/unit/test_billing.py`. 30 mutants killed with a positional restore.
 
-### 43. «🔑 Мой ключ»: a lost key comes back with its tier, a lapsed payer's stays off (2026-10-30)
+### 43. Demo allowance by client app: 10 GB with NekoVPN, 5 GB otherwise (2026-10-30)
+
+Owner's decision: demo users who run our NekoVPN app get 10 GB a month, everyone else gets 5 GB. The quota belongs to the key, not to a device: the app on one phone gives the key 10 GB everywhere it is used. Code: `bot/services/demo_tiers.py`.
+
+- **Settings.** `DEMO_TRAFFIC_GB` (10) is the allowance with the app; `DEMO_OTHER_TRAFFIC_GB` (new, default 5) is the allowance with any other client. Entry's compose and .env pass only `DEMO_TRAFFIC_GB=10`, so the 5 comes from the code default.
+- **Recognising the app.** A profile fetch (`/sub`, any format except `clash-proxies`) whose User-Agent starts with `NekoVPN/v<version>`. FlClash sends `FlClash/v…` and our self-test sends `NekoVPN-selftest`; neither counts.
+  - Each app fetch upserts `client_apps(chat_id, app='nekovpn', version, last_seen)`. The table holds no address and no raw header.
+  - `/sub` never waits for this. `WebAppServer._schedule_neko_app` runs it in the background on a thread of its own, at most one call per uuid.
+- **Raising a key.** `grant_app_allowance` re-reads the user and acts only on status `demo` with `quota_gb` below 10.
+  - The panel gets an in-place update: `totalGB` 10 GB and `enable` true, so a key that ran out of its 5 GB gets the rest at once.
+  - Then `users.quota_gb` = 10. A refused update changes nothing, and the app's next fetch (every 6 h) tries again.
+- **Monthly reset (the 1st).** Keys the app fetched within 7 days (`NEKO_APP_SEEN_DAYS`) get 10 GB; the rest get 5. The panel quota and `users.quota_gb` follow.
+  - If `client_apps` is unreadable, everyone gets 5 for the moment, and the app's next fetch raises its keys.
+  - Nobody is cut mid-month: November 1 is the first reset with the split.
+- **New keys** (Telegram, mail requests) start at 5 GB with `users.quota_gb` = 5. The lost-key re-add in `_resync_existing_key` still uses `DEMO_TRAFFIC_GB`; it is being reworked separately.
+- **Texts: "only traffic through the VPN counts".** A phone's own counter counts everything, so every place that shows a quota says it:
+  - the stats screens (`/stats`, the 📊 button);
+  - the 80% / 100% warnings;
+  - the monthly refresh notice;
+  - the demo key card and `/sub`.
+  The sentence about Russian sites going direct names only NekoVPN and FlClash, where our profile's routing applies. iOS texts leave that sentence out, because the iPhone card names Karing only. A demo key under 10 GB also gets the app's download link (`neko_client.RELEASES_URL`; NekoVPN is Android-only).
+- **Tests:** `tests/integration/test_demo_tiers.py` (real sqlite: the UA, the record and its window, the raise, `/sub` in the background, the reset, warnings, cards, stats, new keys) and `test_client_apps_table`. 34 mutants killed with a positional restore.
+
+### 44. «🔑 Мой ключ»: a lost key comes back with its tier, a lapsed payer's stays off (2026-10-30)
 
 When the panel has lost a key holder's client (3x-ui detaches long-expired clients from every inbound; a panel wipe), `GetKeyHandler._resync_existing_key` puts it back. Until now it used demo values for every tier: 10 GB, no expiry. A lapsed payer got a free key that never expired, and an active payer lost their quota and paid-until date.
 

@@ -822,7 +822,7 @@ class TestStatsRequestHandler:
         """Test that traffic percentage is calculated correctly."""
         handler = StatsRequestHandler(mock_bot, mock_db, mock_config)
         mock_db.get_user = mock_config
-        mock_config.DEMO_TRAFFIC_GB = 10
+        mock_config.DEMO_OTHER_TRAFFIC_GB = 10
         mock_db.get_user = Mock(return_value=sample_user)
 
         mock_xui = Mock()

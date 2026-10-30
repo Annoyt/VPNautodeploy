@@ -125,6 +125,7 @@ class Database:
         self._init_sub_fetches()
         self._init_outbound_health()
         self._init_client_probe()
+        self._init_client_apps()
 
         # Initialize repositories for delegation
         self._users = UserRepository(db_path)
@@ -873,6 +874,28 @@ class Database:
                 conn.commit()
         except sqlite3.Error as e:
             logger.error(f"_init_outbound_health failed: {e}")
+
+    def _init_client_apps(self) -> None:
+        """Which app fetched a user's profile, and when: one row per (user,
+        app), refreshed on every profile fetch (/sub, not the provider
+        refreshes). Only the NekoVPN app is recorded (app 'nekovpn',
+        bot/services/demo_tiers.py): a demo key the app fetched within
+        the last week gets the app allowance. The app's name and version
+        from its User-Agent, never the address or the whole header.
+        """
+        try:
+            with self._connect() as conn:
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS client_apps ("
+                    "chat_id TEXT NOT NULL, "
+                    "app TEXT NOT NULL, "
+                    "version TEXT, "
+                    "last_seen TEXT NOT NULL, "
+                    "PRIMARY KEY (chat_id, app))"
+                )
+                conn.commit()
+        except sqlite3.Error as e:
+            logger.error(f"_init_client_apps failed: {e}")
 
     def _init_client_probe(self) -> None:
         """Heartbeats from the FlClash profile's health checks

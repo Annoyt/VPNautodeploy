@@ -604,7 +604,8 @@ class VPNService:
         
         # Use defaults from config if not specified
         if traffic_gb is None:
-            traffic_gb = self.config.DEMO_TRAFFIC_GB
+            from bot.services.demo_tiers import demo_traffic_gb
+            traffic_gb = demo_traffic_gb(self.config, in_app=False)
         else:
             traffic_gb = max(0, traffic_gb)
 

@@ -250,13 +250,14 @@ class CommandHandler(BaseHandler):
                 traffic = xui.get_client_traffic_sync(user.email)
 
                 if traffic:
+                    from bot.services.demo_tiers import demo_traffic_gb, stats_footer
                     used_traffic_bytes = (
                         traffic.get('upload', 0) + traffic.get('download', 0)
                     )
                     # Real per-client quota from the panel; only fall
                     # back to the demo default when the panel has none.
                     total_limit_bytes = traffic.get('total') or (
-                        self.config.DEMO_TRAFFIC_GB * 1024 * 1024 * 1024
+                        demo_traffic_gb(self.config, in_app=False) * 1024 * 1024 * 1024
                     )
 
                     percentage = 0
@@ -270,6 +271,7 @@ class CommandHandler(BaseHandler):
                         f"📈 Total Used: {format_bytes(used_traffic_bytes)} / {format_bytes(total_limit_bytes)}\n"
                         f"({percentage:.2f}%)"
                     )
+                    text += "\n\n" + stats_footer(user, self.config, total_limit_bytes)
                 else:
                     text = "Could not retrieve traffic statistics for your account."
 
@@ -444,6 +446,10 @@ class CommandHandler(BaseHandler):
                 + "\n\nOne subscription = the whole cascade. When we rotate "
                 "servers the client picks it up automatically every 6 hours."
             )
+        if (getattr(user, 'status', '') or '') == 'demo':
+            from bot.services.demo_tiers import demo_terms
+            text += "\n\n" + demo_terms(
+                self.config, 'en' if user.lang == 'en' else 'ru', ios=is_ios)
         if not is_ios:
             plat_keyboard['inline_keyboard'].insert(0, client_download_row())
         # NekoVPN testers: add the subscription to the app in one tap.

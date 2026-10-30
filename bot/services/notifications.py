@@ -832,10 +832,12 @@ class NotificationService:
     def _reset_demo_quota_sync(self):
         """Monthly: reset traffic counters for demo AND paid users.
 
-        Freemium model: demo users get DEMO_TRAFFIC_GB every calendar
-        month, forever. Per user the panel client is re-enabled, its
-        expiry pushed 30 days forward (so 3x-ui does not purge it as
-        "expired") and its traffic zeroed.
+        Freemium model: demo users get a monthly allowance forever —
+        DEMO_TRAFFIC_GB if the NekoVPN app fetched their profile within
+        the last week, DEMO_OTHER_TRAFFIC_GB otherwise (demo_tiers). Per
+        user the panel client gets that quota, is re-enabled, its expiry
+        is pushed 30 days forward (so 3x-ui does not purge it as
+        "expired") and its traffic is zeroed; users.quota_gb follows.
 
         Paid users get their counters zeroed too (quota is "N GB per
         month") — but their quota amount and paid-until date stay
@@ -865,8 +867,9 @@ class NotificationService:
         except Exception as e:
             logger.exception(f"paid quota reset failed: {e}")
 
+        from bot.services import demo_tiers
+
         new_expiry_ms = int((datetime.utcnow() + timedelta(days=30)).timestamp() * 1000)
-        demo_bytes = int(getattr(self.config, 'DEMO_TRAFFIC_GB', 5) or 5) * 1024 ** 3
 
         try:
             conn = sqlite3.connect(bot_db_path)
@@ -884,9 +887,27 @@ class NotificationService:
             logger.info("demo quota reset: no demo users found")
             return
 
-        renewed = []   # [(chat_id, email)] that actually got refreshed
+        # Keys the NekoVPN app fetched lately get the app allowance. If
+        # the record is unreadable they get the other one for now: the
+        # app's next fetch (every 6 h) raises them.
+        try:
+            conn = sqlite3.connect(bot_db_path)
+            try:
+                in_app = demo_tiers.app_users(conn)
+            finally:
+                conn.close()
+        except Exception as e:
+            logger.warning(f"demo quota reset: NekoVPN app users unreadable: {e}")
+            in_app = set()
+
+        def allowance_gb(chat_id) -> int:
+            return demo_tiers.demo_traffic_gb(self.config, str(chat_id) in in_app)
+
+        renewed = []   # [(chat_id, email, gb)] that actually got refreshed
         if xui.api:
             for u in demo_users:
+                gb = allowance_gb(u['chat_id'])
+                demo_bytes = gb * 1024 ** 3
                 ok = xui.renew_client_sync(u['email'], new_expiry_ms,
                                            total_bytes=demo_bytes)
                 if (not ok and u['uuid']
@@ -918,7 +939,7 @@ class NotificationService:
                             total_bytes=demo_bytes,
                         )
                 if ok:
-                    renewed.append((u['chat_id'], u['email']))
+                    renewed.append((u['chat_id'], u['email'], gb))
                 else:
                     logger.warning(
                         f"demo quota reset: renew AND re-provision failed "
@@ -932,12 +953,13 @@ class NotificationService:
             emails = [u['email'] for u in demo_users]
             if not self._reset_demo_quota_db_fallback(emails, new_expiry_ms):
                 return
-            renewed = [(u['chat_id'], u['email']) for u in demo_users]
+            renewed = [(u['chat_id'], u['email'], allowance_gb(u['chat_id']))
+                       for u in demo_users]
 
         if not renewed:
             return
 
-        reset_emails = [email for _, email in renewed]
+        reset_emails = [email for _, email, _gb in renewed]
 
         # Zero bot.db counters so dashboard reads fresh numbers.
         try:
@@ -953,15 +975,33 @@ class NotificationService:
         except Exception as e:
             logger.exception(f"demo quota reset: failed to update bot db: {e}")
 
-        for chat_id, email in renewed:
+        # The bot's copy of the quota: the app's mid-month raise reads it.
+        try:
+            conn = sqlite3.connect(bot_db_path)
+            conn.executemany(
+                "UPDATE users SET quota_gb = ? WHERE email = ?",
+                [(float(gb), email) for _, email, gb in renewed],
+            )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.exception(f"demo quota reset: failed to store quotas: {e}")
+
+        app_gb = demo_tiers.demo_traffic_gb(self.config, in_app=True)
+        for chat_id, email, gb in renewed:
             try:
                 # Notify user quietly; failures are non-fatal.
-                demo_gb = int(getattr(self.config, 'DEMO_TRAFFIC_GB', 10) or 10)
+                text = (
+                    f"🔄 Ваш тестовый трафик {gb} ГБ обновлён на новый месяц.\n"
+                    f"Your {gb} GB demo traffic has been refreshed for the new month."
+                )
+                if gb < app_gb:
+                    text += (f"\n\n{demo_tiers.app_hint(self.config, 'ru')}\n"
+                             f"{demo_tiers.app_hint(self.config, 'en')}")
+                text += (f"\n\n{demo_tiers.vpn_only_note('ru')}\n"
+                         f"{demo_tiers.vpn_only_note('en')}")
                 self._deliver_user_notice(
-                    chat_id,
-                    f"🔄 Ваш тестовый трафик {demo_gb} ГБ обновлён на новый месяц.\n"
-                    f"Your {demo_gb} GB demo traffic has been refreshed for the new month.",
-                    subject='NekoVPN — трафик обновлён',
+                    chat_id, text, subject='NekoVPN — трафик обновлён',
                 )
             except Exception as e:
                 logger.warning(f"demo quota reset: notify {email} failed: {e}")
@@ -1290,6 +1330,7 @@ class NotificationService:
                                      users_by_email: dict) -> None:
         """Warn each active user once per month at 80% and at 100%."""
         from datetime import datetime
+        from bot.services import demo_tiers
 
         gb = 1024 ** 3
         month = datetime.utcnow().strftime('%Y-%m')
@@ -1316,6 +1357,8 @@ class NotificationService:
                         "\n\n💳 Нужно больше уже сейчас? /buy — платный "
                         "тариф со 100 ГБ/мес."
                     )
+                    if demo_tiers.below_app_allowance(self.config, total):
+                        text += f"\n{demo_tiers.app_hint(self.config, 'ru')}"
             elif pct >= 0.8:
                 kind = f'quota80:{month}'
                 text = (
@@ -1325,8 +1368,13 @@ class NotificationService:
                     f"You've used {int(pct * 100)}% of your monthly "
                     f"traffic."
                 )
+                if (status == 'demo'
+                        and demo_tiers.below_app_allowance(self.config, total)):
+                    text += f"\n\n{demo_tiers.app_hint(self.config, 'ru')}"
             else:
                 continue
+            text += (f"\n\n{demo_tiers.vpn_only_note('ru')}\n"
+                     f"{demo_tiers.vpn_only_note('en')}")
             try:
                 # 45 days > any month: the month-stamped type is the
                 # real dedup key, the window just has to outlast it.
