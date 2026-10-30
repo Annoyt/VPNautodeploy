@@ -160,6 +160,51 @@ class TestDryRun:
         _, out = run(db, panel, now=now)
         assert '0 still working, 1 off' in out
 
+    @pytest.mark.parametrize('skew,flagged', [
+        (5, False), (59_000, False), (60_000, False), (-59_000, False),
+        (61_000, True), (-61_000, True)])
+    def test_an_expiry_off_by_seconds_is_not_drift(self, db, skew, flagged):
+        # /addmail reads the clock twice: ext_eacc5860 on prod, 2026-10-30.
+        user = seed(db, '26', subscription_expiry=iso_in(20), quota_gb=100.0,
+                    limit_ip=5)
+        target = tier_client_values(user, config())
+        panel = Panel()
+        panel.has('user_26@x', total=target['totalGB'],
+                  expiry=target['expiryTime'] + skew, limit=5)
+        _, out = run(db, panel)
+        assert ('expiry' in line(out, '26')) is flagged
+
+    def test_an_unlimited_panel_key_is_left_unlimited(self, db):
+        # Someone's decision: the old button wrote 10 GB, never 0.
+        until = iso_in(20)
+        seed(db, '27', subscription_expiry=until, quota_gb=100.0, limit_ip=5)
+        panel = Panel()
+        panel.has('user_27@x', total=0, expiry=0, limit=5)
+        code, out = run(db, panel, '--apply')
+        assert 'quota' not in line(out, '27') and 'expiry never ->' in line(out, '27')
+        assert code == 0 and panel.rows['user_27@x']['total'] == 0
+        assert panel.rows['user_27@x']['expiry'] == ms_of(until)
+
+    def test_an_unlimited_key_that_is_off_is_enabled(self, db):
+        user = seed(db, '28', subscription_expiry=iso_in(20), quota_gb=100.0,
+                    limit_ip=5)
+        target = tier_client_values(user, config())
+        panel = Panel()
+        panel.has('user_28@x', used=500 * GB, total=0,
+                  expiry=target['expiryTime'], limit=5, enable=False)
+        _, out = run(db, panel)
+        assert line(out, '28') == '28: paid active: enable False -> True  <- fix'
+
+    def test_the_probe_account_is_left_out(self, db):
+        db._users.save(User(
+            chat_id='probe_internal', status='paid', quota_gb=1.0,
+            uuid='00000000-0000-0000-0000-0000000000ff', email='probe@x',
+            subscription_expiry='2099-01-01T00:00:00'))
+        panel = Panel()
+        panel.has('probe@x', total=0, expiry=0)
+        _, out = run(db, panel)
+        assert out.startswith('0 payers')
+
     def test_a_lapsed_payers_working_key_is_listed(self, db):
         seed(db, '3', subscription_expiry=iso_in(-10))
         panel = Panel()

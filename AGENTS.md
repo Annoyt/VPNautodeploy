@@ -640,6 +640,15 @@ When the panel has lost a key holder's client (3x-ui detaches long-expired clien
 
   `--apply` fixes active payers: the bot's floors first, then the key in place, or a re-add under the same uuid when the panel lost it. `--apply --lapsed` also switches lapsed payers' working keys off (the passed paid-until date plus enable=false). It is a separate flag because it takes a working key away.
 
-  A failed panel read is reported and never acted on. Each write is audited as `admin_actions('owner', 'paid_keys_audit', <chat_id>, <what changed>)`. Tests: `tests/integration/test_paid_keys_audit.py`, using the shared fake `tests/integration/relational_panel.py`. 33 mutants killed, restored byte for byte with a hash check.
+  A failed panel read is reported and never acted on. Each write is audited as `admin_actions('owner', 'paid_keys_audit', <chat_id>, <what changed>)`.
+
+  Left alone on purpose:
+  - an unlimited quota on the panel (the old button wrote 10 GB, never 0);
+  - an expiry within a minute of the bot's date (`/addmail` reads the clock twice);
+  - `probe_internal`, the health checker's client.
+
+  First prod check (read-only, 2026-10-30): 9 payers, all exactly as a payment writes them, nothing to fix.
+
+  Tests: `tests/integration/test_paid_keys_audit.py`, using the shared fake `tests/integration/relational_panel.py`. 40 mutants killed, restored byte for byte with a hash check.
 - **Unchanged:** a lapsed payer whose client is still attached gets the key card, as with `/mykey`. **Not done:** a payer's first key (`_create_new_key`, no uuid yet) is still built from demo values.
 - **Tests:** `tests/integration/test_mykey_lost_key.py` (real sqlite; the fake panel has the fork's relational semantics), `tests/integration/test_xui_client_attached.py`, `TestPaidQuotaGb` in `tests/unit/test_billing.py`, the lost-key cases in `tests/unit/test_user_callbacks.py`, and `TestLostKeyReaddIsOneAttempt` in `tests/unit/test_get_key_handler_phase1.py`. 49 mutants killed (PR #32's re-add and the old fail-open gate put back among them), restored byte for byte with a hash check.

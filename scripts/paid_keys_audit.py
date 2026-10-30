@@ -31,6 +31,14 @@ traffic row that gates xray and hy2 (quota, expiry, enable, use) and the
 client record (address limit). Nothing is written without --apply. Each
 write is audited as admin_actions('owner', 'paid_keys_audit', <chat_id>,
 <what changed>).
+
+Left alone on purpose, as the first run on prod (2026-10-30) showed:
+- an unlimited quota on the panel (totalGB 0). The old button wrote
+  10 GB, never 0, so a 0 is someone's decision, and no write caps it;
+- an expiry within a minute of the bot's date: /addmail reads the clock
+  twice;
+- the health checker's own client (``probe_internal``,
+  scripts/gen_probe_config.py), unlimited by design.
 """
 
 import argparse
@@ -40,6 +48,9 @@ from datetime import datetime, timezone
 
 ACTION = 'paid_keys_audit'
 GB = 1024 ** 3
+EXPIRY_SLACK_MS = 60_000
+# Not payers: gen_probe_config.PROBE_CHAT_ID, the health checker's client.
+SERVICE_ACCOUNTS = frozenset({'probe_internal'})
 
 
 def _int(value) -> int:
@@ -84,6 +95,15 @@ def works(panel, now_ms: int) -> bool:
     return not panel['total'] or used is None or used < panel['total']
 
 
+def panel_write(panel, target):
+    """What --apply writes for an active payer: the payment's values,
+    except that an unlimited quota on the panel stays unlimited."""
+    write = dict(target)
+    if panel is not None and panel['total'] == 0:
+        write['totalGB'] = 0
+    return write
+
+
 def active_changes(user, config, panel, target) -> list:
     """[(field, now, should be)] for an active payer. ``quota``,
     ``expiry``, ``limit`` and ``enable`` are the panel's; ``bot quota``
@@ -97,14 +117,15 @@ def active_changes(user, config, panel, target) -> list:
         changes.append(('bot limit', user.limit_ip, limit))
     if panel is None:
         return changes
-    if panel['total'] != target['totalGB']:
-        changes.append(('quota', panel['total'], target['totalGB']))
-    if panel['expiry'] != target['expiryTime']:
-        changes.append(('expiry', panel['expiry'], target['expiryTime']))
-    if panel['limit'] != target['limitIp']:
-        changes.append(('limit', panel['limit'], target['limitIp']))
-    if not panel['enable'] and (panel['used'] is None
-                                or panel['used'] < target['totalGB']):
+    write = panel_write(panel, target)
+    if panel['total'] != write['totalGB']:
+        changes.append(('quota', panel['total'], write['totalGB']))
+    if abs(panel['expiry'] - write['expiryTime']) > EXPIRY_SLACK_MS:
+        changes.append(('expiry', panel['expiry'], write['expiryTime']))
+    if panel['limit'] != write['limitIp']:
+        changes.append(('limit', panel['limit'], write['limitIp']))
+    if not panel['enable'] and (panel['used'] is None or not write['totalGB']
+                                or panel['used'] < write['totalGB']):
         changes.append(('enable', False, True))
     return changes
 
@@ -119,7 +140,7 @@ def plan(db, config, xui, now: datetime) -> list:
     from bot.services.ru_exit import is_eligible
     rows = []
     for user in db.get_all_users() or []:
-        if not (user.uuid and user.email):
+        if not (user.uuid and user.email) or str(user.chat_id) in SERVICE_ACCOUNTS:
             continue
         if is_eligible(user, now):
             kind, target = 'active', tier_client_values(user, config, now)
@@ -201,7 +222,8 @@ def apply(db, xui, config, rows, now_ms: int, lapsed: bool) -> list:
                       and readd_client(xui, config, user, row['target']))
             elif row['panel'] is not None and any(
                     not field.startswith('bot ') for field, _, _ in row['changes']):
-                ok = bool(xui.sync_client_settings_sync(user.email, row['target']))
+                ok = bool(xui.sync_client_settings_sync(
+                    user.email, panel_write(row['panel'], row['target'])))
             else:
                 ok = True                 # the bot's copy was all
             detail = describe(row).split(': ', 1)[1]
