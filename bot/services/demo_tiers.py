@@ -115,17 +115,20 @@ def _download_url() -> str:
 
 
 def vpn_only_note(lang: str, ios: bool = False) -> str:
-    """The counting rule. On iOS without the FlClash sentence: the iPhone
-    card names Karing only, and Karing's routing is unverified."""
+    """The counting rule, in the words of the 2026-10-30 broadcast. Bound
+    to NekoVPN and FlClash: only there does our profile's routing apply
+    (Hiddify drops it and sends Russian sites through the VPN, where
+    they count). On iOS the plain rule: the iPhone card names Karing
+    only, and Karing's routing is unverified."""
     if lang == 'en':
-        note = "Only traffic through the VPN counts."
-        if not ios:
-            note += " In NekoVPN and FlClash, Russian sites open directly and do not count."
-        return note
-    note = "Считается только трафик через VPN."
-    if not ios:
-        note += " В NekoVPN и FlClash российские сайты открываются напрямую и в лимит не входят."
-    return note
+        if ios:
+            return "Only traffic through the VPN counts."
+        return ("In NekoVPN and FlClash, ONLY traffic outside Russia counts: "
+                "Russian sites open directly and do not count.")
+    if ios:
+        return "Учитывается только трафик через VPN."
+    return ("В NekoVPN и FlClash учитывается ТОЛЬКО трафик вне РФ: российские "
+            "сайты открываются напрямую и в лимит не входят.")
 
 
 def app_hint(config, lang: str) -> str:
