@@ -488,11 +488,13 @@ class TestGetKeyHandler:
 
     @pytest.mark.asyncio
     async def test_resyncs_existing_key_when_uuid_present(self, mock_bot, mock_db, mock_config, sample_user):
-        """A demo key the panel lost is re-added with the same UUID as a
-        demo key, then updated in place: the add alone leaves the stale
-        traffic row gating it."""
+        """A demo key the panel lost is re-added with the same UUID and
+        its own monthly quota (users.quota_gb), then updated in place:
+        the add alone leaves the stale traffic row gating it."""
         handler = GetKeyHandler(mock_bot, mock_db, mock_config)
         mock_xui = self._lost_key_panel(mock_bot, mock_config)
+        mock_config.DEMO_OTHER_TRAFFIC_GB = 5
+        sample_user.quota_gb = 10.0            # an app key (demo_tiers)
         mock_db.get_user = Mock(return_value=sample_user)
 
         with patch.object(handler, '_send_key_to_user', new_callable=AsyncMock) as sent:
@@ -501,10 +503,10 @@ class TestGetKeyHandler:
         client, inbound = mock_xui.add_client_sync.call_args[0]
         assert client['id'] == sample_user.uuid
         assert client['email'] == sample_user.email
-        assert client['totalGB'] == 5 * BYTES_PER_GB
+        assert client['totalGB'] == 10 * BYTES_PER_GB
         assert client['expiryTime'] > 0 and inbound == 1
         email, updates = mock_xui.sync_client_settings_sync.call_args[0]
-        assert email == sample_user.email and updates['totalGB'] == 5 * BYTES_PER_GB
+        assert email == sample_user.email and updates['totalGB'] == 10 * BYTES_PER_GB
         mock_xui.sync_user.assert_not_called()
         sent.assert_awaited_once()
 

@@ -107,10 +107,14 @@ def tier_client_values(user, config,
       the status; the panel's expiry is what switches the key off), or
       'support_topic' with a date that has passed (demo users never
       have one).
-    - Everyone else holds a demo key, the one GetKeyHandler issues:
-      DEMO_TRAFFIC_GB, DEMO_DAYS from now, the user's own address limit.
-      The monthly demo job renews it on the 1st.
+    - Everyone else holds a demo key: its own monthly quota
+      (``users.quota_gb``, which the monthly reset, the NekoVPN app's
+      raise and an admin's gift write; never below the other-clients
+      allowance, see ``demo_tiers``), DEMO_DAYS from now like a new key,
+      the user's own address limit. The monthly demo job renews it on
+      the 1st.
     """
+    from bot.services.demo_tiers import demo_traffic_gb
     from bot.services.ru_exit import is_eligible
     now = now or datetime.now(timezone.utc).replace(tzinfo=None)
     expiry = getattr(user, 'subscription_expiry', None)
@@ -121,9 +125,10 @@ def tier_client_values(user, config,
             status == UserState.SUPPORT_TOPIC.value and expiry):
         return None
     try:
-        demo_gb = float(getattr(config, 'DEMO_TRAFFIC_GB', 10))
+        demo_gb = float(getattr(user, 'quota_gb', 0) or 0)
     except (TypeError, ValueError):
-        demo_gb = 10.0
+        demo_gb = 0.0
+    demo_gb = max(demo_gb, float(demo_traffic_gb(config, in_app=False)))
     try:
         days = int(getattr(config, 'DEMO_DAYS', 30))
     except (TypeError, ValueError):

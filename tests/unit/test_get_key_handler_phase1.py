@@ -165,7 +165,7 @@ class TestLostKeyReaddIsOneAttempt:
         xui.client_attached_sync = Mock(return_value=False)
         xui.sync_user = AsyncMock(return_value=True)
         user = Mock(uuid='aa11bb22-cc33-dd44-ee55-ff66aa77bb88',
-                    email='u@nekovo.ru', status='demo', limit_ip=1,
+                    email='u@nekovo.ru', status='demo', limit_ip=1, quota_gb=5.0,
                     subscription_expiry=None, previous_state=None, lang='ru')
         handler.validator.validate_user_exists = Mock(return_value=user)
         return xui

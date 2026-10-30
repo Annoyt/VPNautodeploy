@@ -39,7 +39,8 @@ DAY_MS = 86_400_000
 
 def config(**over):
     cfg = SimpleNamespace(
-        PAID_LIMIT_IP=5, PAID_TRAFFIC_GB=100, DEMO_TRAFFIC_GB=10, DEMO_DAYS=30,
+        PAID_LIMIT_IP=5, PAID_TRAFFIC_GB=100, DEMO_TRAFFIC_GB=10,
+        DEMO_OTHER_TRAFFIC_GB=5, DEMO_DAYS=30,
         INBOUND_ID=1, ENTRY_NODE_IP='203.0.113.1', REALITY_PUBLIC_KEY='pk',
         SNI_VALUE='www.bing.com', WEBAPP_URL='https://bot.example',
         BOT_TOKEN='t', SUPER_ADMIN_ID=1)
@@ -297,9 +298,12 @@ class TestLapsedPayer:
 
 
 class TestDemo:
+    """A demo key comes back with its own monthly quota: users.quota_gb,
+    which the monthly reset (10 GB with the NekoVPN app, 5 otherwise),
+    the app's raise and an admin's gift write (demo_tiers)."""
 
     def test_a_lost_demo_key_comes_back_as_a_demo_key(self, db):
-        seed(db, '31', status='demo')
+        seed(db, '31', status='demo', quota_gb=10.0)       # an app key
         panel = Panel()
         panel.has('user_31@x', used=4 * GB, expiry=now_ms() - 40 * DAY_MS,
                   enable=False, attached=False)
@@ -311,8 +315,26 @@ class TestDemo:
         assert before + 30 * DAY_MS <= row['expiry'] <= now_ms() + 30 * DAY_MS
         assert row['used'] == 4 * GB             # the month's use still counts
 
+    def test_a_key_on_the_other_allowance_keeps_it(self, db):
+        seed(db, '36', status='demo', quota_gb=5.0)
+        panel = Panel()
+        press(db, panel, '36')
+        assert panel.rows['user_36@x']['total'] == 5 * GB
+
+    def test_an_admins_gift_survives(self, db):
+        seed(db, '37', status='demo', quota_gb=110.0)
+        panel = Panel()
+        press(db, panel, '37')
+        assert panel.rows['user_37@x']['total'] == 110 * GB
+
+    def test_no_quota_below_the_other_allowance(self, db):
+        seed(db, '38', status='demo', quota_gb=2.0)
+        panel = Panel()
+        press(db, panel, '38', config(DEMO_OTHER_TRAFFIC_GB=7))
+        assert panel.rows['user_38@x']['total'] == 7 * GB
+
     def test_a_spent_month_is_not_granted_again(self, db):
-        seed(db, '32', status='demo')
+        seed(db, '32', status='demo', quota_gb=10.0)
         panel = Panel()
         panel.has('user_32@x', used=10 * GB, expiry=now_ms() - 40 * DAY_MS,
                   enable=False, attached=False)
@@ -329,7 +351,8 @@ class TestDemo:
         assert panel.rows['user_33@x']['used'] == 10 * GB
 
     def test_a_demo_user_with_a_ticket_gets_a_demo_key(self, db):
-        seed(db, '34', status='support_topic', previous_state='demo')
+        seed(db, '34', status='support_topic', previous_state='demo',
+             quota_gb=10.0)
         panel = Panel()
         press(db, panel, '34')
         assert panel.rows['user_34@x']['total'] == 10 * GB
