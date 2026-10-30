@@ -98,7 +98,7 @@ class Bot:
         {'command': 'sos', 'description': 'Не подключается? Аварийный режим'},
         {'command': 'kit', 'description': 'Офлайн-комплект: профиль файлом'},
         {'command': 'share', 'description': 'Раздать VPN соседям по Wi-Fi'},
-        {'command': 'buy', 'description': 'Купить подписку (100 ГБ/мес)'},
+        {'command': 'buy', 'description': 'Купить подписку'},
         {'command': 'setemail', 'description': 'Почта для резервного ключа'},
         {'command': 'help', 'description': 'Справка по командам'},
     ]
