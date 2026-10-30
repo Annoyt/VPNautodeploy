@@ -614,12 +614,17 @@ Owner's decision: demo users who run our NekoVPN app get 10 GB a month, everyone
   - If `client_apps` is unreadable, everyone gets 5 for the moment, and the app's next fetch raises its keys.
   - Nobody is cut mid-month: November 1 is the first reset with the split.
 - **New keys** (Telegram, mail requests) start at 5 GB with `users.quota_gb` = 5. A key the panel lost comes back with its own `users.quota_gb`, never below 5 GB (§44).
-- **Texts: "only traffic through the VPN counts".** A phone's own counter counts everything, so every place that shows a quota says it:
+- **Texts: what counts.** A phone's own counter counts everything, so every place that shows a quota states the rule:
   - the stats screens (`/stats`, the 📊 button);
   - the 80% / 100% warnings;
   - the monthly refresh notice;
   - the demo key card and `/sub`.
-  The sentence about Russian sites going direct names only NekoVPN and FlClash, where our profile's routing applies. iOS texts leave that sentence out, because the iPhone card names Karing only. A demo key under 10 GB also gets the app's download link (`neko_client.RELEASES_URL`; NekoVPN is Android-only).
+
+  The wording is the owner's, from the 2026-10-30 broadcast: «В NekoVPN и FlClash учитывается ТОЛЬКО трафик вне РФ: российские сайты открываются напрямую и в лимит не входят».
+  - It names NekoVPN and FlClash because only there does our profile's routing apply. Hiddify drops it, and there Russian sites go through the VPN and count.
+  - iOS texts say only «Учитывается только трафик через VPN»: the iPhone card names Karing only, and Karing's routing is unverified.
+  - A demo key under 10 GB also gets the app's download link (`neko_client.RELEASES_URL`; NekoVPN is Android-only).
+  - Upsell lines name no paid quota: the 100% warning, `/help` and the `/buy` command description just say /buy.
 - **Tests:** `tests/integration/test_demo_tiers.py` (real sqlite: the UA, the record and its window, the raise, `/sub` in the background, the reset, warnings, cards, stats, new keys) and `test_client_apps_table`. 34 mutants killed with a positional restore.
 
 ### 44. «🔑 Мой ключ»: a lost key comes back with its tier, a lapsed payer's stays off (2026-10-30)

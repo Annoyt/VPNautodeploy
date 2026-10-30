@@ -1353,10 +1353,7 @@ class NotificationService:
                     "the 1st."
                 )
                 if status == 'demo':
-                    text += (
-                        "\n\n💳 Нужно больше уже сейчас? /buy — платный "
-                        "тариф со 100 ГБ/мес."
-                    )
+                    text += "\n\n💳 Нужно больше уже сейчас? /buy — платный тариф."
                     if demo_tiers.below_app_allowance(self.config, total):
                         text += f"\n{demo_tiers.app_hint(self.config, 'ru')}"
             elif pct >= 0.8:
