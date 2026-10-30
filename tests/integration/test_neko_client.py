@@ -148,9 +148,17 @@ class TestButton:
         _testers(db, '111')
         assert nc.open_button_row(db, _config(), _seed(db, **seed)) is None
 
-    def test_not_for_non_testers(self, db):
+    def test_everyone_on_android(self, db):
         _testers(db, '999')
-        assert nc.open_button_row(db, _config(), _seed(db)) is None
+        row = nc.open_button_row(db, _config(), _seed(db, status='demo'))
+        assert row[0]['url'] == f'https://dash.example.com/open/{_token()}'
+
+    @pytest.mark.parametrize('platform', ['windows', 'linux', 'macos', None])
+    def test_elsewhere_testers_only(self, db, platform):
+        _testers(db, '999')
+        assert nc.open_button_row(db, _config(), _seed(db, platform=platform)) is None
+        _testers(db, '111')
+        assert nc.open_button_row(db, _config(), _seed(db, platform=platform))
 
     def test_no_public_address_no_button(self, db):
         _testers(db, '111')
@@ -160,8 +168,12 @@ class TestButton:
         broken = Mock()
         broken.get_setting.side_effect = RuntimeError('boom')
         user = SimpleNamespace(chat_id='1', uuid=UUID, status='paid',
-                               platform='android', lang='ru')
+                               platform='windows', lang='ru')
+        # The tester list is unreadable: no button off Android...
         assert nc.open_button_row(broken, _config(), user) is None
+        # ...and on Android the list is not needed.
+        user.platform = 'android'
+        assert nc.open_button_row(broken, _config(), user)
 
 
 class TestOpenPage:
@@ -229,9 +241,14 @@ def _rows(kb):
 
 class TestPlacement:
 
-    def test_key_card_first_row_for_testers_only(self, db):
-        user = _seed(db)
+    def test_key_card_first_row_on_android(self, db):
+        _, kb = build_key_delivery_message(_seed(db), _config(), db=db)
+        assert _rows(kb)[0][0]['text'] == '📲 Открыть в NekoVPN'
+
+    def test_key_card_first_row_for_pc_testers_only(self, db):
+        user = _seed(db, platform='windows')
         _, before = build_key_delivery_message(user, _config(), db=db)
+        assert all('open/' not in json.dumps(r) for r in _rows(before))
         _testers(db, '111')
         _, after = build_key_delivery_message(user, _config(), db=db)
         assert _rows(after)[0][0]['text'] == '📲 Открыть в NekoVPN'
@@ -243,8 +260,12 @@ class TestPlacement:
         CommandHandler(bot, db, _config()).handle_sub({}, chat_id)
         return bot.send_message.call_args.kwargs['reply_markup']
 
-    def test_sub_command_first_row_for_testers_only(self, db):
+    def test_sub_command_first_row_on_android(self, db):
         _seed(db)
+        assert _rows(self._sub_keyboard(db))[0][0]['url'].endswith(f'/open/{_token()}')
+
+    def test_sub_command_first_row_for_pc_testers_only(self, db):
+        _seed(db, platform='windows')
         before = self._sub_keyboard(db)
         _testers(db, '111')
         after = self._sub_keyboard(db)
