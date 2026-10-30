@@ -12,7 +12,9 @@ release page. The page does not jump to the app on its own: an automatic
 navigation to an app link needs a user gesture in Chrome, and Telegram's
 own in-app browser may replace the page with an error, leaving no button.
 
-Test builds only for now: the button is shown to
+Who sees the button: every key holder on Android (the owner opened it
+to all on 2026-10-31, with the demo allowance that NekoVPN raises to
+10 GB), and on any other platform but iOS the testers,
 ``app_settings.client_testers``, the list ``scripts/client_release_notify.py``
 writes.
 """
@@ -82,16 +84,18 @@ def intent_link(url: str) -> str:
 
 
 def open_button_row(db, config, user) -> Optional[list]:
-    """The «📲 Открыть в NekoVPN» row: a tester with a key, not on iOS
-    (NekoVPN has no iOS build). Never raises."""
+    """The «📲 Открыть в NekoVPN» row: a key holder on Android, or a tester
+    with a key on any platform but iOS (NekoVPN has no iOS build). Never
+    raises."""
     try:
         if not user or not getattr(user, 'uuid', None):
             return None
         if (getattr(user, 'status', '') or '') not in KEY_STATUSES:
             return None
-        if (getattr(user, 'platform', '') or '') == 'ios':
+        platform = getattr(user, 'platform', '') or ''
+        if platform == 'ios':
             return None
-        if not is_tester(db, user):
+        if platform != 'android' and not is_tester(db, user):
             return None
         url = open_page_url(config, user)
     except Exception as e:
