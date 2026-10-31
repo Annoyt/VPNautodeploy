@@ -1,15 +1,17 @@
-"""A paid key may be used from 5 addresses (PAID_LIMIT_IP), not 1.
+"""Address limits per tier: a paid key 5 addresses (PAID_LIMIT_IP), a
+demo key 2 (DEMO_LIMIT_IP).
 
 The exit panel enforces limitIp with fail2ban: one address over the limit
 gets the older one banned for 30 min. Real sqlite (users, admin_actions);
-the panel is faked. Covers every path that writes a paid key's limit: the
-payment (grant_paid_access), /addmail, «🔑 Мой ключ» (which used to re-add
-the key with demo values) and scripts/paid_limit_ip.py for keys paid
-before.
+the panel is faked. Covers every path that writes a key's limit: the
+payment (grant_paid_access), /addmail, a new Telegram key, «🔑 Мой ключ»
+(which used to re-add the key with demo values) and scripts/limit_ip.py
+for keys made before.
 """
 
 import importlib.util
 import io
+import json
 import os
 import subprocess
 import sys
@@ -27,9 +29,9 @@ from bot.services.billing import grant_paid_access
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 _spec = importlib.util.spec_from_file_location(
-    'paid_limit_ip', os.path.join(ROOT, 'scripts', 'paid_limit_ip.py'))
-pli = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(pli)
+    'limit_ip', os.path.join(ROOT, 'scripts', 'limit_ip.py'))
+lip = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(lip)
 
 pytestmark = pytest.mark.filterwarnings(
     "ignore:Database\\..*is deprecated:DeprecationWarning"
@@ -40,7 +42,8 @@ PAID_UNTIL = datetime.now() + timedelta(days=30)
 
 def config(**over):
     cfg = SimpleNamespace(
-        PAID_LIMIT_IP=5, PAID_TRAFFIC_GB=100, DEMO_TRAFFIC_GB=10, DEMO_DAYS=30,
+        PAID_LIMIT_IP=5, DEMO_LIMIT_IP=2, PAID_TRAFFIC_GB=100,
+        DEMO_TRAFFIC_GB=10, DEMO_OTHER_TRAFFIC_GB=5, DEMO_DAYS=30,
         INBOUND_ID=1, ENTRY_NODE_IP='203.0.113.1', REALITY_PUBLIC_KEY='pk',
         SNI_VALUE='www.bing.com', WEBAPP_URL='https://bot.example',
         BOT_TOKEN='t', SUPER_ADMIN_ID=1)
@@ -64,7 +67,8 @@ def seed(db, chat_id, status='paid', limit_ip=1, key=True, **extra):
 
 
 class FakePanel:
-    """limitIp per email; an update fails for emails in ``fail``."""
+    """limitIp per email on inbound 1; an update fails for emails in
+    ``fail``."""
 
     def __init__(self, limits=None, fail=(), attached=True):
         self.limits = dict(limits or {})
@@ -73,10 +77,11 @@ class FakePanel:
         self.updates = []
         self.added = []
 
-    def get_client_sync(self, email):
-        if email not in self.limits:
+    def get_inbound_settings_sync(self, inbound_id):
+        if inbound_id != 1:
             return None
-        return {'email': email, 'limitIp': self.limits[email]}
+        clients = [{'email': e, 'limitIp': v} for e, v in self.limits.items()]
+        return {'id': 1, 'settings': json.dumps({'clients': clients})}
 
     def sync_client_settings_sync(self, email, updates):
         self.updates.append((email, dict(updates)))
@@ -102,7 +107,7 @@ def audit(db):
     with db._connect() as conn:
         return [tuple(row) for row in conn.execute(
             "SELECT target_id, details FROM admin_actions WHERE action = ? "
-            "ORDER BY id", (pli.ACTION,))]
+            "ORDER BY id", (lip.ACTION,))]
 
 
 class TestPayment:
@@ -151,11 +156,27 @@ class TestAddmail:
         assert self.provision(db, panel, 'b@example.com').limit_ip == 10
         assert panel.added[-1]['limitIp'] == 10
 
-    def test_a_demo_mail_user_keeps_one(self, db):
+    def test_a_demo_mail_user_gets_two(self, db):
         panel = FakePanel()
         user = self.provision(db, panel, 'c@example.com', status='demo')
-        assert user.limit_ip == 1
-        assert panel.added[-1]['limitIp'] == 1
+        assert user.limit_ip == 2
+        assert panel.added[-1]['limitIp'] == 2
+
+
+class TestNewKey:
+
+    def test_a_new_telegram_key_gets_two(self, db):
+        GetKeyHandler._inflight_chat_ids.clear()
+        db._users.save(User(chat_id='31', username='u31', status='demo'))
+        panel = FakePanel()
+        bot = Mock()
+        bot.services = {'xui': panel}
+        handler = GetKeyHandler(bot, db, config())
+        with patch.object(handler, '_send_key_to_user', new_callable=AsyncMock):
+            import asyncio
+            asyncio.run(handler._process_key_request('31'))
+        assert panel.added[-1]['limitIp'] == 2
+        assert db.get_user('31').limit_ip == 2
 
 
 class TestMyKey:
@@ -183,6 +204,12 @@ class TestMyKey:
         self.press(db, panel, '22')
         assert [c['limitIp'] for c in panel.added] == [5]
 
+    def test_a_lost_demo_key_comes_back_with_two(self, db):
+        seed(db, '23', status='demo', limit_ip=1, quota_gb=5.0)
+        panel = FakePanel(attached=False)
+        self.press(db, panel, '23')
+        assert [c['limitIp'] for c in panel.added] == [2]
+
 
 class TestBackfill:
 
@@ -197,30 +224,46 @@ class TestBackfill:
         seed(db, '6', status='support_topic', previous_state='demo')
         seed(db, '7', status='demo')
         seed(db, '8', key=False)                         # paid, no key yet
+        seed(db, '9', status='demo', limit_ip=3)         # demo raised by hand
+        seed(db, '10', status='banned')                  # no tier
         return FakePanel({'user_1@x': 0, 'user_2@x': 10, 'user_3@x': 0,
                           'user_4@x': 1, 'user_5@x': 3, 'user_6@x': 1,
-                          'user_7@x': 0})
+                          'user_7@x': 0, 'user_9@x': 3, 'user_10@x': 1})
 
     def run(self, db, panel, *argv):
         out = io.StringIO()
-        code = pli.main(list(argv), db=db, xui=panel, config=config(), out=out)
+        code = lip.main(list(argv), db=db, xui=panel, config=config(), out=out)
         return code, out.getvalue()
 
     def test_dry_run_writes_nothing(self, db, users):
         code, out = self.run(db, users)
         assert code == 0
-        assert 'dry run: 5 payers' in out
+        assert 'dry run: paid 5, demo 3 keys, 5 to change' in out
         assert users.updates == [] and audit(db) == []
         assert db.get_user('1').limit_ip == 1
 
-    def test_apply_raises_payers_only(self, db, users):
+    def test_apply_gives_each_tier_its_limit(self, db, users):
         code, out = self.run(db, users, '--apply')
         assert code == 0
         assert users.limits == {
             'user_1@x': 5, 'user_2@x': 10, 'user_3@x': 0, 'user_4@x': 5,
-            'user_5@x': 5, 'user_6@x': 1, 'user_7@x': 0}
-        assert [db.get_user(c).limit_ip for c in '1234567'] == [5, 10, 0, 5, 5, 1, 1]
-        assert sorted(audit(db)) == [('1', '0->5'), ('4', '1->5'), ('5', '3->5')]
+            'user_5@x': 5, 'user_6@x': 2, 'user_7@x': 2, 'user_9@x': 3,
+            'user_10@x': 1}
+        assert ([db.get_user(str(c)).limit_ip for c in range(1, 11) if c != 8]
+                == [5, 10, 0, 5, 5, 2, 2, 3, 1])
+        assert sorted(audit(db)) == [
+            ('1', 'paid 0->5'), ('4', 'paid 1->5'), ('5', 'paid 3->5'),
+            ('6', 'demo 1->2'), ('7', 'demo 0->2')]
+
+    def test_one_tier(self, db, users):
+        self.run(db, users, '--apply', '--tier', 'demo')
+        assert sorted(audit(db)) == [('6', 'demo 1->2'), ('7', 'demo 0->2')]
+        assert users.limits['user_1@x'] == 0
+
+    def test_a_key_the_panel_does_not_show_is_set(self, db, users):
+        del users.limits['user_7@x']
+        self.run(db, users, '--apply')
+        assert ('7', 'demo None->2') in audit(db)
 
     def test_a_second_run_changes_nothing(self, db, users):
         self.run(db, users, '--apply')
@@ -242,12 +285,33 @@ class TestBackfill:
         users.fail.add('user_1@x')
         code, out = self.run(db, users, '--apply')
         assert code == 1 and 'failed: 1' in out
-        assert ('1', '0->5') not in audit(db)
+        assert ('1', 'paid 0->5') not in audit(db)
         assert db.get_user('1').limit_ip == 5      # saved before the panel
         users.fail.clear()
         assert self.run(db, users, '--apply')[0] == 0
         assert users.limits['user_1@x'] == 5
-        assert ('1', '0->5') in audit(db)
+        assert ('1', 'paid 0->5') in audit(db)
+
+
+class TestPanelRead:
+
+    def test_every_key_inbound_once_shadowsocks_first(self):
+        cfg = SimpleNamespace(SS_INBOUND_ID=5, INBOUND_ID=1, WS_INBOUND_ID=4,
+                              WS2_INBOUND_ID=0)
+        assert lip.inbound_ids(cfg) == [5, 1, 4]
+        assert lip.inbound_ids(SimpleNamespace(INBOUND_ID=1, SS_INBOUND_ID=1)) == [1]
+
+    def test_the_first_inbound_that_has_the_key_answers(self):
+        # Like the bot's own reads: the Shadowsocks inbound first.
+        class TwoInbounds:
+            def get_inbound_settings_sync(self, iid):
+                limit = {5: 2, 1: 1}.get(iid)
+                if limit is None:
+                    return None
+                return {'settings': json.dumps(
+                    {'clients': [{'email': 'a@x', 'limitIp': limit}]})}
+        cfg = SimpleNamespace(SS_INBOUND_ID=5, INBOUND_ID=1)
+        assert lip.panel_reader(TwoInbounds(), cfg)('a@x') == 2
 
 
 class TestRunAsAFile:
@@ -258,7 +322,7 @@ class TestRunAsAFile:
         env['DB_PATH'] = str(tmp_path / 'bot.db')
         env['XUI_API_URL'] = ''
         r = subprocess.run(
-            [sys.executable, os.path.join('scripts', 'paid_limit_ip.py')],
+            [sys.executable, os.path.join('scripts', 'limit_ip.py')],
             cwd=ROOT, env=env, capture_output=True, text=True, timeout=120)
         assert r.returncode == 0, r.stderr
-        assert 'dry run: 0 payers' in r.stdout
+        assert 'dry run: paid 0, demo 0 keys, 0 to change' in r.stdout

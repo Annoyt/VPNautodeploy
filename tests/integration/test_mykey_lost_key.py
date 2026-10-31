@@ -240,7 +240,7 @@ class TestDemo:
         _, card = press(db, panel, '31')
         row = panel.rows['user_31@x']
         assert card and panel.works('user_31@x')
-        assert row['total'] == 10 * GB and row['limit'] == 1
+        assert row['total'] == 10 * GB and row['limit'] == 2   # DEMO_LIMIT_IP
         assert before + 30 * DAY_MS <= row['expiry'] <= now_ms() + 30 * DAY_MS
         assert row['used'] == 4 * GB             # the month's use still counts
 

@@ -247,14 +247,21 @@ class Settings:
             self.DEMO_DAYS = 30
             self.PAID_TRAFFIC_GB = 100
 
-        # Addresses a paid key may use at once: the panel's limitIp,
-        # enforced on exit by 3x-ui's fail2ban jail (one address over the
-        # limit bans the older one for 30 min). 0 = no limit. Payments and
-        # /addmail raise a key to it (billing.paid_limit_ip), never lower.
+        # Addresses a key may use at once: the panel's limitIp, enforced
+        # on exit by 3x-ui's fail2ban jail (one address over the limit
+        # bans the older one for 30 min). 0 = no limit. Paid keys get
+        # PAID_LIMIT_IP, demo keys DEMO_LIMIT_IP (2: a phone on two
+        # networks, or a second device through NekoVPN's gateway); a key
+        # is raised to its tier's value, never lowered
+        # (billing.paid_limit_ip / demo_limit_ip).
         try:
             self.PAID_LIMIT_IP: int = int(os.getenv('PAID_LIMIT_IP', '5'))
         except ValueError:
             self.PAID_LIMIT_IP = 5
+        try:
+            self.DEMO_LIMIT_IP: int = int(os.getenv('DEMO_LIMIT_IP', '2'))
+        except ValueError:
+            self.DEMO_LIMIT_IP = 2
             
         # Rejection settings
         try:

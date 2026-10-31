@@ -30,23 +30,20 @@ from bot.core.state_machine import StateMachine
 
 logger = logging.getLogger(__name__)
 
-# Addresses a paid key may use at once unless PAID_LIMIT_IP says otherwise.
+# Addresses a key may use at once unless PAID_LIMIT_IP / DEMO_LIMIT_IP
+# say otherwise.
 DEFAULT_PAID_LIMIT_IP = 5
+DEFAULT_DEMO_LIMIT_IP = 2
 
 
-def paid_limit_ip(user, config) -> int:
-    """The panel's limitIp for a paid user: PAID_LIMIT_IP (5 by default),
-    never below a higher value an admin set by hand (/set_limit, the
-    dashboard), and an admin's 0 (no limit) stays 0. PAID_LIMIT_IP 0 or
-    less means no limit for every payer.
-
-    The exit panel enforces limitIp with fail2ban: an address over the
-    limit gets the older one banned for 30 min, so a payer on a phone, a
-    laptop and the app's two-networks mode needs room."""
+def _tier_limit_ip(user, config, key: str, default: int) -> int:
+    """The tier's floor, never below a higher value an admin set by hand
+    (/set_limit, the dashboard); an admin's 0 (no limit) stays 0, and a
+    floor of 0 or less means no limit for the whole tier."""
     try:
-        floor = int(getattr(config, 'PAID_LIMIT_IP', DEFAULT_PAID_LIMIT_IP))
+        floor = int(getattr(config, key, default))
     except (TypeError, ValueError):
-        floor = DEFAULT_PAID_LIMIT_IP
+        floor = default
     if floor <= 0:
         return 0
     try:
@@ -56,6 +53,22 @@ def paid_limit_ip(user, config) -> int:
     if current == 0:
         return 0
     return max(current, floor)
+
+
+def paid_limit_ip(user, config) -> int:
+    """The panel's limitIp for a paid user: PAID_LIMIT_IP (5 by default).
+
+    The exit panel enforces limitIp with fail2ban: an address over the
+    limit gets the older one banned for 30 min, so a payer on a phone, a
+    laptop and the app's two-networks mode needs room."""
+    return _tier_limit_ip(user, config, 'PAID_LIMIT_IP', DEFAULT_PAID_LIMIT_IP)
+
+
+def demo_limit_ip(user, config) -> int:
+    """The panel's limitIp for a demo key: DEMO_LIMIT_IP (2 by default),
+    room for a phone on two networks or a second device through the
+    NekoVPN app's gateway, not for a key shared around."""
+    return _tier_limit_ip(user, config, 'DEMO_LIMIT_IP', DEFAULT_DEMO_LIMIT_IP)
 
 
 def _stored_quota_gb(user) -> Optional[float]:
@@ -127,8 +140,7 @@ def tier_client_values(user, config,
       raise and an admin's gift write; never below the other-clients
       allowance, see ``demo_tiers``, and an admin's 0, unlimited, stays
       0), DEMO_DAYS from now like a new key,
-      the user's own address limit. The monthly demo job renews it on
-      the 1st.
+      ``demo_limit_ip``. The monthly demo job renews it on the 1st.
     """
     from bot.services.demo_tiers import demo_traffic_gb
     from bot.services.ru_exit import is_eligible
@@ -147,10 +159,7 @@ def tier_client_values(user, config,
         days = int(getattr(config, 'DEMO_DAYS', 30))
     except (TypeError, ValueError):
         days = 30
-    try:
-        limit_ip = int(getattr(user, 'limit_ip', 1))
-    except (TypeError, ValueError):
-        limit_ip = 1
+    limit_ip = demo_limit_ip(user, config)
     expiry_ms = 0
     if days > 0:
         until = now.replace(tzinfo=timezone.utc) + timedelta(days=days)
