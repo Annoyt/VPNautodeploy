@@ -243,3 +243,18 @@ class TestPaidLimitIp:
         client = xui.add_client_sync.call_args[0][0]
         assert client['limitIp'] == 5
 
+
+class TestDemoLimitIp:
+    """A demo key: 2 addresses (DEMO_LIMIT_IP), the same rules as paid."""
+
+    def test_the_demo_floor(self):
+        from types import SimpleNamespace
+        from bot.services.billing import demo_limit_ip
+        cfg = SimpleNamespace(DEMO_LIMIT_IP=2)
+        assert demo_limit_ip(SimpleNamespace(limit_ip=1), cfg) == 2
+        assert demo_limit_ip(SimpleNamespace(limit_ip=4), cfg) == 4
+        assert demo_limit_ip(SimpleNamespace(limit_ip=0), cfg) == 0
+        assert demo_limit_ip(SimpleNamespace(limit_ip=1), SimpleNamespace()) == 2
+        assert demo_limit_ip(SimpleNamespace(limit_ip=1),
+                             SimpleNamespace(DEMO_LIMIT_IP=0)) == 0
+

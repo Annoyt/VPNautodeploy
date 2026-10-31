@@ -867,7 +867,9 @@ class NotificationService:
         except Exception as e:
             logger.exception(f"paid quota reset failed: {e}")
 
+        from types import SimpleNamespace
         from bot.services import demo_tiers
+        from bot.services.billing import demo_limit_ip
 
         new_expiry_ms = int((datetime.utcnow() + timedelta(days=30)).timestamp() * 1000)
 
@@ -875,7 +877,7 @@ class NotificationService:
             conn = sqlite3.connect(bot_db_path)
             conn.row_factory = sqlite3.Row
             demo_users = conn.execute(
-                "SELECT chat_id, email, uuid FROM users "
+                "SELECT chat_id, email, uuid, limit_ip FROM users "
                 "WHERE status = 'demo' AND email IS NOT NULL"
             ).fetchall()
             conn.close()
@@ -924,7 +926,8 @@ class NotificationService:
                         'id': u['uuid'],
                         'email': u['email'],
                         'flow': 'xtls-rprx-vision',
-                        'limitIp': 1,
+                        'limitIp': demo_limit_ip(
+                            SimpleNamespace(limit_ip=u['limit_ip']), self.config),
                         'totalGB': demo_bytes,
                         'expiryTime': new_expiry_ms,
                         'enable': True,

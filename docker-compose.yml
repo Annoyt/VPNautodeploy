@@ -123,6 +123,7 @@ services:
       - DEMO_TRAFFIC_GB=${DEMO_TRAFFIC_GB:-10}
       - DEMO_OTHER_TRAFFIC_GB=${DEMO_OTHER_TRAFFIC_GB:-5}
       - PAID_LIMIT_IP=${PAID_LIMIT_IP:-5}
+      - DEMO_LIMIT_IP=${DEMO_LIMIT_IP:-2}
       - DEMO_DAYS=${DEMO_DAYS:-30}
       # Admin dashboard URL (Caddy + Let's Encrypt on the host serves
       # https://<domain>:9443 → http://localhost:8080)

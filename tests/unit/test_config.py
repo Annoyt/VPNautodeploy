@@ -50,6 +50,14 @@ class TestSettings:
         monkeypatch.setenv('PAID_LIMIT_IP', 'many')
         assert Settings().PAID_LIMIT_IP == 5
 
+    def test_demo_limit_ip(self, monkeypatch):
+        monkeypatch.delenv('DEMO_LIMIT_IP', raising=False)
+        assert Settings().DEMO_LIMIT_IP == 2
+        monkeypatch.setenv('DEMO_LIMIT_IP', '3')
+        assert Settings().DEMO_LIMIT_IP == 3
+        monkeypatch.setenv('DEMO_LIMIT_IP', 'many')
+        assert Settings().DEMO_LIMIT_IP == 2
+
     def test_validate_empty_token(self):
         """Test validation with empty BOT_TOKEN"""
         s = Settings()

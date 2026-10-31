@@ -134,7 +134,7 @@ Files with this mark: `test_database.py`, `test_security.py`, `test_state_machin
 | `bot/core/state_machine.py` | `tests/unit/test_state_machine.py` |
 | `bot/handlers/callbacks/user*.py` | Corresponding unit + integration callback tests |
 | `bot/services/xui_service.py` | `tests/integration/test_xui_service.py`, `tests/integration/test_code_review_fixes.py` |
-| `bot/services/billing.py` | `tests/unit/test_billing.py`, `tests/integration/test_paid_limit_ip.py`, `tests/integration/test_mykey_lost_key.py` (the key re-add uses its values) |
+| `bot/services/billing.py` | `tests/unit/test_billing.py`, `tests/integration/test_limit_ip.py`, `tests/integration/test_mykey_lost_key.py` (the key re-add uses its values) |
 | `bot/core/database.py` schema | `tests/integration/test_migration.py`, `tests/unit/test_database.py` |
 | `bot/models/vpn_node.py` | All cluster tests using `VPNNode` |
 
@@ -590,14 +590,18 @@ The app posts what it measured. The bot reports it like `/sos` (§33): a `user_f
 - **`t.me/<bot>?start=sos`** (`/start sos`) runs `/sos`. The app offers this link when it reached no origin.
 - **Tests:** `tests/integration/test_neko_app_sos.py` (real sqlite); 16 mutants killed with a positional restore.
 
-### 42. Paid keys: 5 addresses, not 1 (2026-10-30)
+### 42. Address limits: paid 5, demo 2 (2026-10-30, demo 2026-11-01)
 
-The exit panel enforces `limitIp` with fail2ban (jail `3x-ipl` inside the 3x-ui container). When a key goes over its limit, the older address is banned for 30 min. Paid keys got the new-key default of 1, so a payer on a phone and a laptop, or on the app's two-networks mode, kept losing one of them.
+The exit panel enforces `limitIp` with fail2ban (jail `3x-ipl` inside the 3x-ui container). When a key goes over its limit, the older address is banned for 30 min. Every key got the new-key default of 1, so a payer on a phone and a laptop, or anyone on the app's two-networks mode or behind its gateway, kept losing one of them.
 
-- **`PAID_LIMIT_IP`** (default 5, passed by compose; 0 = no limit). `billing.paid_limit_ip(user, config)` = the larger of the stored limit and `PAID_LIMIT_IP`; an admin's 0 (`/set_limit @user 0`, the dashboard) stays 0. It is written to `users.limit_ip` and to the panel by `grant_paid_access` (every payment: the in-place update and the re-add) and by `/addmail` for paid keys. Demo keys keep 1.
+- **`PAID_LIMIT_IP`** (default 5) and **`DEMO_LIMIT_IP`** (default 2, owner's decision of 2026-11-01). Both are passed by compose; 0 = no limit.
+  - `billing.paid_limit_ip` / `demo_limit_ip` return the larger of the stored limit and the tier's value. An admin's 0 (`/set_limit @user 0`, the dashboard) stays 0.
+  - Written to `users.limit_ip` and the panel by: `grant_paid_access` (every payment); `/addmail` (either tier); a new Telegram key; the lost-key re-add (`tier_client_values`); the monthly demo job's re-add of a detached client.
 - **«🔑 Мой ключ»** (main menu → `GetKeyHandler`) no longer re-adds a key the panel still has. On the relational panel a re-add is delete + re-add: it zeroed the key's traffic and rewrote it with demo values (1 address, 10 GB, no expiry). A key the panel lost is still re-added, with its tier's values (§44).
-- **Keys paid before:** `docker exec -w /app vpn-bot python3 scripts/paid_limit_ip.py` is a dry run; `--apply` updates. The script reads each key's limit from the panel, because the panel had drifted from the bot: keys it took in before the camelCase fix are unlimited (0) there. Every change is audited as `admin_actions('owner', 'paid_limit_ip', <chat_id>, 'old->new')`.
-- **Tests:** `tests/integration/test_paid_limit_ip.py` (real sqlite) and `TestPaidLimitIp` in `tests/unit/test_billing.py`. 30 mutants killed with a positional restore.
+- **Keys made before:** `docker exec -w /app vpn-bot python3 scripts/limit_ip.py` is a dry run; `--apply` updates; `--tier paid|demo` narrows it. (It was `paid_limit_ip.py` until 2026-11-01.)
+  - It reads every key inbound once, Shadowsocks first, because the panel had drifted from the bot: keys it took in before the camelCase fix are unlimited (0) there.
+  - Every change is audited as `admin_actions('owner', 'limit_ip', <chat_id>, '<tier> old->new')`. The paid run of 2026-10-30 is under the old action name `paid_limit_ip`.
+- **Tests:** `tests/integration/test_limit_ip.py` (real sqlite) and `TestPaidLimitIp` / `TestDemoLimitIp` in `tests/unit/test_billing.py`. 42 mutants killed with a positional restore.
 
 ### 43. Demo allowance by client app: 10 GB with NekoVPN, 5 GB otherwise (2026-10-30)
 

@@ -2022,7 +2022,7 @@ class AdminOpsMixin(AdminHandlerBase):
 
         from bot.config.constants import UserState, Platform, BYTES_PER_GB
         from bot.models.user import User
-        from bot.services.billing import paid_limit_ip
+        from bot.services.billing import demo_limit_ip, paid_limit_ip
         from bot.services.vpn import VPNService
         from bot.services.subscription import SubscriptionService
 
@@ -2041,10 +2041,9 @@ class AdminOpsMixin(AdminHandlerBase):
 
         user = self.db.get_user(target_chat) or User(chat_id=target_chat, username=None)
 
-        # A paid key gets the paid address limit (5 by default), demo one.
-        limit_ip = 1
-        if status != 'demo':
-            limit_ip = user.limit_ip = paid_limit_ip(user, self.config)
+        # Each tier's address limit: paid 5, demo 2 by default.
+        tier_limit = demo_limit_ip if status == 'demo' else paid_limit_ip
+        limit_ip = user.limit_ip = tier_limit(user, self.config)
 
         vpn = VPNService(self.config)
         expiry_ms = int((datetime.now() + timedelta(days=days)).timestamp() * 1000)

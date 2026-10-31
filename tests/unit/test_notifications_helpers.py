@@ -415,7 +415,8 @@ class TestDemoResetReprovisionFallback:
         conn.execute(
             "CREATE TABLE users (chat_id TEXT, email TEXT, uuid TEXT, "
             "status TEXT, subscription_expiry TEXT, traffic_up REAL, "
-            "traffic_down REAL, last_traffic_update TEXT)"
+            "traffic_down REAL, last_traffic_update TEXT, "
+            "limit_ip INTEGER DEFAULT 1)"
         )
         conn.executemany(
             "INSERT INTO users (chat_id, email, uuid, status) "
@@ -451,6 +452,7 @@ class TestDemoResetReprovisionFallback:
         assert client_cfg['id'] == 'uuid-1'
         assert client_cfg['email'] == 'detached@x'
         assert client_cfg['enable'] is True
+        assert client_cfg['limitIp'] == 2      # DEMO_LIMIT_IP's default
         assert xui.renew_client_sync.call_count == 3
         # Both users refreshed → both notified.
         assert svc.bot.send_message.call_count == 2

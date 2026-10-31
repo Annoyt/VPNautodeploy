@@ -521,6 +521,8 @@ class GetKeyHandler(BaseCallbackHandler):
             comment=getattr(user, 'contact_email', None) or ''
         )
 
+        from bot.services.billing import demo_limit_ip
+        client['limitIp'] = user.limit_ip = demo_limit_ip(user, self.config)
         user.uuid = client['id']
         user.email = client['email']
         user.quota_gb = float(demo_gb)
