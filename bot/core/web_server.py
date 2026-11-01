@@ -1520,10 +1520,11 @@ class WebAppServer:
     }
 
     async def handle_app(self, request: web.Request) -> web.Response:
-        """``GET /app`` and ``GET /app/<token>`` — the NekoVPN download page
-        (bot/services/neko_client.py): the APK for Android, a pointer to
-        Karing or FlClash elsewhere. With the /sub token the page also adds
-        the subscription after the install (its 404 and 410 are /sub's).
+        """``GET /app`` and ``GET /app/<token>`` — the app chooser
+        (bot/services/neko_client.py): Android (NekoVPN, Hiddify, FlClash),
+        iPhone (Karing) and computer (FlClash, Hiddify), the visitor's own
+        platform opened. With the /sub token every app also gets «Добавить
+        подписку» in the form it reads (its 404 and 410 are /sub's).
         Never cached, no referrer, not indexed, no script."""
         from bot.services import neko_client
         from bot.services.demo_tiers import demo_traffic_gb
@@ -1552,6 +1553,8 @@ class WebAppServer:
             release=release,
             apk_url=f'{base}/apk',
             demo_gb=demo_gb,
+            plain_url=(self.subscription.build_subscription_url(user)
+                       if user else None),
             profile_url=neko_client.profile_url(self.config, user) if user else None,
             self_url=neko_client.download_page_url(self.config, user) if user else None,
         )
