@@ -294,53 +294,95 @@ button{{padding:10px 14px;font-size:14px}}
 '''
 
 
-# ---------- The download page: /app and /app/<token> ----------
+# ---------- The app chooser: /app and /app/<token> ----------
 
-_DOWNLOAD_TEXTS = {
+HIDDIFY_URL = 'https://hiddify.com/'
+PROFILE_NAME = 'NekoVPN'
+
+
+def hiddify_link(url: str) -> str:
+    """Hiddify's import link (``hiddify://import/<url>#<name>``, its
+    LinkParser); it reads the plain sing-box subscription."""
+    return f'hiddify://import/{url}#{PROFILE_NAME}'
+
+
+def flclash_link(url: str) -> str:
+    """FlClash's import link; it reads the Clash profile."""
+    return f'clash://install-config?url={quote(url, safe="")}'
+
+
+def karing_link(url: str) -> str:
+    """Karing's import link (its scheme handler); the plain subscription."""
+    return (f'karing://install-config?url={quote(url, safe="")}'
+            f'&name={PROFILE_NAME}')
+
+
+_CHOOSER_TEXTS = {
     'ru': {
-        'title': 'NekoVPN для Android',
-        'download': 'Скачать NekoVPN',
-        'version': 'Версия {version} · {size} МБ',
-        'steps': [
-            'Откройте скачанный файл. Android спросит, можно ли браузеру '
-            'устанавливать приложения, — разрешите.',
-            'Установите NekoVPN.',
-        ],
-        'step_add': 'Вернитесь на эту страницу и нажмите «Добавить подписку».',
+        'lead': 'Выберите приложение. Подписка одна, подходит ко всем.',
+        'android': 'Android',
+        'ios': 'iPhone и iPad',
+        'desktop': 'Компьютер: Windows, macOS, Linux',
+        'recommended': 'рекомендуем',
+        'neko': 'Наше приложение: в демо 10 ГБ в месяц вместо 5, карточка '
+                'трафика, шлюз для соседа, кнопка «Не подключается».',
+        'hiddify': 'Проще всего: обычное приложение. Наши правила '
+                   'маршрутизации не применяет.',
+        'flclash': 'Применяет наши правила полностью: звонки, YouTube через '
+                   'VPN, российские сайты напрямую. С официального сайта, в '
+                   'Google Play его нет.',
+        'flclash_pc': 'Рекомендуем для компьютера: применяет наши правила '
+                      'полностью.',
+        'karing': 'Для iPhone и iPad, из App Store. NekoVPN для iPhone пока нет.',
+        'download': 'Скачать',
+        'download_neko': 'Скачать NekoVPN',
         'add': 'Добавить подписку',
-        'no_token': 'Подписку добавьте из бота {bot}: /sub → кнопка '
-                    '«📲 Открыть в NekoVPN».',
+        'version': 'Версия {version} · {size} МБ',
+        'steps': 'Откройте скачанный файл. Android спросит, можно ли браузеру '
+                 'устанавливать приложения, — разрешите. Установите и '
+                 'вернитесь сюда.',
+        'other_abis': 'Не устанавливается? Другие сборки:',
+        'unavailable': 'Сборка сейчас недоступна, скачайте со страницы '
+                       'релизов:',
+        'no_token': 'Подписку добавьте из бота {bot}: /sub. Там же кнопка, '
+                    'которая открывает эту страницу с вашей подпиской.',
+        'manual': 'Ссылки подписки вручную',
+        'manual_plain': 'Hiddify, Karing и другие:',
+        'manual_clash': 'NekoVPN и FlClash:',
         'demo': 'Демо в NekoVPN — {app} ГБ в месяц, в других приложениях — '
                 '{other} ГБ.',
-        'other_abis': 'Не устанавливается? Другие сборки:',
-        'ios': 'NekoVPN пока только для Android. На iPhone подойдёт Karing:',
-        'desktop': 'NekoVPN пока только для Android — откройте эту страницу '
-                   'на телефоне. На компьютере подойдёт FlClash:',
-        'subscription': 'Подписка — в боте {bot}: /sub.',
-        'unavailable': 'Не удалось получить сборку. Скачайте со страницы '
-                       'релизов:',
     },
     'en': {
-        'title': 'NekoVPN for Android',
-        'download': 'Download NekoVPN',
-        'version': 'Version {version} · {size} MB',
-        'steps': [
-            'Open the downloaded file. Android asks whether the browser may '
-            'install apps: allow it.',
-            'Install NekoVPN.',
-        ],
-        'step_add': 'Come back to this page and tap “Add subscription”.',
+        'lead': 'Pick an app. One subscription works in all of them.',
+        'android': 'Android',
+        'ios': 'iPhone and iPad',
+        'desktop': 'Computer: Windows, macOS, Linux',
+        'recommended': 'recommended',
+        'neko': 'Our app: 10 GB a month on demo instead of 5, a traffic card, '
+                'a gateway for a neighbour, a “Cannot connect” button.',
+        'hiddify': 'The simplest: a regular app. Does not apply our routing '
+                   'rules.',
+        'flclash': 'Applies our rules in full: calls, YouTube through the VPN, '
+                   'Russian sites directly. From the official site; it is not '
+                   'on Google Play.',
+        'flclash_pc': 'Recommended for a computer: applies our rules in full.',
+        'karing': 'For iPhone and iPad, from the App Store. NekoVPN has no '
+                  'iPhone build yet.',
+        'download': 'Download',
+        'download_neko': 'Download NekoVPN',
         'add': 'Add subscription',
-        'no_token': 'Add your subscription from the bot {bot}: /sub → '
-                    '“📲 Open in NekoVPN”.',
-        'demo': 'Demo in NekoVPN: {app} GB a month; {other} GB in other apps.',
+        'version': 'Version {version} · {size} MB',
+        'steps': 'Open the downloaded file. Android asks whether the browser '
+                 'may install apps: allow it. Install, then come back here.',
         'other_abis': 'Does not install? Other builds:',
-        'ios': 'NekoVPN is Android-only for now. On an iPhone, use Karing:',
-        'desktop': 'NekoVPN is Android-only for now: open this page on your '
-                   'phone. On a computer, use FlClash:',
-        'subscription': 'Your subscription is in the bot {bot}: /sub.',
-        'unavailable': 'Could not get the build. Download it from the release '
-                       'page:',
+        'unavailable': 'The build is unavailable right now; get it from the '
+                       'release page:',
+        'no_token': 'Add your subscription from the bot {bot}: /sub. It has a '
+                    'button that opens this page with your subscription.',
+        'manual': 'Subscription links by hand',
+        'manual_plain': 'Hiddify, Karing and others:',
+        'manual_clash': 'NekoVPN and FlClash:',
+        'demo': 'Demo in NekoVPN: {app} GB a month; {other} GB in other apps.',
     },
 }
 
@@ -349,50 +391,87 @@ BOT_NAME = '@neko_vpnbot'
 
 def render_download_page(*, platform: str, lang: Optional[str],
                          release: Optional[dict], apk_url: str,
-                         demo_gb: Optional[tuple], profile_url: Optional[str] = None,
+                         demo_gb: Optional[tuple],
+                         plain_url: Optional[str] = None,
+                         profile_url: Optional[str] = None,
                          self_url: Optional[str] = None) -> str:
-    """The download page. ``apk_url`` is our ``/apk`` (a stable link that
-    follows new releases); with ``profile_url`` the page also adds the
-    subscription, its intent falling back to ``self_url`` (this page).
-    ``demo_gb`` (app, other) prints the demo allowances; None for a payer."""
-    t = _DOWNLOAD_TEXTS['en' if lang == 'en' else 'ru']
+    """The app chooser: Android, iPhone and computer, the visitor's own
+    platform opened. Every app has its download and, with the user's
+    subscription (``plain_url`` for Hiddify and Karing, ``profile_url``,
+    the Clash form, for NekoVPN and FlClash), an «Add subscription» link
+    in the form that app reads. NekoVPN's intent falls back to
+    ``self_url`` (this page). ``apk_url`` is our ``/apk``, a stable link
+    that follows new releases. ``demo_gb`` (app, other) prints the demo
+    allowances; None for a payer."""
+    t = _CHOOSER_TEXTS['en' if lang == 'en' else 'ru']
     e = html.escape
-    parts = ['<h1>🐱 NekoVPN</h1>']
-    if platform == 'ios':
-        parts += [f'<p>{e(t["ios"])} <a href="{e(KARING_URL)}">Karing</a></p>',
-                  f'<p class="small">{e(t["subscription"].format(bot=BOT_NAME))}</p>']
-    elif platform == 'desktop':
-        parts += [f'<p>{e(t["desktop"])} <a href="{e(FLCLASH_URL)}">FlClash</a></p>',
-                  f'<p class="small">{e(t["subscription"].format(bot=BOT_NAME))}</p>']
-    elif not release:
-        parts += [f'<p>{e(t["unavailable"])} <a href="{e(RELEASES_URL)}">GitHub</a></p>']
-    else:
-        url, size = release['apks'][ABIS[0]]
+
+    def link(href, text, cls='btn'):
+        return f'<a class="{cls}" href="{e(href)}">{e(text)}</a>'
+
+    def app(name, about, download, add=None, rec=False, extra=''):
+        badge = f' <span class="rec">{e(t["recommended"])}</span>' if rec else ''
+        buttons = link(download, t['download'] if name != 'NekoVPN' else t['download_neko'])
+        if add:
+            buttons += link(add, t['add'], 'btn alt')
+        return (f'<div class="app"><h3>{e(name)}{badge}</h3>'
+                f'<p>{e(about)}</p><div class="row">{buttons}</div>{extra}</div>')
+
+    # Android: NekoVPN first.
+    if release:
+        _url, size = release['apks'][ABIS[0]]
         version = release['tag'].lstrip('v')
-        parts += [
-            f'<p class="lead">{e(t["title"])}</p>',
-            f'<a class="btn" href="{e(apk_url)}">{e(t["download"])}</a>',
-            f'<p class="small">{e(t["version"].format(version=version, size=round(size / 1048576)))}</p>',
-        ]
-        steps = list(t['steps'])
-        if profile_url:
-            steps.append(t['step_add'])
-        parts.append('<ol>' + ''.join(f'<li>{e(step)}</li>' for step in steps) + '</ol>')
-        if profile_url:
-            parts.append(f'<a class="btn" href="{e(intent_link(profile_url, self_url or RELEASES_URL))}">'
-                         f'{e(t["add"])}</a>')
-        else:
-            parts.append(f'<p class="small">{e(t["no_token"].format(bot=BOT_NAME))}</p>')
-        if demo_gb:
-            app_gb, other_gb = demo_gb
-            parts.append(f'<p class="small">{e(t["demo"].format(app=app_gb, other=other_gb))}</p>')
         others = [abi for abi in ABIS[1:] if abi in release['apks']]
+        extra = (f'<p class="small">{e(t["version"].format(version=version, size=round(size / 1048576)))}'
+                 f'</p><p class="small">{e(t["steps"])}</p>')
         if others:
-            links = ' · '.join(
-                f'<a href="{e(apk_url)}?abi={e(abi)}">{e(abi)}</a>' for abi in others)
-            parts.append(f'<p class="small">{e(t["other_abis"])} {links}</p>')
+            extra += (f'<p class="small">{e(t["other_abis"])} '
+                      + ' · '.join(f'<a href="{e(apk_url)}?abi={e(abi)}">{e(abi)}</a>'
+                                   for abi in others) + '</p>')
+        neko = app('NekoVPN', t['neko'], apk_url,
+                   intent_link(profile_url, self_url or RELEASES_URL) if profile_url else None,
+                   rec=True, extra=extra)
+    else:
+        neko = app('NekoVPN', t['neko'], RELEASES_URL, rec=True,
+                   extra=f'<p class="small">{e(t["unavailable"])} GitHub</p>')
+    android = [
+        neko,
+        app('Hiddify', t['hiddify'], HIDDIFY_URL,
+            hiddify_link(plain_url) if plain_url else None),
+        app('FlClash', t['flclash'], FLCLASH_URL,
+            flclash_link(profile_url) if profile_url else None),
+    ]
+    ios = [app('Karing', t['karing'], KARING_URL,
+               karing_link(plain_url) if plain_url else None)]
+    desktop = [
+        app('FlClash', t['flclash_pc'], FLCLASH_URL,
+            flclash_link(profile_url) if profile_url else None, rec=True),
+        app('Hiddify', t['hiddify'], HIDDIFY_URL,
+            hiddify_link(plain_url) if plain_url else None),
+    ]
+
+    def section(key, apps):
+        opened = ' open' if platform == key else ''
+        return (f'<details id="{key}"{opened}><summary>{e(t[key])}</summary>'
+                + ''.join(apps) + '</details>')
+
+    parts = ['<h1>🐱 NekoVPN</h1>', f'<p class="lead">{e(t["lead"])}</p>',
+             section('android', android), section('ios', ios),
+             section('desktop', desktop)]
+    if plain_url and profile_url:
+        parts.append(
+            f'<details><summary>{e(t["manual"])}</summary>'
+            f'<p class="small">{e(t["manual_plain"])}</p>'
+            f'<input readonly value="{e(plain_url)}">'
+            f'<p class="small">{e(t["manual_clash"])}</p>'
+            f'<input readonly value="{e(profile_url)}"></details>')
+    else:
+        parts.append(f'<p class="small">{e(t["no_token"].format(bot=BOT_NAME))}</p>')
+    if demo_gb:
+        app_gb, other_gb = demo_gb
+        parts.append(f'<p class="small">{e(t["demo"].format(app=app_gb, other=other_gb))}</p>')
     body = '\n'.join(parts)
-    return f'''<!doctype html>
+    return f"""<!doctype html>
 <html lang="{'en' if lang == 'en' else 'ru'}">
 <head>
 <meta charset="utf-8">
@@ -401,13 +480,23 @@ def render_download_page(*, platform: str, lang: Optional[str],
 <title>NekoVPN</title>
 <style>
 body{{font-family:system-ui,sans-serif;margin:0;background:#fafafa;color:#222}}
-main{{max-width:420px;margin:0 auto;padding:32px 20px;text-align:center}}
-h1{{font-size:28px;margin:8px 0 16px}}
-.lead{{font-size:18px}}
-.btn{{display:block;padding:16px;border-radius:14px;background:#f57c1f;color:#fff;
-font-size:18px;font-weight:600;text-decoration:none;margin:24px 0}}
-.small{{font-size:15px;color:#555}}
-ol{{text-align:left;font-size:15px;line-height:1.5;padding-left:22px}}
+main{{max-width:480px;margin:0 auto;padding:28px 16px}}
+h1{{font-size:28px;margin:8px 0 8px;text-align:center}}
+.lead{{text-align:center;font-size:16px;color:#444}}
+details{{background:#fff;border-radius:14px;margin:14px 0;padding:4px 14px;
+box-shadow:0 1px 3px rgba(0,0,0,.08)}}
+summary{{font-size:18px;font-weight:600;padding:12px 0;cursor:pointer}}
+.app{{border-top:1px solid #eee;padding:12px 0}}
+.app h3{{margin:0 0 4px;font-size:17px}}
+.app p{{margin:4px 0 8px;font-size:15px;color:#444}}
+.rec{{font-size:12px;font-weight:600;color:#fff;background:#f57c1f;border-radius:8px;
+padding:2px 8px;vertical-align:middle}}
+.row{{display:flex;gap:8px;flex-wrap:wrap}}
+.btn{{display:inline-block;padding:11px 16px;border-radius:12px;background:#f57c1f;
+color:#fff;font-weight:600;text-decoration:none;font-size:15px}}
+.btn.alt{{background:#fff;color:#f57c1f;border:2px solid #f57c1f;padding:9px 14px}}
+.small{{font-size:14px;color:#555}}
+input{{width:100%;box-sizing:border-box;padding:10px;margin:4px 0 10px;font-size:13px}}
 </style>
 </head>
 <body>
@@ -416,5 +505,5 @@ ol{{text-align:left;font-size:15px;line-height:1.5;padding-left:22px}}
 </main>
 </body>
 </html>
-'''
+"""
 

@@ -173,14 +173,18 @@ class TestPages:
         return await server.handle_app(req)
 
     @pytest.mark.asyncio
-    async def test_android_gets_the_apk(self, server):
+    async def test_android_opens_its_section_with_three_apps(self, server):
         resp = await self._get(server)
         body = resp.text
         assert resp.status == 200 and resp.content_type == 'text/html'
-        assert f'href="{BASE}/apk"' in body
+        assert '<details id="android" open>' in body
+        assert '<details id="ios">' in body and '<details id="desktop">' in body
+        assert f'href="{BASE}/apk"' in body and 'Скачать NekoVPN' in body
         assert 'Версия 0.9.2-neko.3 · 57 МБ' in body
         assert f'href="{BASE}/apk?abi=armeabi-v7a"' in body
-        assert 'intent://' not in body              # no token: no import button
+        assert nc.HIDDIFY_URL in body and nc.FLCLASH_URL in body and nc.KARING_URL in body
+        for scheme in ('intent://', 'hiddify://', 'clash://', 'karing://'):
+            assert scheme not in body      # no token: nothing to add
         assert '@neko_vpnbot' in body
         assert 'Демо в NekoVPN — 10 ГБ в месяц' in body
         assert resp.headers['Cache-Control'] == 'no-store'
@@ -188,13 +192,20 @@ class TestPages:
         assert "script-src" not in resp.headers['Content-Security-Policy']
 
     @pytest.mark.asyncio
-    async def test_with_the_token_it_adds_the_subscription(self, server, db):
+    async def test_with_the_token_every_app_adds_the_subscription(self, server, db):
         _seed(db)
-        body = (await self._get(server, _token())).text
-        href = re.findall(r'class="btn" href="([^"]+)"', body)[1].replace('&amp;', '&')
-        profile = f'{BASE}/sub/{_token()}?format=clash'
-        assert href == nc.intent_link(profile, f'{BASE}/app/{_token()}')
-        assert 'Вернитесь на эту страницу' in body
+        body = (await self._get(server, _token())).text.replace('&amp;', '&')
+        plain = f'{BASE}/sub/{_token()}'
+        clash = f'{plain}?format=clash'
+        assert nc.intent_link(clash, f'{BASE}/app/{_token()}') in body
+        # Hiddify and FlClash sit under Android and under the computer.
+        assert body.count(f'hiddify://import/{plain}#NekoVPN') == 2
+        assert body.count(nc.flclash_link(clash)) == 2
+        assert f'hiddify://import/{clash}' not in body
+        assert f'href="{nc.flclash_link(plain)}"' not in body
+        assert nc.karing_link(plain) in body
+        assert f'value="{plain}"' in body and f'value="{clash}"' in body
+        assert '@neko_vpnbot: /sub' not in body
 
     @pytest.mark.asyncio
     async def test_a_payer_sees_no_demo_line(self, server, db):
@@ -203,11 +214,12 @@ class TestPages:
         assert 'Download NekoVPN' in body and 'Demo in NekoVPN' not in body
 
     @pytest.mark.asyncio
-    async def test_iphone_and_computer_get_the_alternatives(self, server):
+    async def test_iphone_and_computer_open_their_sections(self, server):
         iphone = (await self._get(server, ua=IPHONE)).text
-        assert nc.KARING_URL in iphone and '/apk' not in iphone
+        assert '<details id="ios" open>' in iphone and nc.KARING_URL in iphone
+        assert '<details id="android">' in iphone
         desktop = (await self._get(server, ua=WINDOWS, lang='en-US,en')).text
-        assert nc.FLCLASH_URL in desktop and 'Android-only' in desktop
+        assert '<details id="desktop" open>' in desktop and 'Pick an app' in desktop
 
     @pytest.mark.asyncio
     async def test_unknown_and_inactive_tokens(self, server, db):
@@ -220,7 +232,7 @@ class TestPages:
         monkeypatch.setattr(nc.ReleaseCache, 'get', classmethod(lambda cls: None))
         server = WebAppServer(_config(), db, xui_service=Mock())
         body = (await self._get(server)).text
-        assert nc.RELEASES_URL in body and '/apk' not in body
+        assert nc.RELEASES_URL in body and f'href="{BASE}/apk"' not in body
 
     @pytest.mark.asyncio
     async def test_apk_redirects_to_the_build(self, server):
@@ -233,6 +245,14 @@ class TestPages:
     def test_routes(self, server):
         paths = {r.resource.canonical for r in server.app.router.routes()}
         assert {'/app', '/app/{token}', '/apk'} <= paths
+
+    def test_import_links(self):
+        url = 'https://x/sub/t'
+        assert nc.hiddify_link(url) == 'hiddify://import/https://x/sub/t#NekoVPN'
+        assert nc.flclash_link(url + '?format=clash') == (
+            'clash://install-config?url=https%3A%2F%2Fx%2Fsub%2Ft%3Fformat%3Dclash')
+        assert nc.karing_link(url) == (
+            'karing://install-config?url=https%3A%2F%2Fx%2Fsub%2Ft&name=NekoVPN')
 
     def test_open_page_falls_back_to_the_download_page(self):
         body = nc.render_open_page('https://x/sub/t?format=clash', 'ru',
