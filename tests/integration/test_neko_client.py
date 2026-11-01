@@ -203,11 +203,13 @@ class TestOpenPage:
         resp = await self._get(server, _token())
         assert resp.status == 200 and resp.content_type == 'text/html'
         body = resp.text
-        # The button is the intent link, HTML-escaped (& -> &amp;).
+        # The button is the intent link, HTML-escaped (& -> &amp;); without
+        # the app it falls back to our download page with this token.
+        download = f'https://dash.example.com/app/{_token()}'
         href = re.search(r'class="btn" href="([^"]+)"', body).group(1)
-        assert href.replace('&amp;', '&') == nc.intent_link(PROFILE)
+        assert href.replace('&amp;', '&') == nc.intent_link(PROFILE, download)
         assert f'value="{PROFILE}"' in body       # the copy fallback
-        assert 'Открыть в NekoVPN' in body and nc.RELEASES_URL in body
+        assert 'Открыть в NekoVPN' in body and f'href="{download}"' in body
         assert resp.headers['Cache-Control'] == 'no-store'
         assert resp.headers['Referrer-Policy'] == 'no-referrer'
         assert resp.headers['X-Robots-Tag'] == 'noindex'

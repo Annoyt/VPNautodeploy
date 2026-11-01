@@ -180,6 +180,9 @@ class WebAppServer:
         # One-tap import into the NekoVPN app (bot/services/neko_client.py):
         # Telegram buttons take only https, the page carries the app link.
         self.app.router.add_get('/open/{token}', self.handle_open)
+        self.app.router.add_get('/app', self.handle_app)
+        self.app.router.add_get('/app/{token}', self.handle_app)
+        self.app.router.add_get('/apk', self.handle_apk)
         # The NekoVPN app's signed remote settings (client plan E14).
         self.app.router.add_get('/neko/settings', self.handle_neko_settings)
         # The NekoVPN app's SOS button (client plan E16/E23).
@@ -1484,7 +1487,10 @@ class WebAppServer:
         ).decode()
         logger.info(f"open: NekoVPN import page for {user.chat_id}")
         return web.Response(
-            text=neko_client.render_open_page(url, getattr(user, 'lang', None)),
+            text=neko_client.render_open_page(
+                url, getattr(user, 'lang', None),
+                download=neko_client.download_page_url(self.config, user),
+            ),
             content_type='text/html',
             headers={
                 'Cache-Control': 'no-store',
@@ -1498,6 +1504,68 @@ class WebAppServer:
                 ),
             },
         )
+
+    _PAGE_HEADERS = {
+        'Cache-Control': 'no-store',
+        'Referrer-Policy': 'no-referrer',
+        'X-Robots-Tag': 'noindex',
+        'X-Frame-Options': 'DENY',
+        'Content-Security-Policy': (
+            "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; "
+            "form-action 'none'; frame-ancestors 'none'"
+        ),
+    }
+
+    async def handle_app(self, request: web.Request) -> web.Response:
+        """``GET /app`` and ``GET /app/<token>`` — the NekoVPN download page
+        (bot/services/neko_client.py): the APK for Android, a pointer to
+        Karing or FlClash elsewhere. With the /sub token the page also adds
+        the subscription after the install (its 404 and 410 are /sub's).
+        Never cached, no referrer, not indexed, no script."""
+        from bot.services import neko_client
+        from bot.services.demo_tiers import demo_traffic_gb
+        token = request.match_info.get('token')
+        user = None
+        if token is not None:
+            user = await asyncio.to_thread(
+                self.subscription.find_user_by_token, self.db, token,
+            )
+            if not user:
+                return web.Response(status=404, text='Not found')
+            if user.status not in neko_client.KEY_STATUSES:
+                return web.Response(status=410, text='Subscription inactive')
+            lang = getattr(user, 'lang', None)
+        else:
+            accept = (request.headers.get('Accept-Language') or '').lower()
+            lang = 'en' if accept and not accept.startswith('ru') else 'ru'
+        release = await asyncio.to_thread(neko_client.ReleaseCache.get)
+        base = (getattr(self.config, 'WEBAPP_URL', '') or '').rstrip('/')
+        demo_gb = (demo_traffic_gb(self.config, True), demo_traffic_gb(self.config, False))
+        if user is not None and user.status != 'demo':
+            demo_gb = None
+        page = neko_client.render_download_page(
+            platform=neko_client.platform_of(request.headers.get('User-Agent')),
+            lang=lang,
+            release=release,
+            apk_url=f'{base}/apk',
+            demo_gb=demo_gb,
+            profile_url=neko_client.profile_url(self.config, user) if user else None,
+            self_url=neko_client.download_page_url(self.config, user) if user else None,
+        )
+        return web.Response(text=page, content_type='text/html',
+                            headers=self._PAGE_HEADERS)
+
+    async def handle_apk(self, request: web.Request) -> web.Response:
+        """``GET /apk[?abi=…]`` — a stable link to the newest NekoVPN APK
+        (arm64-v8a unless asked otherwise); the release page while GitHub
+        cannot be asked."""
+        from bot.services import neko_client
+        release = await asyncio.to_thread(neko_client.ReleaseCache.get)
+        location = neko_client.apk_redirect(release, request.rel_url.query.get('abi'))
+        return web.Response(status=302, headers={
+            'Location': location, 'Cache-Control': 'no-store',
+            'Referrer-Policy': 'no-referrer',
+        })
 
     async def handle_rule_list(self, request: web.Request) -> web.Response:
         """One rule list as a mihomo rule-provider file (``format: yaml``).
