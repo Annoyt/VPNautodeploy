@@ -25,7 +25,8 @@ from bot.services.demo_tiers import (
     app_users, demo_traffic_gb, grant_app_allowance, mark_app_seen,
     neko_app_version,
 )
-from bot.services.neko_client import RELEASES_URL
+# The download page on the bot's own domain (config's WEBAPP_URL).
+DOWNLOAD = 'https://dash.example.com/app'
 
 pytestmark = pytest.mark.filterwarnings(
     "ignore:Database\\..*is deprecated:DeprecationWarning"
@@ -280,8 +281,8 @@ class TestMonthlyReset:
         assert [db.get_user(c).quota_gb for c in '123'] == [10.0, 5.0, 5.0]
         texts = {c.kwargs['chat_id']: c.kwargs['text']
                  for c in svc.bot.send_message.call_args_list}
-        assert 'трафик 10 ГБ' in texts['1'] and RELEASES_URL not in texts['1']
-        assert 'трафик 5 ГБ' in texts['3'] and RELEASES_URL in texts['3']
+        assert 'трафик 10 ГБ' in texts['1'] and DOWNLOAD not in texts['1']
+        assert 'трафик 5 ГБ' in texts['3'] and DOWNLOAD in texts['3']
         assert all(NOTE_RU in t for t in texts.values())
 
     def test_a_failed_renew_keeps_the_quota(self, db):
@@ -306,12 +307,12 @@ class TestQuotaWarnings:
     def test_a_demo_key_under_the_app_allowance_hears_of_the_app(self):
         for used in (4, 5):   # 80 % and 100 %
             text = self.warn(5, used, 'demo')
-            assert RELEASES_URL in text and NOTE_RU in text
+            assert DOWNLOAD in text and NOTE_RU in text
 
     def test_the_rule_alone_for_the_rest(self):
         for total, used, status in ((10, 9, 'demo'), (100, 100, 'paid')):
             text = self.warn(total, used, status)
-            assert RELEASES_URL not in text and NOTE_RU in text
+            assert DOWNLOAD not in text and NOTE_RU in text
 
 
 class TestTexts:
@@ -320,7 +321,7 @@ class TestTexts:
         from bot.handlers.callbacks.user import build_key_delivery_message
         text, _kb = build_key_delivery_message(seed(db, 1), config())
         assert 'Демо: 5 ГБ в месяц, с приложением NekoVPN — 10 ГБ' in text
-        assert RELEASES_URL in text and FLCLASH_RU in text
+        assert DOWNLOAD in text and FLCLASH_RU in text
         assert 'подписка в нём та же, что для FlClash' in text
 
     def test_the_iphone_card_names_no_flclash(self, db):

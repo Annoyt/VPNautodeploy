@@ -661,3 +661,17 @@ When the panel has lost a key holder's client (3x-ui detaches long-expired clien
   Tests: `tests/integration/test_paid_keys_audit.py`, using the shared fake `tests/integration/relational_panel.py`. 40 mutants killed, restored byte for byte with a hash check.
 - **Unchanged:** a lapsed payer whose client is still attached gets the key card, as with `/mykey`. **Not done:** a payer's first key (`_create_new_key`, no uuid yet) is still built from demo values.
 - **Tests:** `tests/integration/test_mykey_lost_key.py` (real sqlite; the fake panel has the fork's relational semantics), `tests/integration/test_xui_client_attached.py`, `TestPaidQuotaGb` in `tests/unit/test_billing.py`, the lost-key cases in `tests/unit/test_user_callbacks.py`, and `TestLostKeyReaddIsOneAttempt` in `tests/unit/test_get_key_handler_phase1.py`. 49 mutants killed (PR #32's re-add and the old fail-open gate put back among them), restored byte for byte with a hash check.
+
+### 45. NekoVPN download page: /app, /app/<token>, /apk (2026-11-01, client plan E35)
+
+Since 2026-10-31 every Android key holder gets the «📲 Открыть в NekoVPN» button, and the app gives demo keys 10 GB (§43). Until now, without the app installed, every link led to the GitHub release list: pre-releases with three APKs each. The download page on the bot's own domain replaces it (`bot/services/neko_client.py`).
+
+- **`GET /apk[?abi=…]`** — a 302 to the newest NekoVPN APK, arm64-v8a unless another ABI is asked for. It is a stable link that follows new releases. When GitHub cannot be asked, it goes to the release page.
+- **`GET /app`** chooses by User-Agent:
+  - Android: the download button (version, size), install steps and the other ABIs; how to add the subscription from the bot; for demo, both allowances.
+  - iPhone: Karing. Computers: FlClash.
+- **`GET /app/<token>`** (the /sub token, with /sub's 404 / 410) adds a step and a button. «Добавить подписку» is the same intent as on `/open`, with this page as its fallback. A payer sees no demo line.
+- **`/open/<token>`'s fallback** (the intent extra and the «Скачать» link) is now `/app/<token>` instead of the release list. The demo texts (§43: key card, /sub, warnings, the monthly notice) link to `/app`.
+- **Releases:** `ReleaseCache` asks `GET /repos/Annoyt/vpnautodeploy_client/releases` at most every 10 min; a failure is remembered for 1 min. It takes the newest non-draft `v…-neko.N` release with an arm64 APK; pre-releases count, since every build so far is one.
+- **Headers:** `no-store`, `no-referrer`, `noindex`, `DENY` framing, and a CSP without any script.
+- **Tests:** `tests/integration/test_neko_download.py` (real sqlite, GitHub faked); 15 mutants killed with a positional restore.

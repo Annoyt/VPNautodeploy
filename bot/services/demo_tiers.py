@@ -109,9 +109,9 @@ def grant_app_allowance(db, config, xui, chat_id) -> bool:
 
 # ---------- What the user reads ----------
 
-def _download_url() -> str:
-    from bot.services.neko_client import RELEASES_URL
-    return RELEASES_URL
+def _download_url(config) -> str:
+    from bot.services.neko_client import download_page_url
+    return download_page_url(config)
 
 
 def vpn_only_note(lang: str, ios: bool = False) -> str:
@@ -135,8 +135,8 @@ def app_hint(config, lang: str) -> str:
     """For a demo key on the other allowance: where the bigger one is."""
     app_gb = demo_traffic_gb(config, in_app=True)
     if lang == 'en':
-        return f"With the NekoVPN app (Android): {app_gb} GB a month: {_download_url()}"
-    return f"С приложением NekoVPN (Android) — {app_gb} ГБ в месяц: {_download_url()}"
+        return f"With the NekoVPN app (Android): {app_gb} GB a month: {_download_url(config)}"
+    return f"С приложением NekoVPN (Android) — {app_gb} ГБ в месяц: {_download_url(config)}"
 
 
 def demo_terms(config, lang: str, ios: bool = False) -> str:
@@ -147,12 +147,12 @@ def demo_terms(config, lang: str, ios: bool = False) -> str:
     other_gb = demo_traffic_gb(config, in_app=False)
     if lang == 'en':
         head = (f"🎁 <b>Demo: {other_gb} GB a month, {app_gb} GB with the NekoVPN "
-                f"app.</b> NekoVPN is Android-only for now: {_download_url()}")
+                f"app.</b> NekoVPN is Android-only for now: {_download_url(config)}")
         if not ios:   # a FlClash fork: it reads the FlClash link
             head += " — it takes the same link as FlClash."
     else:
         head = (f"🎁 <b>Демо: {other_gb} ГБ в месяц, с приложением NekoVPN — "
-                f"{app_gb} ГБ.</b> NekoVPN пока только для Android: {_download_url()}")
+                f"{app_gb} ГБ.</b> NekoVPN пока только для Android: {_download_url(config)}")
         if not ios:
             head += " — подписка в нём та же, что для FlClash."
     return f"{head}\n{vpn_only_note(lang, ios=ios)}"
