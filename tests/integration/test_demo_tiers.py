@@ -368,3 +368,41 @@ class TestNewKeys:
         client = xui.sync_user.call_args.args[1]
         assert client['totalGB'] == 3 * GB
         assert db.get_user('9').quota_gb == 3.0
+
+
+class TestPlanHeader:
+    """``nekovpn-plan``: what the NekoVPN app's quota card says."""
+
+    @pytest.mark.parametrize('status, extra, want', [
+        ('demo', {}, 'plan=demo; app=10; other=5'),
+        ('paid', {}, 'plan=paid'),
+        ('support_topic', {'previous_state': 'paid'}, 'plan=paid'),
+        ('support_topic', {'subscription_expiry': '2026-12-31T00:00:00'}, 'plan=paid'),
+        ('support_topic', {'previous_state': 'demo'}, 'plan=demo; app=10; other=5'),
+    ])
+    def test_the_plan(self, status, extra, want):
+        user = SimpleNamespace(status=status, **extra)
+        assert demo_tiers.plan_header(user, config()) == want
+
+    @pytest.mark.asyncio
+    async def test_the_clash_profile_carries_it(self, db):
+        user = seed(db, 1)
+        srv = _server(db, FakePanel())
+        clash = await _sub(srv, user.uuid, NEKO_UA, {'format': 'clash'})
+        assert clash.headers['nekovpn-plan'] == 'plan=demo; app=10; other=5'
+        singbox = await _sub(srv, user.uuid, 'HiddifyNext/2.5.7 (android)')
+        assert 'nekovpn-plan' not in singbox.headers
+        await _flush(srv)
+
+
+class TestStartBuy:
+
+    def test_start_buy_opens_the_plan_menu(self, db):
+        from bot.handlers.commands import CommandHandler
+        seed(db, 1)
+        update = {'message': {'text': '/start buy', 'chat': {'id': 1},
+                              'from': {'id': 1, 'username': 'u1'}}}
+        with patch('bot.handlers.payments.PaymentHandler._show_plan_menu') as menu:
+            CommandHandler(Mock(), db, config()).handle_start(update, '1')
+        menu.assert_called_once_with('1')
+

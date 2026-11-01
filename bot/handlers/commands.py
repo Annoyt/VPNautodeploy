@@ -117,6 +117,12 @@ class CommandHandler(BaseHandler):
         if len(words) > 1 and words[1].lower() == 'sos':
             self.handle_sos(update, chat_id)
             return
+        # t.me/<bot>?start=buy: the app's quota card, when the traffic
+        # runs out or the paid period ends (AGENTS.md section 46).
+        if len(words) > 1 and words[1].lower() == 'buy':
+            from bot.handlers.payments import PaymentHandler
+            PaymentHandler(self.bot, self.db, self.config)._show_plan_menu(str(chat_id))
+            return
 
         notifier = NotificationService(self.bot, self.db, self.config)
         
