@@ -1384,6 +1384,9 @@ class WebAppServer:
             mirrors = self._profile_mirror_urls(request, token)
             if mirrors:
                 headers['nekovpn-mirrors'] = ', '.join(mirrors)
+            # The NekoVPN app's quota card: which plan these bytes are.
+            from bot.services.demo_tiers import plan_header
+            headers['nekovpn-plan'] = plan_header(user, self.config)
         try:
             quota_bytes = int((user.quota_gb or 0) * BYTES_PER_GB)
             traffic = await self.xui.get_client_traffic(user.email) or {}

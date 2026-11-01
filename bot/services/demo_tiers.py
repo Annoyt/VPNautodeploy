@@ -179,3 +179,19 @@ def stats_footer(user, config, total_bytes) -> str:
     lines.append(vpn_only_note(lang, ios=ios))
     return '\n'.join(lines)
 
+
+def plan_header(user, config) -> str:
+    """The ``nekovpn-plan`` header of a Clash profile, for the NekoVPN app's
+    quota card: ``plan=paid`` for a payer (status 'paid', or a payer's open
+    ticket, told apart by the paid-until date or the paid previous state),
+    otherwise ``plan=demo; app=<GB>; other=<GB>`` with both allowances.
+    The used and total bytes stay in ``subscription-userinfo``."""
+    status = getattr(user, 'status', '') or ''
+    payer = status == 'paid' or (status == 'support_topic' and bool(
+        getattr(user, 'subscription_expiry', None)
+        or getattr(user, 'previous_state', None) == 'paid'))
+    if payer:
+        return 'plan=paid'
+    return (f'plan=demo; app={demo_traffic_gb(config, in_app=True)}; '
+            f'other={demo_traffic_gb(config, in_app=False)}')
+
