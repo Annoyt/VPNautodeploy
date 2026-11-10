@@ -773,3 +773,26 @@ Until now a demotion took effect only in the Clash profile's Cascade/Auto. Karin
   - Audit: `cascade_manual_demote|restore`, target `global:<proto>` / `asn:<ASN>:<proto>`.
 - **C7, slow probes, normal users.** A probe DEGRADED (R2) is vetoed while that protocol's users keep connecting at ≥ 50 % of their usual pace (last 2 h vs the median of the same block over 7 days, median ≥ 50; `dpi_metrics`: reality / cf-ws / ss2022 / hy2-8400). The veto is logged and lands in `signals['probe']['vetoed']`. A dark probe is never vetoed. Missing exit reports read as few connections, so there is no veto and the probe rule stands.
 - **Tests:** `tests/integration/test_demotion_acts.py` (47, including the hiddify-core run). Updated: package A's demotion test (now the manual pick only), two DPIMonitor tests (restores in the same run; the `demotions` key in the state shape), the /cascade footer and reset wording.
+
+### 50. The healthcheck on a timer, the agent as an adviser, usage and hy2 sessions (2026-11-11, plan F, package D)
+
+Package D of `docs/IMPROVEMENT_PLAN.md` section F. **Nothing here runs until it is installed**: the timer on entry, the reporter on exit.
+
+- **D1, the healthcheck on its own.** `scripts/protocol_healthcheck.py` gets `findings` (`findings_for(layers)`, pure): facts that break users before the probes go dark, judged whatever the probe verdict says.
+  - The facts: the Reality dest cert (> 7000 B warn, > 8000 B critical), missing entry UDP DNAT for hy2 (critical) or hy2t (warn), missing exit hop REDIRECTs (warn), hysteria / hysteria-turbo / shadow-tls units not active, a BROKEN panel field audit (critical).
+  - `--post URL` sends the report, without `layers_raw`, with `X-DPI-Token` = `DPI_REPORT_TOKEN` read from `/opt/vpn-bot/.env`.
+  - `systemd/protocol-healthcheck.{service,timer}`: every 15 min, as root on ENTRY, `SuccessExitStatus=1 2`, about 15 s of the single core. Install: copy both units to `/etc/systemd/system`, then `systemctl daemon-reload && systemctl enable --now protocol-healthcheck.timer`.
+  - The bot stores reports in `healthcheck_reports` (`POST /api/healthcheck/report`, the exit report's token, ≤ 256 KB, kept 7 days). `check_healthcheck` turns each finding into `healthcheck:<key>`, with the script's next command in the detail and no agent turn.
+  - A report older than 45 min pages only `healthcheck:stale` (its findings are not trusted). Three runs in a row with exit code 2 page `healthcheck:blind`. No report ever means the timer is not installed, and the check says nothing. Recoveries are posted (`RECOVERY_PREFIXES`).
+- **D2, the agent proposes, the admin presses** (`bot/services/agent_actions.py`).
+  - The protocol prompt asks for one more line: `ДЕЙСТВИЕ: restart_xray | demote <protocol> | нет`. The bot parses it; anything off the list is ignored. It shows a ▶️ button under the diagnosis: `agent_act:<action>:<arg>:<unix ts>`.
+  - `AgentActionHandler` (admins only; the data is checked again; buttons older than 2 h are refused) runs ordinary code. `restart_xray` is the panel's restart via `XUIService._run_sync(api.restart_xray())`; `demote` is a 6-h hand demotion (`cascade_manual`, §49). It edits the message with the result and audits `agent_action_<action>`.
+  - The model runs nothing itself: on 2026-08-30 it proposed an ALTER TABLE on prod.
+- **D3, who uses which protocol.** Each exit report's presence block (email → chat_id via `users.email`) adds the window's accepted connections to `protocol_usage(day, chat_id, proto, conns)` (kept 90 days). This covers every xray client, Hiddify included, which sends no telemetry.
+  - `/usage [days]` (1–30, default 7) prints distinct users per network (`users.last_asn`, «?» = never fetched a profile from its network) × protocol, with hy2 from `hy2_auth_log`.
+- **D4, hy2 session lengths.** `scripts/exit_dpi_reporter.py` reads the hysteria journal (`journalctl -o json -u hysteria -u hysteria-turbo --after-cursor`).
+  - It pairs `client connected` / `client disconnected` by (unit, id); the addr changes with port hopping. Open connects carry over in its state, are forgotten after 24 h, and the probe client is left out.
+  - It sends `hy2_sessions: [{id, unit, duration_s, error}]` with the report. The cursor advances only when the bot took the report.
+  - The bot stores `hy2_sessions` (reason normalized: idle-timeout / closed-by-server / closed-by-client / timeout / reset / other; kept 30 days). `/protocols` adds «⏱ hy2 сессии за 24 ч: N, медиана …, ≥ 30 мин — …%, чаще всего кончаются: …».
+  - **Exit-side**: copy the reporter to exit (`/usr/local/bin`), as for §48.
+- **Tests:** `tests/integration/test_adviser.py` (42: findings, the POST, the endpoint's gates, the alerts incl. stale / blind / recovery, action parsing / buttons / execution / handler, usage, sessions), `TestHy2Sessions` in `tests/unit/test_exit_dpi_reporter.py`, and the schema test. 22 mutants killed, restored by reverse text replacement with a hash check.

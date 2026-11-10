@@ -32,7 +32,9 @@ import json
 import logging
 import os
 import re
+import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 
@@ -198,6 +200,78 @@ def parse_presence(lines) -> list:
     ]
 
 
+# ---- hy2 sessions from the hysteria journal (IMPROVEMENT_PLAN F, D4) --------
+# "client connected {"addr": "...", "id": "<email>", "tx": 0}" and
+# "client disconnected {"addr": "...", "id": "<email>", "error": "..."}" on
+# both instances. The addr changes with port hopping, so a session is paired
+# by (unit, id): a disconnect closes the oldest open connect of that client.
+HYSTERIA_UNITS = ("hysteria", "hysteria-turbo")
+HY_EVENT_RE = re.compile(r"client (connected|disconnected)\s+(\{.*\})")
+HY_OPEN_MAX = 20                 # open connects remembered per client
+HY_OPEN_MAX_AGE_S = 24 * 3600    # a connect never closed is forgotten after a day
+HY_SESSIONS_MAX = 1000           # per report
+
+
+def read_hysteria_events(state: dict) -> list:
+    """``[(unit, epoch_s, kind, id, error)]`` since the stored journal
+    cursor (the first run starts 10 minutes back); the new cursor goes into
+    ``state['journal_cursor']``. journalctl missing or failing = no events."""
+    cmd = ["journalctl", "-o", "json", "--no-pager"]
+    for unit in HYSTERIA_UNITS:
+        cmd += ["-u", unit]
+    cursor = state.get("journal_cursor")
+    cmd += ["--after-cursor", cursor] if cursor else ["--since", "-10min"]
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=30).stdout
+    except (OSError, subprocess.SubprocessError) as e:
+        logger.warning(f"journalctl failed: {e}")
+        return []
+    events = []
+    for line in out.splitlines():
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        state["journal_cursor"] = entry.get("__CURSOR") or state.get("journal_cursor")
+        m = HY_EVENT_RE.search(str(entry.get("MESSAGE") or ""))
+        if not m:
+            continue
+        try:
+            fields = json.loads(m.group(2))
+            epoch = int(entry.get("__REALTIME_TIMESTAMP") or 0) / 1e6
+        except (ValueError, TypeError):
+            continue
+        unit = str(entry.get("_SYSTEMD_UNIT") or "").replace(".service", "")
+        events.append((unit, epoch, m.group(1), str(fields.get("id") or ""),
+                       str(fields.get("error") or "")))
+    return events
+
+
+def pair_sessions(events: list, state: dict, now: float) -> list:
+    """Sessions closed by ``events``: ``[{id, unit, duration_s, error}]``.
+    Open connects carry over in ``state['hy2_open']``. The probe client is
+    left out, as in the presence block."""
+    open_ = state.setdefault("hy2_open", {})
+    sessions = []
+    for unit, epoch, kind, cid, error in events:
+        if not cid or cid.startswith("probe"):
+            continue
+        key = f"{unit}|{cid}"
+        if kind == "connected":
+            starts = open_.setdefault(key, [])
+            starts.append(epoch)
+            del starts[:-HY_OPEN_MAX]
+        elif open_.get(key):
+            start = open_[key].pop(0)
+            sessions.append({"id": cid, "unit": unit,
+                             "duration_s": max(0, int(epoch - start)), "error": error[:160]})
+    for key in list(open_):
+        open_[key] = [t for t in open_[key] if now - t < HY_OPEN_MAX_AGE_S]
+        if not open_[key]:
+            del open_[key]
+    return sessions[:HY_SESSIONS_MAX]
+
+
 def parse_rejects(lines) -> list:
     """Aggregate reject/probe events per (kind, reason) with IP counts."""
     buckets: dict = {}
@@ -271,6 +345,10 @@ def run_once() -> int:
     access = parse_access(access_lines)
     presence = parse_presence(access_lines)
     rejects = parse_rejects(error_lines)
+    # The journal cursor and the open connects advance with the offsets,
+    # only once the bot took the report.
+    pending = json.loads(json.dumps(state))
+    hy2_sessions = pair_sessions(read_hysteria_events(pending), pending, time.time())
 
     # Posted even when there is nothing to say (a quiet window, the
     # first-run baseline): the bot keeps one exit_reports row per report
@@ -278,17 +356,20 @@ def run_once() -> int:
     # exit did not report" from "nobody connected". An empty window used
     # to send nothing, which read as a missing report.
     ok = post_report(
-        {"access": access, "rejects": rejects, "presence": presence}
+        {"access": access, "rejects": rejects, "presence": presence,
+         "hy2_sessions": hy2_sessions}
     )
     if not ok:
         # Leave offsets untouched: the same window is retried next tick.
         return 1
-    state.update({"access": access_off, "error": error_off})
+    state.update({"access": access_off, "error": error_off,
+                  "journal_cursor": pending.get("journal_cursor"),
+                  "hy2_open": pending.get("hy2_open", {})})
     _save_state(state)
     logger.info(
         f"reported {sum(a['conns'] for a in access)} conns / "
         f"{sum(r['count'] for r in rejects)} rejects / "
-        f"{len(presence)} present users"
+        f"{len(presence)} present users / {len(hy2_sessions)} hy2 sessions"
     )
     return 0
 

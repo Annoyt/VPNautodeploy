@@ -682,6 +682,70 @@ def _hy2_suspects(tag: str, b: dict, c: dict, entry_dnat: set, exit_hop: set) ->
     return out
 
 
+# Findings (IMPROVEMENT_PLAN F, D1): facts that break users BEFORE the probes
+# go dark, judged on their own, whatever the probe verdict says. The bot turns
+# each into an alert ``healthcheck:<key>`` when this script runs on its timer
+# (systemd/protocol-healthcheck.timer, --post). Severity: what is already
+# broken for users is critical, what is about to be is warn.
+CERT_WARN_BYTES = 7000       # the dest cert is creeping towards the 8192 buffer
+
+
+def findings_for(layers: dict) -> List[dict]:
+    """``[{key, severity, title, next}]`` from the raw layers. Pure."""
+    a = layers.get('a') or {}
+    b = layers.get('b') or {}
+    c = layers.get('c') or {}
+    out: List[dict] = []
+    audit = _audit_flags(a.get('audit') or {}) if a.get('ok') else None
+    if audit and audit['rc'] == 1:
+        where = ', '.join(sorted(audit['broken_inbounds'])) or 'см. строки аудита'
+        out.append({'key': 'panel_audit', 'severity': 'critical',
+                    'title': f'аудит панели: поля клиентов сломаны ({where})',
+                    'next': 'docker exec -e PYTHONPATH=/app vpn-bot python3 '
+                            '/app/scripts/verify_panel_client_fields.py'})
+    if c.get('ok'):
+        cert_len = c.get('cert_record_len')
+        if cert_len is None:
+            cert_len = parse_cert_record_len(c.get('cert_lines'))
+        sni = c.get('cert_sni') or DEFAULT_SNI
+        if cert_len is not None and cert_len > CERT_WARN_BYTES:
+            over = cert_len > CERT_LIMIT_BYTES
+            out.append({'key': 'reality_dest_cert', 'severity': 'critical' if over else 'warn',
+                        'title': (f'сертификат Reality-dest {sni}: {cert_len} байт '
+                                  f'(предел xray 8192, порог {CERT_LIMIT_BYTES})'),
+                        'next': 'scripts/rotate_reality_dest.py --sni <host>  # см. AGENTS.md §23'})
+        for tag, unit in HYSTERIA_UNIT.items():
+            svc = (c.get('services') or {}).get(unit)
+            if svc and svc != 'active':
+                out.append({'key': f'unit:{unit}',
+                            'severity': 'critical' if tag == 'hy2' else 'warn',
+                            'title': f'{unit} на exit: {svc}',
+                            'next': f"ssh exit-node 'systemctl status {unit} --no-pager'"})
+        if c.get('nat_prerouting'):
+            hop = parse_redirect_rules(c.get('nat_prerouting'))
+            for tag, rules in EXIT_HOP_FOR.items():
+                missing = [f'{d}→:{p}' for d, p in rules if (d, p) not in hop]
+                if missing:
+                    out.append({'key': f'exit_hop:{tag}', 'severity': 'warn',
+                                'title': f'{tag}: нет REDIRECT {", ".join(missing)} на exit (порт-хоп)',
+                                'next': "ssh exit-node \"iptables -t nat -S PREROUTING | grep -E '8400|8402'\""})
+    if b.get('ok'):
+        dnat = parse_dnat_rules(b.get('nat_prerouting'))
+        for tag, rules in ENTRY_DNAT_FOR.items():
+            missing = [f'{d}→:{p}' for d, p in rules if (d, p) not in dnat]
+            if missing:
+                out.append({'key': f'entry_dnat:{tag}',
+                            'severity': 'critical' if tag == 'hy2' else 'warn',
+                            'title': f'{tag}: нет UDP DNAT {", ".join(missing)} на entry',
+                            'next': "iptables -t nat -S PREROUTING | grep -E '8400|8402|dport 443'"})
+        stls = (b.get('services') or {}).get('shadow-tls')
+        if stls and stls != 'active':
+            out.append({'key': 'unit:shadow-tls', 'severity': 'critical',
+                        'title': f'shadow-tls на entry: {stls}',
+                        'next': 'systemctl status shadow-tls --no-pager'})
+    return out
+
+
 def assess(layers: dict, now: Optional[datetime] = None) -> dict:
     """Pure: three layer dicts → report with per-protocol state, evidence,
     ranked suspects, verdict line and exit code. Never raises on missing
@@ -1031,6 +1095,7 @@ def assess(layers: dict, now: Optional[datetime] = None) -> dict:
         'exit_code': exit_code,
         'protocols': protocols,
         'suspects': suspects,
+        'findings': findings_for(layers),
         'layers': {
             'a': 'ok' if a_ok else f'FAILED: {a.get("error") or "нет данных"}',
             'b': 'ok' if b.get('ok') else f'FAILED: {b.get("error") or "нет данных"}',
@@ -1142,11 +1207,35 @@ def render_human(report: dict) -> str:
 # CLI
 # ---------------------------------------------------------------------------
 
+def post_report(url: str, report: dict, token: Optional[str] = None) -> bool:
+    """POST the report (without the raw layers) to the bot's
+    /api/healthcheck/report. True on a 2xx. Never raises: the report still
+    goes to stdout and the exit code still tells what was found."""
+    token = token or _read_env_value(BOT_ENV, 'DPI_REPORT_TOKEN') or ''
+    if not token:
+        print(f'healthcheck: DPI_REPORT_TOKEN not found in {BOT_ENV}', file=sys.stderr)
+        return False
+    body = json.dumps({k: v for k, v in report.items() if k != 'layers_raw'},
+                      ensure_ascii=False, default=str).encode('utf-8')
+    req = urllib.request.Request(url, data=body, method='POST', headers={
+        'Content-Type': 'application/json', 'X-DPI-Token': token})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return 200 <= resp.status < 300
+    except Exception as e:
+        print(f'healthcheck: POST {url} failed: {e}', file=sys.stderr)
+        return False
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(description='Deterministic protocol health check (run as root on entry).')
     ap.add_argument('--json', action='store_true', help='machine-readable report')
     ap.add_argument('--sni', default=None,
                     help=f'Reality dest to measure (default: SNI_VALUE from {BOT_ENV}, else {DEFAULT_SNI})')
+    ap.add_argument('--post', default=None, metavar='URL',
+                    help='POST the report to the bot (the timer: '
+                         'http://127.0.0.1:8080/api/healthcheck/report); the token is '
+                         f'DPI_REPORT_TOKEN from {BOT_ENV}')
     args = ap.parse_args(argv)
 
     sni = args.sni or _read_env_value(BOT_ENV, 'SNI_VALUE') or DEFAULT_SNI
@@ -1155,6 +1244,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 2
     layers = collect_all(sni)
     report = assess(layers)
+    if args.post:
+        if not post_report(args.post, report):
+            print('healthcheck: report POST failed', file=sys.stderr)
     if args.json:
         report['layers_raw'] = layers
         print(json.dumps(report, ensure_ascii=False, indent=1, default=str))

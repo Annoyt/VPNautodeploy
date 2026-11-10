@@ -26,6 +26,8 @@ ADMIN_HELP_TEXT = (
     "<code>/cascade demote hy2 [AS…] [6h]</code> / <code>restore</code> — "
     "понизить вручную на срок / снять, <code>/cascade off</code> / "
     "<code>on</code> — пауза монитора\n"
+    "• <code>/usage</code> — кто каким протоколом ходит, по операторам "
+    "(за 7 дней; <code>/usage 1</code>…<code>30</code>)\n"
     "• <code>/lockdown</code> — режим белых списков (шатдаун): статус, "
     "детектор, каскады; <code>/lockdown on</code> / <code>off</code> / "
     "<code>auto</code> — зафиксировать / вернуть детектору\n"
@@ -150,6 +152,9 @@ class AdminHandlerBase(BaseHandler):
         # demotion loop (IMPROVEMENT_PLAN A1): an automatic actor the
         # operator cannot see or undo in one move is worse than none.
         '/cascade': 'show_cascade',
+        # Who uses which protocol, per operator — added 2026-11
+        # (IMPROVEMENT_PLAN F, D3; mixin: ops.py).
+        '/usage': 'show_usage',
         # Whitelist / shutdown mode — added 2026-09 (IMPROVEMENT_PLAN
         # B1): the detector in DPIMonitor's tick raises it on its own;
         # the operator pins it on/off or hands it back here.

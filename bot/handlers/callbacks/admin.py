@@ -656,6 +656,48 @@ class AlertAckHandler(BaseCallbackHandler):
                     logger.warning(f"alert ack: edit failed: {e}")
 
 
+class AgentActionHandler(BaseCallbackHandler):
+    """The ▶️ button under the agent's diagnosis (IMPROVEMENT_PLAN F, D2):
+    runs the one whitelisted action the agent proposed
+    (``bot/services/agent_actions.py``). Admins only; the button's data is
+    client-supplied and checked again; a stale button is refused."""
+
+    CALLBACK_PATTERN = 'agent_act:'
+
+    def can_handle(self, callback_data: str) -> bool:
+        return callback_data.startswith(self.CALLBACK_PATTERN)
+
+    def handle(self, update: dict, chat_id: str, user_id: str, **kwargs) -> None:
+        try:
+            self.validator.validate_admin(user_id)
+        except PermissionDeniedError:
+            self.bot.send_message(chat_id=user_id, text="❌ No permission.")
+            return
+        from bot.services import agent_actions
+        parsed = agent_actions.parse_callback(kwargs.get('data', ''))
+        cb_msg = update.get('callback_query', {}).get('message', {})
+        msg_id = cb_msg.get('message_id')
+        msg_chat = (cb_msg.get('chat') or {}).get('id')
+        if isinstance(parsed, str):
+            result = f"❌ {parsed}"
+        else:
+            xui = (self.bot.services.get('xui')
+                   if hasattr(self.bot, 'services') else None)
+            result = agent_actions.execute(*parsed, db=self.db, config=self.config,
+                                           xui=xui, admin_id=str(user_id))
+        if msg_id and msg_chat is not None:
+            try:
+                # The button goes: an action runs once.
+                self.bot.client.edit_message_text(
+                    chat_id=str(msg_chat), message_id=msg_id,
+                    text=f"{cb_msg.get('text', '')}\n\n{result}",
+                )
+                return
+            except Exception as e:
+                logger.warning(f"agent action: edit failed: {e}")
+        self.bot.send_message(chat_id=user_id, text=result)
+
+
 class BanFromTicketHandler(BaseCallbackHandler):
     """Inline "🚫 Бан" button on the Support Request post.
 

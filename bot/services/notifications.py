@@ -2521,8 +2521,15 @@ class NotificationService:
                         f"older than {self.DPI_METRICS_RETENTION_DAYS}d"
                     )
                 # The exit report heartbeat (B2) lives as long as the
-                # rows it vouches for.
+                # rows it vouches for; the hy2 sessions (D4) as long.
                 conn.execute("DELETE FROM exit_reports WHERE ts < ?", (cutoff,))
+                conn.execute("DELETE FROM hy2_sessions WHERE ended_at < ?", (cutoff,))
+                # Healthcheck reports (D1): a week is plenty to look back.
+                conn.execute("DELETE FROM healthcheck_reports WHERE ts < ?",
+                             ((datetime.utcnow() - timedelta(days=7)).isoformat(),))
+                # Protocol usage (D3): one row per user, protocol and day.
+                conn.execute("DELETE FROM protocol_usage WHERE day < ?",
+                             ((datetime.utcnow() - timedelta(days=90)).strftime('%Y-%m-%d'),))
         except Exception as e:
             logger.exception(f"dpi_metrics cleanup failed: {e}")
 

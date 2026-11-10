@@ -85,7 +85,8 @@ class TestDatabase:
         
         for table in ['users', 'admin_actions', 'xui_synced', 'message_map',
                       'client_probe', 'client_apps', 'outbound_bulk',
-                      'exit_reports', 'alert_state']:
+                      'exit_reports', 'alert_state', 'healthcheck_reports',
+                      'protocol_usage', 'hy2_sessions']:
             c.execute(f"SELECT name FROM sqlite_master WHERE type='table' AND name='{table}'")
             assert c.fetchone() is not None, f"Table {table} not created"
         

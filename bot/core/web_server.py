@@ -175,6 +175,7 @@ class WebAppServer:
         self.app.router.add_post('/api/hy2/auth', self.handle_hy2_auth)
         self.app.router.add_post('/api/hy2t/auth', self.handle_hy2t_auth)
         self.app.router.add_post('/api/dpi/exit_report', self.handle_dpi_exit_report)
+        self.app.router.add_post('/api/healthcheck/report', self.handle_healthcheck_report)
         # Sing-box subscription endpoint. Public — the path token is
         # the auth (HMAC of the user's UUID with BOT_TOKEN as key).
         # Returns the user's full cascade as one config the client
@@ -886,6 +887,7 @@ class WebAppServer:
             return web.json_response({'ok': False}, status=400)
 
         await asyncio.to_thread(self._store_presence, payload or {})
+        await asyncio.to_thread(self._store_hy2_sessions, payload or {})
 
         rows = await asyncio.to_thread(self._dpi_exit_rows, payload or {})
         # The heartbeat (IMPROVEMENT_PLAN F, B2): one row per report, an
@@ -908,6 +910,115 @@ class WebAppServer:
                 logger.warning(f"dpi_exit_report: insert failed: {e}")
                 return web.json_response({'ok': False}, status=500)
         return web.json_response({'ok': True, 'rows': len(rows)})
+
+    # The healthcheck report (D1) is small JSON; a bigger body is junk.
+    HEALTHCHECK_MAX_BYTES = 256 * 1024
+
+    async def handle_healthcheck_report(self, request: web.Request) -> web.Response:
+        """POST /api/healthcheck/report — scripts/protocol_healthcheck.py
+        on its timer on entry (IMPROVEMENT_PLAN F, D1, ``--post``). Same
+        shared token as the exit report. Stores the report; the alert
+        ``check_healthcheck`` reads the newest one."""
+        expected = (getattr(self.config, 'DPI_REPORT_TOKEN', '') or '').strip()
+        got = request.headers.get('X-DPI-Token', '')
+        if not expected or not hmac.compare_digest(got, expected):
+            return web.json_response({'ok': False}, status=403)
+        length = request.content_length
+        if length is not None and length > self.HEALTHCHECK_MAX_BYTES:
+            return web.json_response({'ok': False}, status=413)
+        try:
+            raw = await request.read()
+            if len(raw) > self.HEALTHCHECK_MAX_BYTES:
+                return web.json_response({'ok': False}, status=413)
+            payload = json.loads(raw.decode('utf-8'))
+        except Exception:
+            return web.json_response({'ok': False}, status=400)
+        if not isinstance(payload, dict):
+            return web.json_response({'ok': False}, status=400)
+        try:
+            exit_code = int(payload.get('exit_code'))
+        except (TypeError, ValueError):
+            exit_code = None
+        verdict = str(payload.get('verdict') or '')[:500]
+        ok = await asyncio.to_thread(self._store_healthcheck, exit_code, verdict, payload)
+        return web.json_response({'ok': ok}, status=200 if ok else 500)
+
+    def _store_healthcheck(self, exit_code, verdict: str, payload: dict) -> bool:
+        from datetime import datetime
+        try:
+            with self.db._connect() as conn:
+                conn.execute(
+                    "INSERT INTO healthcheck_reports (ts, exit_code, verdict, report_json) "
+                    "VALUES (?, ?, ?, ?)",
+                    (datetime.utcnow().isoformat(), exit_code, verdict,
+                     json.dumps(payload, ensure_ascii=False, default=str)),
+                )
+                conn.commit()
+            return True
+        except Exception as e:
+            logger.warning(f"healthcheck report: insert failed: {e}")
+            return False
+
+    # D4: why a hy2 session ended, from hysteria's "client disconnected"
+    # error text, in a few stable words.
+    _HY2_END_REASONS = (
+        ('no recent network activity', 'idle-timeout'),
+        ('application error 0x107', 'closed-by-server'),
+        ('application error 0x100', 'closed-by-client'),
+        ('timeout', 'timeout'),
+        ('reset', 'reset'),
+    )
+
+    def _store_hy2_sessions(self, payload: dict) -> int:
+        """hy2 sessions the exit reporter paired from the hysteria journal
+        (``hy2_sessions``: ``[{id, unit, duration_s, error}]``) → the
+        ``hy2_sessions`` table, ``id`` (the email hysteria logs) resolved to
+        a chat_id. Never raises: a malformed block must not cost the
+        heatmap rows."""
+        items = payload.get('hy2_sessions') or []
+        if not isinstance(items, list) or not items:
+            return 0
+        from datetime import datetime
+        ts = datetime.utcnow().isoformat()
+        rows = []
+        emails = set()
+        for item in items[:2000]:
+            if not isinstance(item, dict):
+                continue
+            try:
+                duration = int(item.get('duration_s'))
+            except (TypeError, ValueError):
+                continue
+            if duration < 0:
+                continue
+            email = str(item.get('id') or '').strip()
+            unit = str(item.get('unit') or '').strip()[:32]
+            err = str(item.get('error') or '').lower()
+            reason = next((label for needle, label in self._HY2_END_REASONS if needle in err),
+                          'other' if err else 'none')
+            rows.append((email, unit, duration, reason))
+            if email:
+                emails.add(email)
+        if not rows:
+            return 0
+        try:
+            with self.db._connect() as conn:
+                chat_of = {}
+                if emails:
+                    marks = ','.join('?' * len(emails))
+                    chat_of = {e: c for e, c in conn.execute(
+                        f"SELECT email, chat_id FROM users WHERE email IN ({marks})",
+                        tuple(emails)).fetchall()}
+                conn.executemany(
+                    "INSERT INTO hy2_sessions (ended_at, chat_id, instance, duration_s, reason) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    [(ts, chat_of.get(e), u, d, r) for e, u, d, r in rows],
+                )
+                conn.commit()
+        except Exception as e:
+            logger.warning(f"dpi_exit_report: hy2 sessions insert failed: {e}")
+            return 0
+        return len(rows)
 
     def _store_exit_heartbeat(self, rows: int) -> None:
         """``exit_reports`` row for one received report. Never raises: a
@@ -972,7 +1083,35 @@ class WebAppServer:
         except Exception as e:
             logger.warning(f"dpi_exit_report: presence upsert failed: {e}")
             return 0
+        self._store_protocol_usage(rows)
         return len(rows)
+
+    def _store_protocol_usage(self, rows: list) -> None:
+        """D3: add this report's per-user accepted connections to the day's
+        ``protocol_usage`` (the presence block is per window, so it sums).
+        A user switching protocols within a window shows under the one it
+        ended on — the reporter keeps the last tag. Never raises."""
+        day = rows[0][4][:10] if rows else None
+        if not day:
+            return
+        try:
+            with self.db._connect() as conn:
+                emails = sorted({r[0] for r in rows})
+                marks = ','.join('?' * len(emails))
+                chat_of = {e: c for e, c in conn.execute(
+                    f"SELECT email, chat_id FROM users WHERE email IN ({marks})",
+                    tuple(emails)).fetchall()}
+                usage = [(day, str(chat_of[e]), proto, int(conns or 0))
+                         for e, _tag, proto, conns, _ts in rows if chat_of.get(e)]
+                conn.executemany(
+                    "INSERT INTO protocol_usage (day, chat_id, proto, conns) VALUES (?, ?, ?, ?) "
+                    "ON CONFLICT(day, chat_id, proto) DO UPDATE SET "
+                    "conns = conns + excluded.conns",
+                    usage,
+                )
+                conn.commit()
+        except Exception as e:
+            logger.warning(f"dpi_exit_report: protocol usage upsert failed: {e}")
 
     def _dpi_exit_rows(self, payload: dict) -> list:
         """Geo-bucket the exit report into dpi_metrics row tuples."""
