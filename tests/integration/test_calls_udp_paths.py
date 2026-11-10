@@ -322,7 +322,10 @@ class TestKit:
         clash = json.loads(files[sos.KIT_YAML_NAME])
         calls = next(o for o in singbox['outbounds'] if o['tag'] == 'calls')
         group = next(g for g in clash['proxy-groups'] if g['name'] == 'Calls')
-        assert calls['outbounds'] == group['proxies'] == _names('reality', 'de', 'hy2')
+        # the .json is Hiddify's (package C): its demoted servers carry the marker
+        hide = f' {SubscriptionService.HIDE_MARKER}'
+        assert [t.replace(hide, '') for t in calls['outbounds']] == group['proxies'] \
+            == _names('reality', 'de', 'hy2')
 
 
 # ----------------------------------------------------------------- A4 --------

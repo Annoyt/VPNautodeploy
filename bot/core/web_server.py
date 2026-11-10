@@ -1629,18 +1629,21 @@ class WebAppServer:
         abroad = ru_exit is not None
         text_body = None
 
-        def demoted_here() -> frozenset:
+        def demoted_here(personal: bool = True) -> frozenset:
             # What is demoted for this user: DPIMonitor's and the
             # operator's demotions for this network, plus what the user's
             # own client stopped passing (IMPROVEMENT_PLAN F, C3). E3/C1:
             # Cascade/Auto (Clash) and auto (sing-box) leave it out, the
             # manual pick keeps it; both profiles move it to the end of the
             # calls group (A2). Tolerant reads — junk collapses to nothing.
+            # Runs on a worker thread: two sqlite reads per fetch.
             from bot.services.personal_demotion import personal_dark
-            network = MyKeyAnswerHandler.get_auto_demotions(
+            network = frozenset(MyKeyAnswerHandler.get_auto_demotions(
                 self.db, asn or getattr(user, 'last_asn', None),
-            )
-            return frozenset(network) | personal_dark(
+            ))
+            if not personal:
+                return network
+            return network | personal_dark(
                 self.db, getattr(user, 'chat_id', None), cascade)
 
         if abroad_clash is not None:
@@ -1649,7 +1652,8 @@ class WebAppServer:
             config_obj = abroad_obj
         elif fmt == 'clash':
             text_body = self.subscription.build_clash_config(
-                user, cascade, lockdown=lockdown, demoted=demoted_here(),
+                user, cascade, lockdown=lockdown,
+                demoted=await asyncio.to_thread(demoted_here),
             )
         elif fmt == 'links' or (not fmt and 'happ' in ua):
             text_body = self.subscription.build_links(user, cascade)
@@ -1657,10 +1661,14 @@ class WebAppServer:
             config_obj = self.subscription.build_xray_config(user, cascade)
         else:
             # C2: Hiddify drops the profile's groups, so only the §hide§
-            # marker keeps a server out of its balancer.
+            # marker keeps a server out of its balancer. There a demotion
+            # hides the server, and the user's own telemetry came from
+            # another device (Hiddify sends none): network demotions only.
+            hiddify = 'hiddify' in ua
             config_obj = self.subscription.build_singbox_config(
-                user, cascade, lockdown=lockdown, demoted=demoted_here(),
-                hiddify='hiddify' in ua,
+                user, cascade, lockdown=lockdown,
+                demoted=await asyncio.to_thread(demoted_here, not hiddify),
+                hiddify=hiddify,
             )
 
         # Surface quota/expiry to Hiddify's profile panel via the

@@ -278,11 +278,14 @@ class TestPersonalDemotion:
 
 # ------------------------------------------------------------------ C4 -------
 
-def _seed_client(db, chat_id, asn, protos, status='paid'):
+def _seed_client(db, chat_id, asn, protos, status='paid',
+                 seen=('reality', 'hy2', 'ws', 'stls')):
     with db._connect() as conn:
         conn.execute("INSERT OR REPLACE INTO users (chat_id, username, status, last_asn) "
                      "VALUES (?,?,?,?)", (chat_id, chat_id, status, asn))
         conn.commit()
+    for p in seen:                      # every protocol passed a day ago
+        _probe_rows(db, chat_id, f'p-{p}', 1, minutes_ago=24 * 60)
     for p in protos:
         _probe_rows(db, chat_id, f'p-{p}', 3)
 
@@ -383,12 +386,26 @@ class TestHandDemotions:
         assert cascade_manual.demoted_for(db, 'AS31133', now + timedelta(hours=7)) == set()
 
     def test_the_monitor_never_touches_them(self, db):
+        # hy2 demoted by hand AND by the monitor's probe rule; hy2's probes
+        # are measured and healthy, so the monitor restores ITS entry over
+        # the run — the hand entry must outlive that
         cascade_manual.demote(db, 'hy2', None, timedelta(hours=6), by='admin:1')
+        start = datetime.utcnow()
+        db.set_setting('cascade_auto', json.dumps({'global': {'hy2': {
+            'since': (start - timedelta(hours=2)).isoformat(), 'reason': 'probe_dark',
+            'evidence': 'x'}}, 'asn': {}}))
         monitor = DPIMonitor(db, Mock(), None)
-        for _ in range(8):
-            monitor.run_once()
-        assert MK.get_auto_demotions(db, None) == {'hy2'}
+        for i in range(8):
+            now = start + timedelta(minutes=10 * i)
+            with db._connect() as conn:
+                conn.execute("DELETE FROM outbound_health")
+                conn.commit()
+            for tag in ('reality', 'hy2', 'ws', 'stls'):
+                _seed_probes(db, tag, 9, now=now)
+            monitor.run_once(now=now)
         assert 'hy2' not in json.loads(db.get_setting('cascade_auto') or '{}').get('global', {})
+        assert cascade_manual.load(db)['global']['hy2']['by'] == 'admin:1'
+        assert MK.get_auto_demotions(db, None) == {'hy2'}
 
     def test_cascade_order_sinks_them(self, db):
         db.set_setting('cascade_protocol_order', json.dumps(list(ALL)))
@@ -471,9 +488,9 @@ def _seed_conns(db, tag, per_snapshot, *, recent=None, days=7.2):
         conn.commit()
 
 
-def _seed_probes(db, tag, ok_per_run):
+def _seed_probes(db, tag, ok_per_run, now=None):
     from bot.services import probe_rules as pr
-    now = datetime.utcnow()
+    now = now or datetime.utcnow()
     with db._connect() as conn:
         for run in range(3):
             ts = (now - timedelta(minutes=5 + run * 15)).isoformat()
@@ -524,3 +541,319 @@ class TestSlowProbesNormalUsers:
             conn.commit()
         probe = DPIMonitor(db, Mock(), None).collect_signals()['probe']
         assert 'ws' in probe['dark']
+        assert probe['vetoed'] == {}
+        # and the monitor demotes it on the second evaluation
+        monitor = DPIMonitor(db, Mock(), None)
+        monitor.run_once(now=now)
+        changes = monitor.run_once(now=now + timedelta(minutes=10))
+        assert [(c.protocol, c.action) for c in changes] == [('ws', 'demote')]
+
+
+# ------------------------------------------------------- review of C -------
+
+class TestANewProtocolIsNotDead:
+
+    def test_a_freshly_enabled_protocol_is_not_demoted(self, db):
+        # hy2t switched on: every telemetry client lacks it, none ever passed it
+        cfg = _config(HY2T_PORT='8402', HY2T_HOP_PORTS='8402,40001:50000')
+        db.set_setting('cascade_protocol_order', json.dumps(list(ALL) + ['hy2t']))
+        _seed_client(db, '1', 'AS31133', ('reality', 'hy2', 'ws', 'stls'))
+        _seed_client(db, '2', 'AS56981', ('reality', 'hy2', 'ws', 'stls'))
+        assert DPIMonitor(db, cfg, None).collect_signals()['client_dark_global'] == {}
+
+    def test_one_it_passed_this_week_is(self, db):
+        cfg = _config(HY2T_PORT='8402', HY2T_HOP_PORTS='8402,40001:50000')
+        db.set_setting('cascade_protocol_order', json.dumps(list(ALL) + ['hy2t']))
+        for cid, asn in (('1', 'AS31133'), ('2', 'AS56981')):
+            _seed_client(db, cid, asn, ('reality', 'hy2', 'ws', 'stls'),
+                         seen=('reality', 'hy2', 'ws', 'stls', 'hy2t'))
+        assert set(DPIMonitor(db, cfg, None).collect_signals()['client_dark_global']) == {'hy2t'}
+
+    def test_everyone_offline_is_no_verdict(self, db):
+        state = empty_state()
+        state['auto']['global'] = {'ws': {'since': datetime.utcnow().isoformat(),
+                                          'reason': 'client_dark_global', 'evidence': 'x'}}
+        now = datetime.utcnow()
+        for i in range(1, 9):
+            state, changes = DPIMonitor.evaluate(empty_signals(), state, now + timedelta(minutes=10 * i))
+            assert changes == []
+        assert 'ws' in state['auto']['global']
+
+    def test_a_client_passing_it_again_restores_it(self, db):
+        state = empty_state()
+        state['auto']['global'] = {'ws': {'since': datetime.utcnow().isoformat(),
+                                          'reason': 'client_dark_global', 'evidence': 'x'}}
+        sig = empty_signals()
+        sig['client_alive'] = {'global': ['ws'], 'asn': {}}
+        now = datetime.utcnow() + timedelta(hours=1)
+        changes = []
+        for i in range(8):
+            state, changes = DPIMonitor.evaluate(sig, state, now + timedelta(minutes=10 * i))
+            if changes:
+                break
+        assert [(c.protocol, c.action) for c in changes] == [('ws', 'restore')]
+
+
+def _seed_window_values(db, tag, per_day_value, *, current, days=8, missing=()):
+    """dpi_metrics every 5 min: ``current`` per snapshot in the last 45 min,
+    ``per_day_value[d]`` on day d back; no rows at all on ``missing`` days."""
+    now = datetime.utcnow()
+    t = now - timedelta(days=days)
+    rows = []
+    while t < now - timedelta(minutes=1):
+        ago = now - t
+        d = int(ago.total_seconds() // 86400)
+        if d not in missing:
+            n = current if ago < timedelta(minutes=45) else per_day_value.get(d, 10)
+            rows.append((t.isoformat(), '*TUNNEL*', tag, n))
+        t += timedelta(minutes=5)
+    with db._connect() as conn:
+        conn.executemany("INSERT INTO dpi_metrics (snapshot_at, country, inbound_tag, conn_count) "
+                         "VALUES (?,?,?,?)", rows)
+        conn.commit()
+
+
+class TestVetoReview:
+
+    def _probe(self, db, tag='ws'):
+        for t in ('reality', 'hy2', 'stls', 'ws'):
+            _seed_probes(db, t, 1 if t == tag else 9)
+        return DPIMonitor(db, Mock(), None).collect_signals()['probe']
+
+    def test_a_reconnect_storm_is_not_as_usual(self, db):
+        _seed_conns(db, 'cf-ws', 10, recent=30)           # three times usual
+        probe = self._probe(db)
+        assert 'ws' in probe['degraded'] and probe['vetoed'] == {}
+
+    def test_hy2_is_never_vetoed(self, db):
+        # its count is the bot's rollup of auth allows: a storm raises it.
+        # The exit reports every window (ss2022), so only the tag decides.
+        _seed_conns(db, 'hy2-8400', 10)
+        _seed_conns(db, 'ss2022', 10)
+        probe = self._probe(db, 'hy2')
+        assert 'hy2' in probe['degraded'] and probe['vetoed'] == {}
+
+    def test_unreported_baseline_days_are_skipped_not_zero(self, db):
+        # usual 54 / 108 / 108 / 108 on days 1-4, days 5-7 unreported, now 45:
+        # skipped, the median is 108 and 45 is below half of it; as zeros
+        # the median would be 54 and the veto would hold
+        _seed_window_values(db, 'cf-ws', {1: 6, 2: 12, 3: 12, 4: 12}, current=5,
+                            missing=(5, 6, 7))
+        probe = self._probe(db)
+        assert 'ws' in probe['degraded'] and probe['vetoed'] == {}
+
+    def test_too_few_reported_days_is_no_veto(self, db):
+        _seed_window_values(db, 'cf-ws', {}, current=10, missing=(1, 2, 3, 4))
+        probe = self._probe(db)
+        assert probe['vetoed'] == {}
+
+    def test_an_unreported_window_is_no_veto(self, db):
+        _seed_conns(db, 'cf-ws', 10)
+        with db._connect() as conn:
+            cut = (datetime.utcnow() - timedelta(minutes=45)).isoformat()
+            conn.execute("DELETE FROM dpi_metrics WHERE snapshot_at >= ?", (cut,))
+            conn.commit()
+        probe = self._probe(db)
+        assert probe['vetoed'] == {}
+
+    def test_the_window_is_the_probes_45_minutes(self, db):
+        # users came back 40 min ago after an hour away: the last 45 min
+        # are as usual — vetoed (a 2-h block would still read half-empty)
+        now = datetime.utcnow()
+        _seed_conns(db, 'cf-ws', 10)
+        with db._connect() as conn:
+            lo = (now - timedelta(minutes=120)).isoformat()
+            hi = (now - timedelta(minutes=46)).isoformat()
+            conn.execute("UPDATE dpi_metrics SET conn_count = 0 WHERE snapshot_at BETWEEN ? AND ?",
+                         (lo, hi))
+            conn.commit()
+        probe = self._probe(db)
+        assert 'ws' in probe['vetoed']
+
+
+class TestHiddifyKeepsTwoServers:
+
+    def _demo(self, demoted):
+        user = _user(status='demo')
+        cfg = SubscriptionService(_config()).build_singbox_config(
+            user, ('ws', 'stls', 'hy2'), demoted=frozenset(demoted), hiddify=True)
+        return {o['tag'] for o in cfg['outbounds']}
+
+    def test_one_demoted_of_three_is_hidden(self):
+        tags = self._demo({'hy2'})
+        assert f'u1-hy2 {HIDE}' in tags
+
+    def test_two_demoted_of_three_hides_none(self):
+        tags = self._demo({'hy2', 'ws'})
+        assert 'u1-hy2' in tags and 'u1-cdn-ws' in tags
+        assert [t for t in tags if HIDE in t] == [f'u1-stls-frontend {HIDE}']
+
+    def test_the_reserve_does_not_count_as_visible(self):
+        _cfg, ob = _singbox(demoted=frozenset({'reality', 'hy2', 'ws'}), hiddify=True)
+        assert 'u1-reality' in ob and 'u1-hy2' in ob and 'u1-cdn-ws' in ob
+
+
+class TestHiddifyGetsNoPersonalDemotion:
+
+    @pytest.mark.asyncio
+    async def test_the_users_telemetry_is_another_devices(self, db, monkeypatch):
+        from bot.services import geoip
+        monkeypatch.setattr(geoip, 'lookup', lambda ip: None)
+        monkeypatch.setattr(geoip, 'lookup_asn', lambda ip: None)
+        monkeypatch.setattr(geoip, 'lookup_city', lambda ip: None)
+        db._users.save(User(chat_id='1', username='u1', status='paid', uuid=UUID,
+                            email='u1@x', quota_gb=100.0, lang='ru'))
+        db.set_setting('cascade_protocol_order', json.dumps(list(ALL)))
+        _probe_rows(db, '1', 'p-reality', 15)
+        _probe_rows(db, '1', 'p-hy2', 2, minutes_ago=60 * 24)
+        srv = WebAppServer(_config(), db, xui_service=Mock())
+        srv.xui.get_client_traffic = AsyncMock(return_value={})
+        srv._schedule_fallback_provisioning = Mock()
+        threads = []
+        import threading
+        from bot.services import personal_demotion as pd
+        real = pd.personal_dark
+
+        def spy(*a, **kw):
+            threads.append(threading.current_thread().name)
+            return real(*a, **kw)
+        monkeypatch.setattr(pd, 'personal_dark', spy)
+
+        async def fetch(ua):
+            req = Mock()
+            req.match_info = {'token': srv.subscription.derive_token(UUID)}
+            req.rel_url = SimpleNamespace(query={})
+            req.headers = {'User-Agent': ua, 'X-Forwarded-For': '198.51.100.7'}
+            req.remote = ''
+            return {o['tag'] for o in json.loads((await srv.handle_subscription(req)).text)['outbounds']}
+
+        assert f'u1-hy2 {HIDE}' not in await fetch('HiddifyNext/4.1.2 (android)')
+        assert 'u1-hy2' in await fetch('HiddifyNext/4.1.2 (android)')
+        await fetch('Karing/1.2.3')                     # personal demotion applies here
+        assert threads and threading.main_thread().name not in threads
+
+
+class TestPersonalCountsChecksNotRows:
+
+    def test_three_protocols_for_half_an_hour_is_not_two_hours(self, db):
+        # the review's repro: four checks x three other protocols = 12 rows
+        for p in ('reality', 'ws', 'stls'):
+            _probe_rows(db, '1', f'p-{p}', 4, minutes_ago=1)
+        _probe_rows(db, '1', 'p-hy2', 2, minutes_ago=60 * 24)
+        assert personal_dark(db, '1', ALL) == set()
+
+    def test_twelve_slots_across_protocols_is(self, db):
+        _probe_rows(db, '1', 'p-reality', 6, minutes_ago=1)
+        _probe_rows(db, '1', 'p-ws', 6, minutes_ago=61)
+        _probe_rows(db, '1', 'p-hy2', 2, minutes_ago=60 * 24)
+        assert personal_dark(db, '1', ALL) == {'hy2'}
+
+
+class TestHandDemotionStore:
+
+    def test_an_offset_until_is_read_not_dropped(self, db):
+        until = (datetime.utcnow() + timedelta(hours=3)).isoformat() + '+00:00'
+        db.set_setting('cascade_manual', json.dumps(
+            {'global': {'hy2': {'since': 'x', 'until': until, 'by': 'admin:1'}}, 'asn': {}}))
+        assert cascade_manual.demoted_for(db, None) == {'hy2'}
+        far = (datetime.utcnow() - timedelta(hours=1)).isoformat() + '-03:00'
+        db.set_setting('cascade_manual', json.dumps(
+            {'global': {'hy2': {'since': 'x', 'until': far, 'by': 'admin:1'}}, 'asn': {}}))
+        assert cascade_manual.demoted_for(db, None) == {'hy2'}   # 2 h ahead in UTC
+
+    def test_a_locked_read_never_overwrites_the_store(self, db, monkeypatch):
+        # the read hits a lock, the write a moment later would go through
+        import sqlite3
+        cascade_manual.demote(db, 'ws', 'AS1', timedelta(hours=6), by='admin:1')
+        stored = db.get_setting('cascade_manual')
+        real = db._connect
+        calls = []
+
+        def locked_once():
+            calls.append(1)
+            if len(calls) == 1:
+                raise sqlite3.OperationalError('database is locked')
+            return real()
+        monkeypatch.setattr(db, '_connect', locked_once)
+        with pytest.raises(cascade_manual.ManualStoreError):
+            cascade_manual.demote(db, 'hy2', None, timedelta(hours=6), by='admin:1')
+        monkeypatch.setattr(db, '_connect', real)
+        assert db.get_setting('cascade_manual') == stored
+
+    def test_a_failed_write_is_not_reported_as_done(self, db, monkeypatch):
+        monkeypatch.setattr(db, 'set_setting', lambda *a: False)
+        with pytest.raises(cascade_manual.ManualStoreError):
+            cascade_manual.demote(db, 'hy2', None, timedelta(hours=6), by='admin:1')
+
+
+class TestCascadeDemoteArguments:
+
+    @pytest.fixture
+    def handler(self, db):
+        from bot.handlers.admin.ops import AdminOpsMixin
+        h = AdminOpsMixin.__new__(AdminOpsMixin)
+        h.db = db
+        h.config = SimpleNamespace(DPI_MONITOR_ENABLED=True)
+        h.sent = []
+        h._send = lambda **kw: h.sent.append(kw['text'])
+        h._caller_admin_id = lambda: '1652899'
+        return h
+
+    def _run(self, handler, *args):
+        handler.show_cascade('chat', list(args))
+        return handler.sent[-1]
+
+    @pytest.mark.parametrize('args', [('demote', 'hy2', '30'), ('demote', 'hy2', 'AS1', 'AS2'),
+                                      ('demote', 'hy2', '2h', '6h'), ('restore', 'hy2', 'AS1', 'x'),
+                                      ('restore', 'hy2', '31133')])
+    def test_ambiguous_input_changes_nothing(self, handler, db, args):
+        if args[0] == 'restore':
+            cascade_manual.demote(db, 'hy2', 'AS1', timedelta(hours=6), by='admin:1')
+        before = db.get_setting('cascade_manual')
+        text = self._run(handler, *args)
+        assert text.startswith('⚠️')
+        assert db.get_setting('cascade_manual') == before
+
+    def test_a_failed_write_answers_and_logs_nothing(self, handler, db, monkeypatch):
+        monkeypatch.setattr(db, 'set_setting', lambda *a: False)
+        text = self._run(handler, 'demote', 'hy2', '2h')
+        assert text.startswith('❌')
+        with db._connect() as conn:
+            assert conn.execute("SELECT COUNT(*) FROM admin_actions").fetchone()[0] == 0
+
+    def test_the_asn_view_lists_hand_demotions(self, handler, db):
+        cascade_manual.demote(db, 'hy2', 'AS31133', timedelta(hours=6), by='admin:1')
+        cascade_manual.demote(db, 'ws', 'AS8359', timedelta(hours=6), by='admin:1')
+        text = self._run(handler, 'AS31133')
+        assert 'Ручные понижения' in text and 'hy2 (AS31133)' in text
+        assert 'AS8359' not in text
+
+
+class TestKitForHiddify:
+
+    def test_the_json_is_built_as_for_hiddify(self, db, monkeypatch):
+        from bot.services import sos
+        db._users.save(User(chat_id='1', username='u1', status='paid', uuid=UUID,
+                            email='u1@x', quota_gb=100.0, lang='ru', last_asn='AS31133'))
+        db.set_setting('cascade_protocol_order', json.dumps(list(ALL)))
+        _probe_rows(db, '1', 'p-reality', 15)
+        _probe_rows(db, '1', 'p-hy2', 2, minutes_ago=60 * 24)       # personal: hy2
+        user = db.get_user('1')
+        kit = sos.build_kit(db, _config(), user)
+        files = {name: body for name, body in kit} if isinstance(kit, list) else kit
+        body = next(v for k, v in files.items() if str(k).endswith('.json'))
+        tags = {o['tag'] for o in json.loads(body)['outbounds']}
+        assert f'u1-stls-frontend {HIDE}' in tags
+        assert 'u1-hy2' in tags                          # no personal demotion there
+
+
+class TestStateRoundTrip:
+
+    def test_the_days_demotions_survive_a_save(self, db):
+        mon = DPIMonitor(db, Mock(), None)
+        state = empty_state()
+        stamps = [(datetime.utcnow() - timedelta(hours=h)).isoformat() for h in (3, 1)]
+        state['targets']['global:ws'] = {'bad': 0, 'good': 2, 'rule': 'probe_dark',
+                                         'last_change': stamps[-1], 'demotions': stamps}
+        mon.save_state(state)
+        assert mon.load_state()['targets']['global:ws']['demotions'] == stamps

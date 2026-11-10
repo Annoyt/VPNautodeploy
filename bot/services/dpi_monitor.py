@@ -137,6 +137,7 @@ COLLECTOR_RULES = {
     'probe': PROBE_RULES,
     'client_dark_global': frozenset({RULE_CLIENT_DARK_GLOBAL}),
     'client_dark': frozenset({RULE_CLIENT_DARK}),
+    'client_alive': frozenset({RULE_CLIENT_DARK_GLOBAL, RULE_CLIENT_DARK}),
     'reality_asn': frozenset({RULE_REALITY_ASN}),
     'udp_storm_asn': frozenset({RULE_UDP_STORM_ASN}),
     'reports_asn': frozenset({RULE_USER_REPORTS_ASN}),
@@ -194,6 +195,14 @@ PROBE_DEGRADED_MIN_SAMPLES = _pr.PROBE_DEGRADED_MIN_SAMPLES
 CLIENT_DARK_WINDOW_H = 2
 CLIENT_DARK_MIN_DEAD = 3
 CLIENT_DARK_MAX_ALIVE = 0
+# A client is "dead" on a protocol only if it passed that protocol within the
+# last week: a protocol new in the profile (the operator just switched it on;
+# profiles refresh every 6-24 h) or one that never worked for the client is
+# not "stopped working" (review of C: a freshly enabled protocol read as dead
+# for every telemetry client and was demoted globally in 20 min). And a
+# demotion by R6 / R6g comes back only on a client passing it again: no
+# client evidence at all (every app closed) is no verdict, not "quiet".
+CLIENT_DARK_SEEN_DAYS = 7
 CLIENT_TELEMETRY_PREFIX = 'p-'     # mirrors subscription.CLASH_TELEMETRY_PREFIX
 CLIENT_ACTIVE_STATUSES = ('demo', 'paid', 'support_topic')   # /sub serves them
 
@@ -211,14 +220,23 @@ CLIENT_DARK_GLOBAL_MIN_NETWORKS = 2
 # A probe DEGRADED (R2) is the entry datacenter's view of a slow path; when
 # the users of that protocol keep connecting at their usual pace (exit-side
 # accepted connections, the B2 data) the slowness is the probe's, not
-# theirs — no global demotion. The last 2 h against the median of the same
-# block on the previous 7 days, half of usual or more, usual ≥ 50. A dark
-# probe (R1) is never vetoed: a tunnel that does not come up is not slow.
-VETO_BLOCK_H = 2
+# theirs — no global demotion. The window is the probe's own (its newest
+# three runs, 45 min) against the same 45 min on each of the previous 7
+# days that the exit reported (≥ 4 usable days); usual ≥ 20 (≈ 50 a 2-h
+# block); "as usual" = between half and twice the median — a reconnect storm
+# is many accepted connections and not "as usual". hy2 is never vetoed: its
+# count is the bot's rollup of hy2 auth allows, and a storm of them is the
+# very failure R4 is built on. A dark probe (R1) is never vetoed either: a
+# tunnel that does not come up is not slow.
+VETO_WINDOW_MIN = 45
 VETO_BASELINE_DAYS = 7
-VETO_MIN_MEDIAN = 50
+VETO_MIN_USABLE_DAYS = 4
+VETO_MIN_MEDIAN = 20
 VETO_MIN_RATIO = 0.5
-VETO_TAGS = {'reality': 'reality', 'ws': 'cf-ws', 'stls': 'ss2022', 'hy2': 'hy2-8400'}
+VETO_MAX_RATIO = 2.0
+VETO_MIN_REPORTS = 4             # of the 9 exit reports a 45-min window has
+VETO_TAGS = {'reality': 'reality', 'ws': 'cf-ws', 'stls': 'ss2022'}
+VETO_NOT_EXIT_TAGS = ('hy2-8400',)   # the bot's rollup: not an exit report
 
 # ---- R3: Reality handshake failures per ASN --------------------------------
 # Reality users reach exit with their real IP (PROXY protocol via entry
@@ -367,6 +385,9 @@ def empty_signals() -> dict:
         },
         'client_dark_global': {},   # {proto: evidence} — C4
         'client_dark': {},          # {asn: {proto: evidence}}
+        # protocols some client passed in the window: what a client-dark
+        # demotion needs to come back ({'global': [...], 'asn': {asn: [...]}})
+        'client_alive': {'global': [], 'asn': {}},
         'reality_asn': {},
         'udp_storm_asn': {},
         'reports_asn': {},
@@ -698,11 +719,13 @@ class DPIMonitor:
                            f"UNKNOWN this run, existing demotions frozen")
             signals['unknown'] = sorted(RULES)
             return signals
+        self._telemetry_memo = None      # one telemetry read per run
         try:
             for name, fn in (
                 ('probe', self._collect_probe),
                 ('client_dark_global', self._collect_client_dark_global),
                 ('client_dark', self._collect_client_dark),
+                ('client_alive', self._collect_client_alive),
                 ('reality_asn', self._collect_reality_asn),
                 ('udp_storm_asn', self._collect_udp_storm),
                 ('reports_asn', self._collect_reports),
@@ -720,6 +743,7 @@ class DPIMonitor:
                         f"{', '.join(sorted(rules))} UNKNOWN this run, their "
                         f"demotions/streaks frozen until the collector works again")
         finally:
+            self._telemetry_memo = None
             try:
                 conn.close()
             except Exception:
@@ -798,29 +822,49 @@ class DPIMonitor:
     @staticmethod
     def _users_connect_normally(conn, proto: str, now: datetime) -> Optional[str]:
         """C7: the evidence line when ``proto``'s users keep connecting at
-        their usual pace over the last VETO_BLOCK_H (≥ VETO_MIN_RATIO of the
-        median of the same block on the previous VETO_BASELINE_DAYS days,
-        median ≥ VETO_MIN_MEDIAN), else None. Missing exit reports read as
-        few connections — no veto, the probe rule stands."""
+        their usual pace over the probe window (constants block above), else
+        None. A window the exit did not report gives no veto (the probe rule
+        stands); a baseline day it did not report is skipped, never a zero."""
         tag = VETO_TAGS.get(proto)
         if not tag:
             return None
-        per_day = 24 // VETO_BLOCK_H
-        since = (now - timedelta(days=VETO_BASELINE_DAYS, hours=VETO_BLOCK_H)).isoformat()
-        rows = conn.execute(
-            f"SELECT CAST((julianday(?) - julianday(snapshot_at)) * {per_day} AS INTEGER) AS s, "
-            f"SUM(conn_count) FROM dpi_metrics WHERE snapshot_at >= ? AND inbound_tag = ? "
-            f"GROUP BY s",
-            (now.isoformat(), since, tag),
-        ).fetchall()
-        by_slot = {int(slot): int(total or 0) for slot, total in rows}
-        usual = sorted(by_slot.get(per_day * d, 0) for d in range(1, VETO_BASELINE_DAYS + 1))
+        since = (now - timedelta(days=VETO_BASELINE_DAYS,
+                                 minutes=VETO_WINDOW_MIN)).isoformat()
+        params = {'now': now.isoformat(), 'since': since, 'tag': tag,
+                  'win': VETO_WINDOW_MIN}
+
+        def per_day(table: str, col: str, what: str, where: str = '') -> dict:
+            # day d = the VETO_WINDOW_MIN minutes ending exactly d days ago
+            rows = conn.execute(
+                f"SELECT CAST(julianday(:now) - julianday({col}) AS INTEGER) AS d, {what} "
+                f"FROM {table} WHERE {col} >= :since {where} "
+                f"AND ((julianday(:now) - julianday({col})) "
+                f"     - CAST(julianday(:now) - julianday({col}) AS INTEGER)) * 1440 < :win "
+                f"GROUP BY d", params).fetchall()
+            return {int(d): int(v or 0) for d, v in rows}
+
+        conns = per_day('dpi_metrics', 'snapshot_at', 'SUM(conn_count)',
+                        'AND inbound_tag = :tag')
+        marks = ','.join(f"'{t}'" for t in VETO_NOT_EXIT_TAGS)
+        snaps = per_day('dpi_metrics', 'snapshot_at', 'COUNT(DISTINCT snapshot_at)',
+                        f'AND inbound_tag NOT IN ({marks})')
+        beats = per_day('exit_reports', 'ts', 'COUNT(*)')
+
+        def reported(d: int) -> bool:
+            return max(snaps.get(d, 0), beats.get(d, 0)) >= VETO_MIN_REPORTS
+
+        # (a window the exit did not report has no rows: 0, never "as usual")
+        usual = sorted(conns.get(d, 0) for d in range(1, VETO_BASELINE_DAYS + 1)
+                       if reported(d))
+        if len(usual) < VETO_MIN_USABLE_DAYS:
+            return None
         mid = len(usual) // 2
         median = usual[mid] if len(usual) % 2 else (usual[mid - 1] + usual[mid]) / 2
-        current = by_slot.get(0, 0)
-        if median >= VETO_MIN_MEDIAN and current >= VETO_MIN_RATIO * median:
+        current = conns.get(0, 0)
+        if (median >= VETO_MIN_MEDIAN
+                and VETO_MIN_RATIO * median <= current <= VETO_MAX_RATIO * median):
             return (f"пользователи {proto} подключаются как обычно: {current} за "
-                    f"{VETO_BLOCK_H} ч при обычных ~{int(median)}")
+                    f"{VETO_WINDOW_MIN} мин при обычных ~{int(median)}")
         return None
 
     def _client_dark_offer(self) -> Tuple[set, set, frozenset]:
@@ -841,38 +885,64 @@ class DPIMonitor:
         free = {p for p in offered if MK.PROTOCOL_TIER.get(p) == 'free'}
         return offered, free, frozenset(MK.PAID_USER_STATUSES)
 
+    def _client_telemetry(self, conn, now: datetime) -> dict:
+        """The clients the client rules may count, read once per run:
+        ``{chat_id: {'asn', 'status', 'up', 'week'}}`` — only clients with a
+        live row through some CASCADE protocol in the window (``up``; rows
+        through the DE reserve alone say the app is open, not that our
+        cascade is reachable), with what they passed within
+        CLIENT_DARK_SEEN_DAYS (``week``)."""
+        memo = getattr(self, '_telemetry_memo', None)
+        if memo is not None:
+            return memo
+        # client_probe.ts is sqlite CURRENT_TIMESTAMP ('YYYY-MM-DD HH:MM:SS',
+        # a SPACE) — a 'T' cutoff would sort every same-day row below it.
+        cutoff = (now - timedelta(hours=CLIENT_DARK_WINDOW_H)).strftime('%Y-%m-%d %H:%M:%S')
+        week = (now - timedelta(days=CLIENT_DARK_SEEN_DAYS)).strftime('%Y-%m-%d %H:%M:%S')
+        rows = conn.execute(
+            "SELECT c.chat_id, substr(c.grp, ?), MAX(c.ts) >= ?, "
+            "UPPER(TRIM(COALESCE(u.last_asn, ''))), u.status "
+            "FROM client_probe c JOIN users u ON u.chat_id = c.chat_id "
+            "WHERE c.ts >= ? AND substr(c.grp, 1, ?) = ? "
+            "GROUP BY c.chat_id, c.grp",
+            (len(CLIENT_TELEMETRY_PREFIX) + 1, cutoff, week,
+             len(CLIENT_TELEMETRY_PREFIX), CLIENT_TELEMETRY_PREFIX),
+        ).fetchall()
+        cascade = self._known_protocols()
+        clients: Dict[str, dict] = {}
+        for chat_id, proto, recent, asn, status in rows:
+            c = clients.setdefault(str(chat_id), {
+                'asn': asn or '', 'status': status or '', 'up': set(), 'week': set()})
+            c['week'].add(str(proto))
+            if recent and str(proto) in cascade:
+                c['up'].add(str(proto))
+        clients = {k: c for k, c in clients.items() if c['up']}
+        self._telemetry_memo = clients
+        return clients
+
+    @staticmethod
+    def _dead_on(client: dict, proto: str, free: set, paid_statuses) -> bool:
+        """``client`` counts as dead on ``proto``: offered to it (active
+        status, its tier), passed within the week, not in the window."""
+        return (proto not in client['up'] and proto in client['week']
+                and client['status'] in CLIENT_ACTIVE_STATUSES
+                and (proto in free or client['status'] in paid_statuses))
+
     def _collect_client_dark_global(self, conn, now: datetime) -> dict:
         """C4: ``{proto: evidence}`` for every protocol that at least
         CLIENT_DARK_GLOBAL_MIN_DEAD clients from CLIENT_DARK_GLOBAL_MIN_NETWORKS
         different known networks stopped passing while nobody passes it —
         R6 without the one-network bound (constants block above)."""
-        cutoff = (now - timedelta(hours=CLIENT_DARK_WINDOW_H)).strftime('%Y-%m-%d %H:%M:%S')
-        rows = conn.execute(
-            "SELECT c.chat_id, c.grp, UPPER(TRIM(COALESCE(u.last_asn, ''))), u.status "
-            "FROM client_probe c JOIN users u ON u.chat_id = c.chat_id "
-            "WHERE c.ts >= ? AND substr(c.grp, 1, ?) = ? "
-            "GROUP BY c.chat_id, c.grp",
-            (cutoff, len(CLIENT_TELEMETRY_PREFIX), CLIENT_TELEMETRY_PREFIX),
-        ).fetchall()
-        if not rows:
+        clients = list(self._client_telemetry(conn, now).values())
+        if not clients:
             return {}
         offered, free, paid_statuses = self._client_dark_offer()
-        cascade = self._known_protocols()
-        seen: Dict[str, set] = {}
-        who: Dict[str, Tuple[str, str]] = {}
-        for chat_id, grp, asn, status in rows:
-            seen.setdefault(str(chat_id), set()).add(str(grp)[len(CLIENT_TELEMETRY_PREFIX):])
-            who[str(chat_id)] = (asn or '', status or '')
-        clients = [(who[c][0], who[c][1], protos & cascade)
-                   for c, protos in seen.items() if protos & cascade]
         out: Dict[str, str] = {}
         for proto in sorted(offered):
-            if any(proto in up for _asn, _status, up in clients):
+            if any(proto in c['up'] for c in clients):
                 continue
-            dead = [(asn, status) for asn, status, up in clients
-                    if status in CLIENT_ACTIVE_STATUSES
-                    and (proto in free or status in paid_statuses)]
-            networks = {asn for asn, _status in dead if asn}
+            dead = [c for c in clients if self._dead_on(c, proto, free, paid_statuses)]
+            networks = {c['asn'] for c in dead if c['asn']}
             if (len(dead) >= CLIENT_DARK_GLOBAL_MIN_DEAD
                     and len(networks) >= CLIENT_DARK_GLOBAL_MIN_NETWORKS):
                 out[proto] = (
@@ -886,50 +956,37 @@ class DPIMonitor:
         """R6 (E8): ``{asn: {proto: evidence}}`` for every (network,
         protocol) the users' own clients call dark — see the R6 block of
         constants for the definition and the guard."""
-        # client_probe.ts is sqlite CURRENT_TIMESTAMP ('YYYY-MM-DD HH:MM:SS',
-        # a SPACE) — a 'T' cutoff would sort every same-day row below it.
-        cutoff = (now - timedelta(hours=CLIENT_DARK_WINDOW_H)).strftime('%Y-%m-%d %H:%M:%S')
-        rows = conn.execute(
-            "SELECT c.chat_id, c.grp, UPPER(TRIM(u.last_asn)), u.status "
-            "FROM client_probe c JOIN users u ON u.chat_id = c.chat_id "
-            "WHERE c.ts >= ? AND substr(c.grp, 1, ?) = ? "
-            "AND u.last_asn IS NOT NULL AND TRIM(u.last_asn) != '' "
-            "GROUP BY c.chat_id, c.grp",
-            (cutoff, len(CLIENT_TELEMETRY_PREFIX), CLIENT_TELEMETRY_PREFIX),
-        ).fetchall()
-        if not rows:
+        clients = [c for c in self._client_telemetry(conn, now).values() if c['asn']]
+        if not clients:
             return {}
         offered, free, paid_statuses = self._client_dark_offer()
-        cascade = self._known_protocols()
-        seen: Dict[str, set] = {}
-        who: Dict[str, Tuple[str, str]] = {}
-        for chat_id, grp, asn, status in rows:
-            seen.setdefault(str(chat_id), set()).add(str(grp)[len(CLIENT_TELEMETRY_PREFIX):])
-            who[str(chat_id)] = (asn, status or '')
-        by_asn: Dict[str, List[Tuple[str, set]]] = {}
-        for chat_id, protos in seen.items():
-            asn, status = who[chat_id]
-            # The guard: only a client with a live row through some
-            # CASCADE protocol counts at all (rows through the DE reserve
-            # alone say the app is open, not that our cascade is reachable).
-            up = protos & cascade
-            if up:
-                by_asn.setdefault(asn, []).append((status, up))
+        by_asn: Dict[str, List[dict]] = {}
+        for c in clients:
+            by_asn.setdefault(c['asn'], []).append(c)
         out: Dict[str, Dict[str, str]] = {}
-        for asn, clients in sorted(by_asn.items()):
+        for asn, group in sorted(by_asn.items()):
             for proto in sorted(offered):
-                alive = sum(1 for _status, up in clients if proto in up)
-                dead = sum(
-                    1 for status, up in clients
-                    if proto not in up and status in CLIENT_ACTIVE_STATUSES
-                    and (proto in free or status in paid_statuses)
-                )
+                alive = sum(1 for c in group if proto in c['up'])
+                dead = sum(1 for c in group if self._dead_on(c, proto, free, paid_statuses))
                 if dead >= CLIENT_DARK_MIN_DEAD and alive <= CLIENT_DARK_MAX_ALIVE:
                     out.setdefault(asn, {})[proto] = (
                         f"клиенты {asn}: {alive}/{alive + dead} по {proto} за "
                         f"{CLIENT_DARK_WINDOW_H} ч, другие протоколы живы"
                     )
         return out
+
+    def _collect_client_alive(self, conn, now: datetime) -> dict:
+        """What some client passed in the window, everywhere and per known
+        network: the only evidence that brings a client-dark demotion back."""
+        clients = self._client_telemetry(conn, now).values()
+        alive_global: set = set()
+        alive_asn: Dict[str, set] = {}
+        for c in clients:
+            alive_global |= c['up']
+            if c['asn']:
+                alive_asn.setdefault(c['asn'], set()).update(c['up'])
+        return {'global': sorted(alive_global),
+                'asn': {a: sorted(p) for a, p in sorted(alive_asn.items())}}
 
     def _collect_reality_asn(self, conn, now: datetime) -> dict:
         cutoff = (now - timedelta(hours=REALITY_WINDOW_H)).isoformat()
@@ -1032,6 +1089,9 @@ class DPIMonitor:
         degraded = probe.get('degraded') or {}
         client_dark = (signals or {}).get('client_dark') or {}
         client_global = (signals or {}).get('client_dark_global') or {}
+        client_alive = (signals or {}).get('client_alive') or {}
+        alive_global = set(client_alive.get('global') or ())
+        alive_asn = {a: set(p or ()) for a, p in (client_alive.get('asn') or {}).items()}
         reality = (signals or {}).get('reality_asn') or {}
         storms = (signals or {}).get('udp_storm_asn') or {}
         reports = (signals or {}).get('reports_asn') or {}
@@ -1097,10 +1157,15 @@ class DPIMonitor:
                     return None
                 return proto in dark or proto in degraded
             if rule == RULE_CLIENT_DARK_GLOBAL:
-                return proto in client_global
+                if proto in client_global:
+                    return True
+                # quiet only on a client passing it; no evidence = no verdict
+                return False if proto in alive_global else None
             if rule == RULE_CLIENT_DARK:
                 # Judged per (ASN, protocol): the clients name the protocol.
-                return proto in (client_dark.get(asn) or {})
+                if proto in (client_dark.get(asn) or {}):
+                    return True
+                return False if proto in (alive_asn.get(asn) or ()) else None
             if rule == RULE_REALITY_ASN:
                 return asn in reality
             if rule == RULE_UDP_STORM_ASN:
