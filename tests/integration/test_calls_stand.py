@@ -213,7 +213,13 @@ def test_calls_pick_hy2_then_reality(stand):
     assert _now(stand.singbox, 'calls') == 'u1-hy2'
     _docker('stop', 'stand-hy2')
     try:
-        time.sleep(12)                            # past the 10-s check interval
+        # Both notice a dead hy2 on a check of their own (10-s interval
+        # here); a fixed sleep was marginal for sing-box, so poll.
+        deadline = time.monotonic() + 45
+        while time.monotonic() < deadline and (
+                _now(stand.mihomo, 'Calls') != 'u1-reality'
+                or _now(stand.singbox, 'calls') != 'u1-reality'):
+            time.sleep(2)
         assert _now(stand.mihomo, 'Calls') == 'u1-reality'
         assert _now(stand.singbox, 'calls') == 'u1-reality'
     finally:
