@@ -403,9 +403,21 @@ class TestDeadPanelNeverBreaksSub:
 
         monkeypatch.setattr(FallbackNodeService, 'ensure_client', boom)
         srv, _db = _server(tmp_path, panel.url)
+
+        class Seen(set):
+            # /sub awaits worker threads of its own, so the task may be done
+            # (and discarded) before /sub returns: keep every one it added
+            def __init__(self):
+                super().__init__()
+                self.all = []
+
+            def add(self, task):
+                self.all.append(task)
+                super().add(task)
+        srv._bg_tasks = Seen()
         assert _de_served(await _sub(srv))
-        tasks = list(srv._bg_tasks)
         await _flush(srv)
+        tasks = srv._bg_tasks.all
         # handled inside the task: nothing left for "exception never retrieved"
         assert tasks and all(t.exception() is None for t in tasks)
         # the failed call released its uuid: the next fetch tries again
