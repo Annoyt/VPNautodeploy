@@ -218,7 +218,8 @@ VETO_BLOCK_H = 2
 VETO_BASELINE_DAYS = 7
 VETO_MIN_MEDIAN = 50
 VETO_MIN_RATIO = 0.5
-VETO_TAGS = {'reality': 'reality', 'ws': 'cf-ws', 'stls': 'ss2022', 'hy2': 'hy2-8400'}
+VETO_TAGS = {'reality': 'reality', 'ws': 'cf-ws', 'stls': 'ss2022', 'hy2': 'hy2-8400',
+             'xhr': 'xhr'}
 
 # ---- R3: Reality handshake failures per ASN --------------------------------
 # Reality users reach exit with their real IP (PROXY protocol via entry

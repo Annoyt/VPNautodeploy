@@ -176,6 +176,7 @@ class WebAppServer:
         self.app.router.add_post('/api/hy2t/auth', self.handle_hy2t_auth)
         self.app.router.add_post('/api/dpi/exit_report', self.handle_dpi_exit_report)
         self.app.router.add_post('/api/healthcheck/report', self.handle_healthcheck_report)
+        self.app.router.add_get('/api/ssh/users', self.handle_ssh_users)
         # Sing-box subscription endpoint. Public — the path token is
         # the auth (HMAC of the user's UUID with BOT_TOKEN as key).
         # Returns the user's full cascade as one config the client
@@ -201,6 +202,7 @@ class WebAppServer:
         # (E4). Public, always 204 (GET and HEAD — mihomo tests with
         # HEAD); the token in the path attributes the heartbeat to a user.
         self.app.router.add_get('/probe/{token}/{group}', self.handle_probe)
+        self.app.router.add_route('*', '/probe-big', self.handle_probe_big)
         
         # Admin — read
         self.app.router.add_get('/api/admin/users', self.handle_admin_users)
@@ -854,6 +856,8 @@ class WebAppServer:
         'inbound-2053': 'cf-ws',
         'inbound-8444': 'ss2022',
         'inbound-2054': 'xhttp',
+        # VLESS + XHTTP + Reality (E3) — scripts/setup_xhr_inbound.py's port
+        'inbound-2055': 'xhr',
     }
     _REJECT_KIND_TAG = {
         'reality': 'reality',
@@ -942,6 +946,27 @@ class WebAppServer:
         verdict = str(payload.get('verdict') or '')[:500]
         ok = await asyncio.to_thread(self._store_healthcheck, exit_code, verdict, payload)
         return web.json_response({'ok': ok}, status=200 if ok else 500)
+
+    async def handle_ssh_users(self, request: web.Request) -> web.Response:
+        """GET /api/ssh/users — the exit's sshd sync (scripts/setup_ssh_exit.sh,
+        IMPROVEMENT_PLAN F, E4): ``{"users": [{"user", "hash"}]}`` for the
+        paid users, SHA-512 crypt hashes only. The exit report's token."""
+        expected = (getattr(self.config, 'DPI_REPORT_TOKEN', '') or '').strip()
+        got = request.headers.get('X-DPI-Token', '')
+        if not expected or not hmac.compare_digest(got, expected):
+            return web.json_response({'ok': False}, status=403)
+        from bot.services import ssh_exit
+        if not ssh_exit.enabled(self.config):
+            return web.json_response({'ok': False, 'error': 'ssh exit not configured'},
+                                     status=404)
+        try:
+            users = await asyncio.to_thread(ssh_exit.users_payload, self.db, self.config)
+        except Exception as e:
+            logger.warning(f"ssh users: read failed: {e}")
+            # 503, never an empty list: the sync would delete every account
+            return web.json_response({'ok': False}, status=503)
+        return web.json_response({'ok': True, 'users': users},
+                                 headers={'Cache-Control': 'no-store'})
 
     def _store_healthcheck(self, exit_code, verdict: str, payload: dict) -> bool:
         from datetime import datetime
@@ -1588,6 +1613,7 @@ class WebAppServer:
         elif fmt == 'clash':
             text_body = self.subscription.build_clash_config(
                 user, cascade, lockdown=lockdown, demoted=demoted_here(),
+                big_check=self._big_check_for(user),
             )
         elif fmt == 'links' or (not fmt and 'happ' in ua):
             text_body = self.subscription.build_links(user, cascade)
@@ -1840,6 +1866,36 @@ class WebAppServer:
     # flood of made-up tokens costs one users scan a minute, not one each).
     PROBE_TOKEN_REFRESH_S = 600
     PROBE_TOKEN_MISS_REBUILD_S = 60
+
+    # E5: headers past the ~16 KB after which Russian networks freeze a
+    # connection to foreign hosting / Cloudflare. mihomo's url-test sends
+    # HEAD and reads only the headers, so only headers can show it.
+    PROBE_BIG_HEADER_BYTES = 20 * 1024
+
+    # E5 switch: '1' in app_settings gives the client testers (§37's list)
+    # the /probe-big check address; anything else, nobody.
+    PROBE_BIG_SETTING = 'probe_big_testers'
+
+    def _big_check_for(self, user) -> bool:
+        try:
+            if (self.db.get_setting(self.PROBE_BIG_SETTING) or '').strip() != '1':
+                return False
+            from bot.services.neko_client import is_tester
+            return is_tester(self.db, user)
+        except Exception:
+            return False
+
+    async def handle_probe_big(self, request: web.Request) -> web.Response:
+        """``/probe-big`` — 204 with ~20 KB of padding headers
+        (IMPROVEMENT_PLAN F, E5, an experiment): as a Clash group's check
+        address a frozen path fails the check and the client moves on,
+        where gstatic's tiny answer passes. Answered before anything else,
+        like /probe; nothing is recorded."""
+        pad = 'x' * 1000
+        headers = {f'X-Pad-{i:02d}': pad
+                   for i in range(self.PROBE_BIG_HEADER_BYTES // 1000)}
+        headers['Cache-Control'] = 'no-store'
+        return web.Response(status=204, headers=headers)
 
     async def handle_probe(self, request: web.Request) -> web.Response:
         """``GET|HEAD /probe/<token>/<group>`` — the health-check url of

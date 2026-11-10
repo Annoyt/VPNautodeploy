@@ -1500,6 +1500,7 @@ class AdminOpsMixin(AdminHandlerBase):
         'xhttp': 'XHTTP',
         'hy2': 'Hy2',
         'hy2t': 'Hy2-Turbo',
+        'xhr': 'XHTTP-R',
     }
 
     def _protocol_by_email(self) -> dict:

@@ -256,6 +256,8 @@ class NotificationService:
                     "Протокол по умолчанию платного тарифа: Hysteria2 с агрессивным контролем скорости (Brutal), пробивает провайдерский шейпинг за счёт постоянной отправки на заданной скорости."),
         'reality': ("🔑 Reality (TCP)",
                     "Классический VLESS+Reality. Самый быстрый из всех, но первым выходит из строя если DPI начинает профайлить нашу инфру."),
+        'xhr':     ("🧵 VLESS XHTTP (Reality)",
+                    "Одно HTTP/2-соединение на всё вместо нового рукопожатия на каждый запрос. Работает в NekoVPN, FlClash и по ссылке; Hiddify 4.1 его не знает."),
     }
     PROTOCOL_LABELS_EN = {
         'stls':    ("🛡 ShadowTLS",
@@ -268,6 +270,8 @@ class NotificationService:
                     "The paid-tier default: Hysteria2 with aggressive rate control (Brutal) that punches through ISP shaping by sending at a fixed rate."),
         'reality': ("🔑 Reality (TCP)",
                     "Classic VLESS+Reality. Fastest of the four, but the first to die once DPI starts profiling our infra."),
+        'xhr':     ("🧵 VLESS XHTTP (Reality)",
+                    "One HTTP/2 session for everything instead of a handshake per connection. Works in NekoVPN, FlClash and as a link; Hiddify 4.1 does not know it."),
     }
 
     # Dashboard key-text overrides app_settings key. Kept after the

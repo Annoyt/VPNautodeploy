@@ -796,3 +796,32 @@ Package D of `docs/IMPROVEMENT_PLAN.md` section F. **Nothing here runs until it 
   - The bot stores `hy2_sessions` (reason normalized: idle-timeout / closed-by-server / closed-by-client / timeout / reset / other; kept 30 days). `/protocols` adds «⏱ hy2 сессии за 24 ч: N, медиана …, ≥ 30 мин — …%, чаще всего кончаются: …».
   - **Exit-side**: copy the reporter to exit (`/usr/local/bin`), as for §48.
 - **Tests:** `tests/integration/test_adviser.py` (42: findings, the POST, the endpoint's gates, the alerts incl. stale / blind / recovery, action parsing / buttons / execution / handler, usage, sessions), `TestHy2Sessions` in `tests/unit/test_exit_dpi_reporter.py`, and the schema test. 22 mutants killed, restored by reverse text replacement with a hash check.
+
+### 51. New protocols and fingerprints: per-user TLS fingerprint, VLESS XHTTP Reality, SSH emergency path (2026-11-11, plan F, package E)
+
+Package E of `docs/IMPROVEMENT_PLAN.md` section F. **All of it is off until configured.** Unset settings leave every profile byte-identical.
+
+- **E1, TLS fingerprint** (`bot/services/tls_fingerprint.py`). `TLS_FINGERPRINTS` (env, comma-separated, compose passes it) is the pool; each user gets one value by sha256(uuid), stable across fetches.
+  - Accepted values are the ones every core we serve knows: chrome, firefox, edge, safari, ios, android, 360, qq, random. Unset or unusable means chrome.
+  - Used by every builder that had `chrome` hard-coded: sing-box utls (Reality, ws, the ShadowTLS frontend, RU-exit / RU-zone), the Clash form, the xray form, the DE reserve (`fallback_node.py`) and the share links (`vpn.py`). The probe user's value is whatever its uuid picks.
+- **E2/E3, VLESS + XHTTP + Reality, protocol `xhr`.** One multiplexed HTTP/2 session instead of a TLS handshake per connection.
+  - Settings: `XHR_SNI` (empty = off everywhere), `XHR_PATH` (/xhr), `XHR_PUBLIC_KEY` / `XHR_SID` (default: the main inbound's), `XHR_PORT` (client-facing, default `ENTRY_NODE_PORT`), `XHR_EXIT_PORT` (2055), `XHR_INBOUND_ID` (new keys get attached to it), `XHR_MAX_CONNECTIONS` (3; mihomo `reuse-settings`, xray `xmux`).
+  - Builders: Clash (`network: xhttp`, `xhttp-opts`), the xray format, `vless://…type=xhttp` links. **No sing-box form**: sing-box has no XHTTP, and `build_singbox_config` drops any outbound with an XHTTP transport (`CLASH_ONLY_TRANSPORTS`). So Hiddify and Karing never see it, which is NekoVPN / FlClash / Hiddify 5 territory.
+  - Tier paid (`PROTOCOL_TIER`; the owner's call). **Opt-in** (`OPT_IN_PROTOCOLS`): `get_cascade_config` lists it disabled until the operator switches it on in the cascade editor, because an automatic "enabled" on deploy would hand out a server nobody runs.
+  - Lockdown order: after stls (`ws, stls, xhr, reality, hy2, hy2t`).
+  - **Probe:** sing-box cannot probe it, so a second sidecar runs on mihomo, `probe-proxy-mihomo` (compose profile `xhr`, `metacubex/mihomo:v1.19.33`). Its config comes from `scripts/gen_probe_config_mihomo.py`: one HTTP listener per protocol bound to its proxy (`listeners[].proxy`), :18087. `HealthChecker` probes `xhr` there (`PROBE_PROXY_MIHOMO_HOST`), and like the DE reserve writes nothing while that sidecar has no inbound. The sing-box generator skips xhr.
+  - **Exit inbound:** `scripts/setup_xhr_inbound.py` — dry run by default, `--apply` creates it through the panel API. It reuses the main inbound's Reality key and first short id and mirrors its PROXY-protocol sockopt. It attaches every client of the main inbound without flow and prints the haproxy lines for entry (`acl is_xhr_sni`, `backend xhr_exit … send-proxy-v2`).
+  - Before `--apply`: the dest's certificate record ≤ 8000 B (`rotate_reality_dest.py --sni` measures it from exit), and exit's xray below 26.7.11.
+  - Stand: `test_stand_xhr_in_mihomo_against_xray` runs the bot's own proxy in mihomo 1.19.33 against the inbound the script builds, on xray 26.6.22. A delay test passes; an unknown uuid fails.
+  - Exit-report tag `inbound-2055` → `xhr` (B2, the monitor's C7 veto).
+- **E4, SSH as the paid users' emergency path** (`bot/services/ssh_exit.py`). Russian networks are reported to freeze TCP to foreign hosting after ~16 KB, and SSH is reported exempt.
+  - Only in the **emergency profiles** (`lockdown=True`: lockdown mode, `/sub?emergency=1`, the SOS kit), last, never in Calls (TCP only). Only for `ru_exit.is_eligible` users (paid, not lapsed), since the path has no traffic accounting.
+  - Credentials are derived, never stored: user `n<12 hex of sha256(uuid)>`, password HMAC-SHA256(`SSH_USER_SECRET`, uuid) base64url 32 chars. The server's host key is pinned (`SSH_HOST_KEY`). Other settings: `SSH_EXIT_HOST`, `SSH_EXIT_PORT` (22022).
+  - `GET /api/ssh/users` (the exit report's token) returns SHA-512 crypt hashes only: no password, no uuid. A read error answers 503, never an empty list.
+  - `scripts/setup_ssh_exit.sh` (root, on EXIT): an alpine sshd container that only forwards (`PermitTTY no`, `ForceCommand /bin/false`, `AllowTcpForwarding local`, group `vpn`). A 2-min timer syncs users from that endpoint through a root-owned copy of the script, and refuses to drop every user on an empty list unless forced. It prints `SSH_HOST_KEY`.
+  - Stand: `test_stand_ssh_in_mihomo_against_the_scripts_sshd` — the script's sshd_config, the bot's hashed user, the bot's own ssh proxy in mihomo: it forwards, and a wrong password does not get in.
+- **E5, an experiment.** `/probe-big` answers 204 with ~20 KB of headers. With `app_settings.probe_big_testers = '1'`, the client testers' (§37 list) Clash Cascade / Auto / Calls check it instead of gstatic, so a path that freezes after 16 KB fails the check. Caveat: it sits behind exit's Caddy, so with exit down the DE reserve fails it too.
+- **E6, lockdown front.** Under lockdown ws leads only where the CDN front is seen to pass (`lockdown.fronted_passes`): a client of that network passed `p-ws`, or a user of it sat on cf-ws in the exit's presence (`protocol_usage`), within 24 h. Otherwise the order is TCP-direct, then ws, then UDP.
+  - Why: step 0 showed ws reaches exit through entry (DNAT 2053/2054), so "direct dark, ws alive" cannot come from a broken entry→exit leg. Public measurements also put Cloudflare outside the mobile whitelists.
+- E7 (AnyTLS, Mieru, Sudoku) waits for data, as planned.
+- **Tests:** `tests/integration/test_protocols_fingerprints.py` (26 plus the 2 stands above). 23 mutants killed, restored by reverse text replacement with a hash check.

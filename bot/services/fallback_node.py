@@ -44,6 +44,8 @@ from typing import Optional
 import requests
 import urllib3
 
+from bot.services import tls_fingerprint
+
 logger = logging.getLogger(__name__)
 
 # Statuses that get the fallback node. Mirrors PAID_USER_STATUSES in
@@ -147,7 +149,8 @@ class FallbackNodeService:
             'tls': {
                 'enabled': True,
                 'server_name': sni,
-                'utls': {'enabled': True, 'fingerprint': 'chrome'},
+                'utls': {'enabled': True,
+                         'fingerprint': tls_fingerprint.for_user(self.config, uuid)},
                 'reality': {
                     'enabled': True,
                     'public_key': self._cfg('FALLBACK_NODE_PBK'),

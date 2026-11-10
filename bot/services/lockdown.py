@@ -98,9 +98,9 @@ logger = logging.getLogger(__name__)
 # whitelist UDP is what goes first, and stls (TCP :443 to entry with a
 # real-looking SNI) outlives Reality (:8443) on networks that only
 # whitelist by port.
-LOCKDOWN_ORDER = ('ws', 'stls', 'reality', 'hy2', 'hy2t')
+LOCKDOWN_ORDER = ('ws', 'stls', 'xhr', 'reality', 'hy2', 'hy2t')
 # Direct-to-entry transports: the ones a whitelist kills together.
-DIRECT_PROTOCOLS = ('reality', 'hy2', 'hy2t', 'stls')
+DIRECT_PROTOCOLS = ('reality', 'hy2', 'hy2t', 'stls', 'xhr')
 # CDN-fronted transports: the ones that survive. ws is the only one today
 # (VMess+httpupgrade via Cloudflare, see project_phase_h_protocol_lessons).
 FRONTED_PROTOCOLS = ('ws',)
@@ -338,18 +338,66 @@ def load_lockdown_order(db) -> tuple:
 
 
 def apply_lockdown_order(ordered: Iterable[str],
-                         lockdown_order: Optional[Sequence[str]] = None) -> list:
+                         lockdown_order: Optional[Sequence[str]] = None,
+                         *, fronted_ok: bool = True) -> list:
     """Stable projection: the protocols named in ``lockdown_order``
     (default ``LOCKDOWN_ORDER``) first, in that order, then whatever
     else was in ``ordered`` in its existing order. Nothing is added
     (a protocol the operator disabled stays disabled) and nothing is
-    dropped."""
+    dropped.
+
+    ``fronted_ok=False`` (IMPROVEMENT_PLAN F, E6): no evidence that the
+    CDN front passes in this network, so ws does not lead — it goes right
+    after the TCP-direct protocols. Public measurements put Cloudflare
+    outside the mobile whitelists, and Cloudflare cuts Russian connections
+    after 16 KB; ws first was the right bet only where it is seen to work
+    (``fronted_passes``)."""
     ordered = list(ordered)
     order = tuple(lockdown_order) if lockdown_order else LOCKDOWN_ORDER
+    if not fronted_ok:
+        fronted = [p for p in order if p in FRONTED_PROTOCOLS]
+        rest = [p for p in order if p not in FRONTED_PROTOCOLS]
+        tcp = [p for p in rest if p not in ('hy2', 'hy2t')]
+        order = tuple(tcp + fronted + [p for p in rest if p in ('hy2', 'hy2t')])
     present = set(ordered)
     head = [p for p in order if p in present]
     head_set = set(head)
     return head + [p for p in ordered if p not in head_set]
+
+
+# How far back a sign that the CDN front passes in a network counts (E6).
+FRONTED_EVIDENCE_H = 24
+
+
+def fronted_passes(db, asn: Optional[str]) -> bool:
+    """E6: is there evidence the CDN front (ws) gets through in ``asn``
+    within FRONTED_EVIDENCE_H — a FlClash/NekoVPN client of that network
+    passing ws (``client_probe`` p-ws), or one of its users on cf-ws in the
+    exit's presence (``protocol_usage``)? No ASN, no evidence, or a read
+    error: False — the projection then keeps the TCP-direct protocols in
+    front. Never raises."""
+    if not asn or not isinstance(asn, str):
+        return False
+    from datetime import datetime, timedelta
+    now = datetime.utcnow()
+    since_space = (now - timedelta(hours=FRONTED_EVIDENCE_H)).strftime('%Y-%m-%d %H:%M:%S')
+    day = (now - timedelta(hours=FRONTED_EVIDENCE_H)).strftime('%Y-%m-%d')
+    try:
+        with db._connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM client_probe c JOIN users u ON u.chat_id = c.chat_id "
+                "WHERE c.grp = 'p-ws' AND c.ts >= ? AND UPPER(TRIM(u.last_asn)) = ? LIMIT 1",
+                (since_space, asn.strip().upper())).fetchone()
+            if row:
+                return True
+            row = conn.execute(
+                "SELECT 1 FROM protocol_usage p JOIN users u ON u.chat_id = p.chat_id "
+                "WHERE p.proto = 'cf-ws' AND p.day >= ? AND UPPER(TRIM(u.last_asn)) = ? LIMIT 1",
+                (day, asn.strip().upper())).fetchone()
+            return bool(row)
+    except Exception as e:
+        logger.warning(f"lockdown: fronted evidence read failed: {e}")
+        return False
 
 
 # ---- detector (pure) --------------------------------------------------------

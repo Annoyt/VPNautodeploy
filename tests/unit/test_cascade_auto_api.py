@@ -87,7 +87,9 @@ class TestAutoBlock:
                                 'last_run': None}
         # the pre-existing payload is intact
         assert data['order'] == DEFAULT
-        assert [c['name'] for c in data['config']] == DEFAULT
+        # the opt-in protocols (XHTTP, IMPROVEMENT_PLAN F, E3) follow, off
+        assert [c['name'] for c in data['config']] == DEFAULT + list(MK.OPT_IN_PROTOCOLS)
+        assert [c['enabled'] for c in data['config']][len(DEFAULT):] == [False]
         assert {c['name'] for c in data['catalog']} == set(MK.PROTOCOL_METHOD_MAP)
         assert data['default'] == DEFAULT
 

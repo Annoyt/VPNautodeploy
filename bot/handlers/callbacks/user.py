@@ -13,7 +13,7 @@ from bot.core.state_machine import StateMachine
 from bot.handlers.callbacks.base import BaseCallbackHandler
 from bot.services.billing import readd_client, tier_client_values
 from bot.services.lockdown import (
-    apply_lockdown_order, is_lockdown_active, load_lockdown_order,
+    apply_lockdown_order, fronted_passes, is_lockdown_active, load_lockdown_order,
 )
 from bot.services.notifications import NotificationService
 from bot.services.vpn import VPNService
@@ -882,6 +882,9 @@ class MyKeyAnswerHandler(BaseCallbackHandler):
         'hy2':     'generate_hy2_link',
         'hy2t':    'generate_hy2t_link',
         'reality': 'generate_vless_link',
+        # VLESS + XHTTP + Reality (IMPROVEMENT_PLAN F, E3); off while
+        # XHR_SNI is empty — every builder returns nothing then.
+        'xhr':     'generate_xhr_link',
     }
     # Per-protocol tier gates which user tiers see which protocols.
     # `paid` = the premium set: Turbo Hy2 (Brutal CC — the speed
@@ -898,6 +901,8 @@ class MyKeyAnswerHandler(BaseCallbackHandler):
         'hy2':     'free',
         'hy2t':    'paid',
         'reality': 'paid',
+        # The owner's call (plan F): paid until decided otherwise.
+        'xhr':     'paid',
     }
     PAID_USER_STATUSES = frozenset({'paid', 'support_topic'})
     # Turbo Hy2 leads: it's the paid default (fastest, Brutal CC), and
@@ -906,6 +911,11 @@ class MyKeyAnswerHandler(BaseCallbackHandler):
     # banned first by RKN once a new entry IP is profiled, so it stays
     # at the bottom. Admin can override via dashboard.
     DEFAULT_CASCADE_ORDER = ('hy2t', 'stls', 'ws', 'hy2', 'reality')
+    # Known protocols that join the cascade only when the operator switches
+    # them on (the dashboard editor): until then they are listed disabled.
+    # XHTTP (E3) needs an exit inbound and an haproxy route first — an
+    # automatic "enabled" on deploy would hand out a server nobody runs.
+    OPT_IN_PROTOCOLS = ('xhr',)
     SETTING_KEY = 'cascade_protocol_order'
     COUNTRY_SETTING_KEY = 'cascade_by_country'
     ASN_SETTING_KEY = 'cascade_by_asn'
@@ -967,16 +977,19 @@ class MyKeyAnswerHandler(BaseCallbackHandler):
                             out.append({'name': name, 'enabled': enabled})
                     if out:
                         # Add any known protocol that's missing from the
-                        # stored config as enabled at the end, so a new
-                        # protocol shipped in code appears without the
-                        # operator having to re-save.
+                        # stored config at the end, so a new protocol
+                        # shipped in code appears without the operator
+                        # having to re-save — enabled, unless it is opt-in.
                         for name in cls.PROTOCOL_METHOD_MAP:
                             if name not in seen:
-                                out.append({'name': name, 'enabled': True})
+                                out.append({'name': name,
+                                            'enabled': name not in cls.OPT_IN_PROTOCOLS})
                         return out
             except (ValueError, TypeError):
                 pass
-        return [{'name': n, 'enabled': True} for n in cls.DEFAULT_CASCADE_ORDER]
+        return ([{'name': n, 'enabled': True} for n in cls.DEFAULT_CASCADE_ORDER]
+                + [{'name': n, 'enabled': False} for n in cls.OPT_IN_PROTOCOLS
+                   if n not in cls.DEFAULT_CASCADE_ORDER])
 
     @classmethod
     def _coerce_order(cls, candidate) -> Optional[tuple]:
@@ -1189,7 +1202,9 @@ class MyKeyAnswerHandler(BaseCallbackHandler):
         # and the key card run through here. A forced projection (the
         # emergency profile) does not even read the mode.
         if force_lockdown or (apply_lockdown and is_lockdown_active(db)):
-            ordered = apply_lockdown_order(ordered, load_lockdown_order(db))
+            # E6: ws leads only where the CDN front is seen to pass.
+            ordered = apply_lockdown_order(ordered, load_lockdown_order(db),
+                                           fronted_ok=fronted_passes(db, effective_asn))
 
         # DPIMonitor's verdicts: stable partition, demoted to the tail.
         # Reads happen here (not earlier) so the base order above is

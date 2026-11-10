@@ -41,8 +41,10 @@ from bot.handlers.callbacks.user import MyKeyAnswerHandler as MK
 
 PAID_DEFAULT = 'hy2t → stls → ws → hy2 → reality'
 DEMO_DEFAULT = 'stls → ws → hy2'
-PAID_LOCKDOWN = 'ws → stls → reality → hy2 → hy2t'
-DEMO_LOCKDOWN = 'ws → stls → hy2'
+# IMPROVEMENT_PLAN F, E6: with no sign that the CDN front passes in the
+# network (the operator's card has none), ws goes after the TCP-direct ones
+PAID_LOCKDOWN = 'stls → reality → ws → hy2 → hy2t'
+DEMO_LOCKDOWN = 'stls → ws → hy2'
 DEFAULT_STATE = {'mode': 'auto', 'active': False, 'since': None, 'by': 'system',
                  'reason': '', 'streak_on': 0, 'streak_off': 0, 'last_change': None}
 SIGNATURE = ('прямые протоколы (reality, hy2, hy2t, stls) не отвечают 20+ мин, '
@@ -170,7 +172,7 @@ class TestOverview:
         assert 'режим: auto (решает детектор) · статус: ⚪️ не активен' in text
         assert f'• paid: {PAID_DEFAULT}' in text
         assert f'• demo: {DEMO_DEFAULT}' in text
-        assert 'при включении наверх: ws, stls, reality, hy2, hy2t' in text
+        assert 'при включении наверх: ws, stls, xhr, reality, hy2, hy2t' in text
         assert 'сигнатура шатдауна 0/2 прогонов подряд · здоровых 0/12' in text
         assert 'последнее изменение: не было' in text
         assert '/lockdown on · /lockdown off · /lockdown auto · оповестить юзеров: /broadcast' in text
@@ -230,7 +232,7 @@ class TestOverview:
         for raw in ('[]', '["bogus"]', '{oops', 'null', '{"a": 1}'):
             db.set_setting(LOCKDOWN_ORDER_KEY, raw)
             text = text_of(handler)
-            assert 'при включении наверх: ws, stls, reality, hy2, hy2t' in text, raw
+            assert 'при включении наверх: ws, stls, xhr, reality, hy2, hy2t' in text, raw
             assert 'override' not in text, raw
 
     def test_bad_json_is_auto_inactive_not_an_error(self, handler, db):
@@ -257,7 +259,7 @@ class TestOverview:
             [{'name': n, 'enabled': n != 'stls'} for n in MK.DEFAULT_CASCADE_ORDER]))
         seed(db, active=True, by='auto:probe_signature')
         text = text_of(handler)
-        assert '• paid: ws → reality → hy2 → hy2t' in text
+        assert '• paid: reality → ws → hy2 → hy2t' in text   # E6: no evidence for ws
         assert '• demo: ws → hy2' in text
 
 

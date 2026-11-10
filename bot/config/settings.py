@@ -280,6 +280,32 @@ class Settings:
         # delivering the servers if the main domain gets blocked. A mirror
         # must proxy /sub/<token>?format=clash-proxies to this bot. Empty = off.
         self.SUB_MIRROR_URLS: str = os.getenv('SUB_MIRROR_URLS', '').strip()
+        # TLS fingerprint pool, comma-separated (IMPROVEMENT_PLAN F, E1):
+        # each user gets one value by uuid; unset = chrome for everyone.
+        self.TLS_FINGERPRINTS: str = os.getenv('TLS_FINGERPRINTS', '').strip()
+        # VLESS + XHTTP + Reality (IMPROVEMENT_PLAN F, E3): one multiplexed
+        # HTTP/2 session instead of a handshake per connection. A separate
+        # exit inbound (XHR_EXIT_PORT, created by scripts/setup_xhr_inbound.py)
+        # behind entry's haproxy :8443, routed there by its own SNI. Empty
+        # XHR_SNI = the protocol is off everywhere (profiles, probes).
+        # SSH as the paid users' emergency path (IMPROVEMENT_PLAN F, E4;
+        # bot/services/ssh_exit.py, scripts/setup_ssh_exit.sh on exit).
+        self.SSH_EXIT_HOST: str = os.getenv('SSH_EXIT_HOST', '').strip()
+        self.SSH_EXIT_PORT: str = os.getenv('SSH_EXIT_PORT', '22022').strip() or '22022'
+        self.SSH_HOST_KEY: str = os.getenv('SSH_HOST_KEY', '').strip()
+        self.SSH_USER_SECRET: str = os.getenv('SSH_USER_SECRET', '').strip()
+        self.XHR_SNI: str = os.getenv('XHR_SNI', '').strip()
+        self.XHR_PATH: str = os.getenv('XHR_PATH', '/xhr').strip() or '/xhr'
+        self.XHR_PUBLIC_KEY: str = os.getenv('XHR_PUBLIC_KEY', '').strip()
+        self.XHR_SID: str = os.getenv('XHR_SID', '').strip()
+        try:
+            self.XHR_PORT: int = int(os.getenv('XHR_PORT', '0') or '0')
+            self.XHR_EXIT_PORT: int = int(os.getenv('XHR_EXIT_PORT', '2055') or '2055')
+            self.XHR_INBOUND_ID: int = int(os.getenv('XHR_INBOUND_ID', '0') or '0')
+            self.XHR_MAX_CONNECTIONS: int = int(os.getenv('XHR_MAX_CONNECTIONS', '3') or '3')
+        except ValueError:
+            self.XHR_PORT, self.XHR_EXIT_PORT, self.XHR_INBOUND_ID = 0, 2055, 0
+            self.XHR_MAX_CONNECTIONS = 3
 
         # OpenCode AI agent — the bot talks to a local `opencode serve`
         # HTTP server (headless). Optional: if OPENCODE_URL is empty, the
