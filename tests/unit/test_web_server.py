@@ -503,10 +503,22 @@ class TestHy2AuthQuotaGate:
 
     @pytest.mark.asyncio
     async def test_stale_reading_answers_now_and_refreshes_once(self):
+        import asyncio
+        from unittest.mock import AsyncMock
         server = self._make_server(self.OVER)
+        # The panel answers only when the test says so: the users lookup
+        # runs on a worker thread now (A4), and while the handler awaits
+        # it an instant mock refresh would land before the second auth.
+        gate = asyncio.Event()
+
+        async def slow_panel(_email):
+            await gate.wait()
+            return self.OVER
+        server.xui.get_client_traffic = AsyncMock(side_effect=slow_panel)
         self._warm(server, self.UNDER, age=server.HY2_QUOTA_FRESH_S + 5)
         assert (await self._auth(server))['ok'] is True
         assert (await self._auth(server))['ok'] is True      # refresh still in flight
+        gate.set()
         await self._drain(server)
         assert server.xui.get_client_traffic.await_count == 1   # deduped
         assert (await self._auth(server))['ok'] is False    # next connect: refreshed

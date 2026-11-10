@@ -137,6 +137,10 @@ class WebAppServer:
         # emails with a refresh in flight — a reconnect-looping client must
         # not stack refreshes (nor hammer the panel)
         self._hy2_quota_refreshing: set = set()
+        # hy2 auth: the last users row each key resolved to, for the
+        # moments bot.db cannot be read (_hy2_user_row).
+        # {uuid: (monotonic_ts, (chat_id, email, status, expiry))}
+        self._hy2_auth_rows: dict = {}
         # strong refs: the event loop keeps only weak ones to its tasks
         self._bg_tasks: set = set()
         # DE reserve provisioning off the /sub path (see
@@ -586,6 +590,102 @@ class WebAppServer:
         self._bg_tasks.add(task)
         task.add_done_callback(self._bg_tasks.discard)
 
+    # How long the last users row a key resolved to may stand in when
+    # bot.db cannot be read (IMPROVEMENT_PLAN F, A4). Every good read
+    # refreshes it, so an active user's row is minutes old; the limit only
+    # bounds how long a long outage keeps letting in what it last saw.
+    HY2_AUTH_ROW_MAX_S = 6 * 3600
+
+    def _hy2_lookup_user(self, password: str):
+        """``(chat_id, email, status, expiry)`` of the key, or None when no
+        user has it. RAISES when bot.db cannot be read — the caller must
+        tell "no such key" from "could not look"."""
+        with self.db._connect() as conn:
+            row = conn.execute(
+                "SELECT chat_id, email, status, subscription_expiry "
+                "FROM users WHERE uuid = ? LIMIT 1",
+                (password,),
+            ).fetchone()
+        return tuple(row) if row else None
+
+    async def _hy2_user_row(self, password: str):
+        """The users row behind a hy2 key, read on a worker thread: on the
+        event loop a locked bot.db (5-s busy timeout) stalled every request
+        the web server had in flight, not just this handshake.
+
+        A read that fails falls back to the last row this key resolved to,
+        if that is under ``HY2_AUTH_ROW_MAX_S`` old: the same status and
+        expiry gates then run on it, so an expired or demoted row still
+        fails. A key never seen since the start fails closed, as before —
+        a database error is never an "allow" for an unknown key. A good
+        read without a row (revoked key) drops the remembered row."""
+        import time as _time
+        try:
+            row = await asyncio.to_thread(self._hy2_lookup_user, password)
+        except Exception as e:
+            cached = self._hy2_auth_rows.get(password)
+            age = _time.monotonic() - cached[0] if cached else None
+            if cached is not None and age < self.HY2_AUTH_ROW_MAX_S:
+                logger.warning(
+                    f"hy2_auth: db lookup failed ({e}); deciding from the row "
+                    f"read {int(age)} s ago"
+                )
+                return cached[1]
+            logger.warning(f"hy2_auth: db lookup failed: {e}")
+            return None
+        if row:
+            self._hy2_auth_rows[password] = (_time.monotonic(), row)
+        else:
+            self._hy2_auth_rows.pop(password, None)
+        return row
+
+    def _hy2_record(self, geo_chat_id, geo: tuple, audit: tuple) -> None:
+        """The auth callback's two writes, off the answer path: the user's
+        last geo (only for an allow with something to write) and the audit
+        row the adoption widget and DPIMonitor R4 read. Best-effort, each
+        on its own — never raises."""
+        cc, asn, city, lat, lon = geo
+        if geo_chat_id and (cc or asn or city):
+            try:
+                with self.db._connect() as conn:
+                    conn.execute(
+                        "UPDATE users SET "
+                        " last_country = COALESCE(?, last_country), "
+                        " last_asn     = COALESCE(?, last_asn), "
+                        " last_city    = COALESCE(?, last_city), "
+                        " last_lat     = COALESCE(?, last_lat), "
+                        " last_lon     = COALESCE(?, last_lon) "
+                        "WHERE chat_id = ?",
+                        (cc, asn, city, lat, lon, geo_chat_id),
+                    )
+                    conn.commit()
+            except Exception as e:
+                logger.warning(f"hy2_auth: last_geo update failed: {e}")
+        try:
+            with self.db._connect() as conn:
+                conn.execute(
+                    "INSERT INTO hy2_auth_log "
+                    "(chat_id, decision, addr_ip, country, asn, as_org) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    audit,
+                )
+                conn.commit()
+        except Exception as e:
+            logger.warning(f"hy2_auth: audit insert failed: {e}")
+
+    def _spawn_hy2_record(self, geo_chat_id, geo: tuple, audit: tuple) -> None:
+        """Run ``_hy2_record`` on a worker thread after the answer is out.
+        Never raises: this sits on the auth path."""
+        try:
+            task = asyncio.get_running_loop().create_task(
+                asyncio.to_thread(self._hy2_record, geo_chat_id, geo, audit)
+            )
+        except Exception as e:
+            logger.warning(f"hy2_auth: could not schedule the audit write: {e}")
+            return
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
+
     async def _hy2_auth_common(
         self, request: web.Request, paid_only: bool
     ) -> web.Response:
@@ -661,16 +761,7 @@ class WebAppServer:
         email_id = None
 
         if password:
-            try:
-                with self.db._connect() as conn:
-                    row = conn.execute(
-                        "SELECT chat_id, email, status, subscription_expiry "
-                        "FROM users WHERE uuid = ? LIMIT 1",
-                        (password,),
-                    ).fetchone()
-            except Exception as e:
-                logger.warning(f"hy2_auth: db lookup failed: {e}")
-                row = None
+            row = await self._hy2_user_row(password)
             if row:
                 chat_id_str, email_id, status, expiry = row[0], row[1], row[2], row[3]
                 expired = False
@@ -735,40 +826,16 @@ class WebAppServer:
                         f"(used {used} of {total}, enable={t.get('enable')})"
                     )
 
-        # Pin the user's last geo (country / ASN / city / lat / lon)
-        # whenever we know them — drives per-region cascade tuning
-        # when the same user hits /mykey later via TG DM and supplies
-        # marker positions for the Signals map.
-        if decision == 'allow' and chat_id_str and (cc or asn or city):
-            try:
-                with self.db._connect() as conn:
-                    conn.execute(
-                        "UPDATE users SET "
-                        " last_country = COALESCE(?, last_country), "
-                        " last_asn     = COALESCE(?, last_asn), "
-                        " last_city    = COALESCE(?, last_city), "
-                        " last_lat     = COALESCE(?, last_lat), "
-                        " last_lon     = COALESCE(?, last_lon) "
-                        "WHERE chat_id = ?",
-                        (cc, asn, city, lat, lon, chat_id_str),
-                    )
-                    conn.commit()
-            except Exception as e:
-                logger.warning(f"hy2_auth: last_geo update failed: {e}")
-
-        # Audit every callback for the adoption widget. Best-effort —
-        # failure here can't block the auth response.
-        try:
-            with self.db._connect() as conn:
-                conn.execute(
-                    "INSERT INTO hy2_auth_log "
-                    "(chat_id, decision, addr_ip, country, asn, as_org) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
-                    (chat_id_str, decision, addr_ip, cc, asn, org),
-                )
-                conn.commit()
-        except Exception as e:
-            logger.warning(f"hy2_auth: audit insert failed: {e}")
+        # The writes go AFTER the answer (IMPROVEMENT_PLAN F, A4): hysteria
+        # holds the client's handshake on this callback, and these used to
+        # run on the event loop before it — a sqlite write lock (5-s busy
+        # timeout, twice) delayed the handshake and every other request
+        # the web server had in flight.
+        self._spawn_hy2_record(
+            chat_id_str if decision == 'allow' else None,
+            (cc, asn, city, lat, lon),
+            (chat_id_str, decision, addr_ip, cc, asn, org),
+        )
 
         if decision == 'allow':
             logger.info(f"hy2_auth: allow {chat_id_str} ({email_id}) from {addr}")
@@ -1341,19 +1408,24 @@ class WebAppServer:
                 return web.Response(status=503, text='RU-zone is not available')
         abroad = ru_exit is not None
         text_body = None
+
+        def demoted_here() -> frozenset:
+            # What DPIMonitor demotes for this network. E3: the Clash
+            # profile's Cascade/Auto leave it out (VPN keeps it for the
+            # manual pick); both profiles move it to the end of the calls
+            # group (IMPROVEMENT_PLAN F, A2). Tolerant read — junk
+            # collapses to nothing.
+            return frozenset(MyKeyAnswerHandler.get_auto_demotions(
+                self.db, asn or getattr(user, 'last_asn', None),
+            ))
+
         if abroad_clash is not None:
             text_body = abroad_clash
         elif abroad_obj is not None:
             config_obj = abroad_obj
         elif fmt == 'clash':
-            # E3: the profile's Cascade/Auto groups leave out what
-            # DPIMonitor demotes for this network (VPN keeps it for the
-            # manual pick). Tolerant read — junk collapses to nothing.
-            demoted = MyKeyAnswerHandler.get_auto_demotions(
-                self.db, asn or getattr(user, 'last_asn', None),
-            )
             text_body = self.subscription.build_clash_config(
-                user, cascade, lockdown=lockdown, demoted=frozenset(demoted),
+                user, cascade, lockdown=lockdown, demoted=demoted_here(),
             )
         elif fmt == 'links' or (not fmt and 'happ' in ua):
             text_body = self.subscription.build_links(user, cascade)
@@ -1361,7 +1433,7 @@ class WebAppServer:
             config_obj = self.subscription.build_xray_config(user, cascade)
         else:
             config_obj = self.subscription.build_singbox_config(
-                user, cascade, lockdown=lockdown,
+                user, cascade, lockdown=lockdown, demoted=demoted_here(),
             )
 
         # Surface quota/expiry to Hiddify's profile panel via the
