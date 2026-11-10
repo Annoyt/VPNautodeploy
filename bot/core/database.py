@@ -1028,6 +1028,19 @@ class Database:
                 conn.commit()
         except sqlite3.Error as e:
             logger.error(f"_init_hy2_sessions failed: {e}")
+            return
+        # One session = one (instance, user, end time, length): a window the
+        # reporter sends again (its POST timed out after the bot stored it)
+        # adds nothing (INSERT OR IGNORE).
+        try:
+            with self._connect() as conn:
+                conn.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_hy2_sessions_once "
+                    "ON hy2_sessions(IFNULL(instance, ''), IFNULL(chat_id, ''), ended_at, duration_s)"
+                )
+                conn.commit()
+        except sqlite3.Error as e:
+            logger.error(f"hy2_sessions unique index failed: {e}")
 
     def _init_client_apps(self) -> None:
         """Which app fetched a user's profile, and when: one row per (user,

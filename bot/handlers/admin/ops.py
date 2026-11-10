@@ -801,22 +801,35 @@ class AdminOpsMixin(AdminHandlerBase):
             text = f"❌ /usage: {html.escape(str(e))[:200]}"
         self._send(chat_id=chat_id, text=text, parse_mode='HTML')
 
+    # A user counts under an xray protocol that carried at least this share
+    # of their accepted connections in the period: a client's url test
+    # through every server is a handful of connections, real traffic is many.
+    USAGE_MIN_SHARE = 0.2
+
     def _usage_report(self, days: int) -> str:
         now = datetime.utcnow()
         day0 = (now - timedelta(days=days - 1)).strftime('%Y-%m-%d')
-        since = (now - timedelta(days=days)).strftime('%Y-%m-%d %H:%M:%S')
         cells: dict = {}
         with self.db._connect() as conn:
-            for proto, asn, chat in conn.execute(
-                    "SELECT p.proto, COALESCE(NULLIF(UPPER(TRIM(u.last_asn)), ''), '?'), p.chat_id "
+            per_user: dict = {}
+            for proto, asn, chat, conns in conn.execute(
+                    "SELECT p.proto, COALESCE(NULLIF(UPPER(TRIM(u.last_asn)), ''), '?'), "
+                    "p.chat_id, SUM(p.conns) "
                     "FROM protocol_usage p LEFT JOIN users u ON u.chat_id = p.chat_id "
-                    "WHERE p.day >= ?", (day0,)):
-                cells.setdefault(asn, {}).setdefault(proto, set()).add(chat)
+                    "WHERE p.day >= ? GROUP BY p.chat_id, p.proto", (day0,)):
+                per_user.setdefault((asn, chat), {})[proto] = int(conns or 0)
+            for (asn, chat), by_proto in per_user.items():
+                total = sum(by_proto.values()) or 1
+                for proto, n in by_proto.items():
+                    if n / total >= self.USAGE_MIN_SHARE:
+                        cells.setdefault(asn, {}).setdefault(proto, set()).add(chat)
+            # Calendar days, like the xray columns (hy2_auth_log.ts is
+            # CURRENT_TIMESTAMP, a SPACE format date() reads).
             for asn, chat in conn.execute(
                     "SELECT COALESCE(NULLIF(UPPER(TRIM(u.last_asn)), ''), '?'), h.chat_id "
                     "FROM hy2_auth_log h LEFT JOIN users u ON u.chat_id = h.chat_id "
-                    "WHERE h.decision = 'allow' AND h.ts >= ? AND h.chat_id IS NOT NULL "
-                    "AND h.chat_id != 'probe_internal'", (since,)):
+                    "WHERE h.decision = 'allow' AND date(h.ts) >= ? AND h.chat_id IS NOT NULL "
+                    "AND h.chat_id != 'probe_internal'", (day0,)):
                 cells.setdefault(asn, {}).setdefault('hy2', set()).add(chat)
         if not cells:
             return (f"📊 <b>Протоколы по операторам</b> за {days} д: данных нет — "
@@ -837,7 +850,9 @@ class AdminOpsMixin(AdminHandlerBase):
                "<pre>" + html.escape("\n".join(lines)) + "</pre>"]
         if rest > 0:
             out.append(f"<i>ещё сетей: {rest}</i>")
-        out.append("<i>«?» — профиль ни разу не обновлялся из своей сети</i>")
+        out.append(f"<i>xray: протокол, на который пришлось ≥ {int(self.USAGE_MIN_SHARE * 100)} % "
+                   f"подключений пользователя (url-тесты клиентов не в счёт); hy2 — была "
+                   f"авторизация (вместе с hy2t). «?» — профиль ни разу не обновлялся из своей сети</i>")
         return "\n".join(out)
 
     def _read_probe_state(self, now: datetime) -> dict:

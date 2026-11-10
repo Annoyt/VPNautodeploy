@@ -2529,7 +2529,10 @@ class NotificationService:
                 conn.execute("DELETE FROM exit_reports WHERE ts < ?", (cutoff,))
                 conn.execute("DELETE FROM hy2_sessions WHERE ended_at < ?", (cutoff,))
                 # Healthcheck reports (D1): a week is plenty to look back.
-                conn.execute("DELETE FROM healthcheck_reports WHERE ts < ?",
+                # The newest one always stays: with none left the alert
+                # reads "never installed" and a stale timer heals itself.
+                conn.execute("DELETE FROM healthcheck_reports WHERE ts < ? "
+                             "AND id < (SELECT MAX(id) FROM healthcheck_reports)",
                              ((datetime.utcnow() - timedelta(days=7)).isoformat(),))
                 # Protocol usage (D3): one row per user, protocol and day.
                 conn.execute("DELETE FROM protocol_usage WHERE day < ?",

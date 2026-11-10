@@ -237,7 +237,8 @@ class TestHeartbeat:
         monkeypatch.setattr(reporter, 'read_hysteria_events', lambda state: [])
         monkeypatch.setattr(reporter, 'post_report', lambda payload: sent.append(payload) or True)
         assert reporter.run_once() == 0
-        assert sent == [{'access': [], 'rejects': [], 'presence': [], 'hy2_sessions': []}]
+        assert sent == [{'access': [], 'rejects': [], 'presence': [], 'usage': [],
+                         'hy2_sessions': []}]
 
     def test_a_failed_post_keeps_the_offsets(self, tmp_path, monkeypatch):
         logs = tmp_path / 'logs'
@@ -257,32 +258,57 @@ class TestHeartbeat:
 
 
 class TestHy2Sessions:
-    """IMPROVEMENT_PLAN F, D4: sessions paired from the hysteria journal."""
+    """IMPROVEMENT_PLAN F, D4: sessions paired from the hysteria journal,
+    inside one hysteria process; a disconnect closes the connect with its
+    address, else the newest open one."""
 
     def test_pairs_by_client_whatever_the_address(self):
         state = {}
-        events = [('hysteria', 100.0, 'connected', 'u1@x', ''),
-                  ('hysteria', 160.0, 'connected', 'u2@x', ''),
+        events = [('hysteria', 100.0, 'connected', 'u1@x', '', 'b:1', '1.2.3.4:1'),
+                  ('hysteria', 160.0, 'connected', 'u2@x', '', 'b:1', '5.6.7.8:1'),
                   ('hysteria', 700.0, 'disconnected', 'u1@x',
-                   'timeout: no recent network activity'),
-                  ('hysteria', 800.0, 'disconnected', 'u3@x', 'x')]   # never seen open
+                   'timeout: no recent network activity', 'b:1', '1.2.3.4:9'),
+                  ('hysteria', 800.0, 'disconnected', 'u3@x', 'x', 'b:1', '')]   # never seen open
         sessions = reporter.pair_sessions(events, state, now=800.0)
         assert sessions == [{'id': 'u1@x', 'unit': 'hysteria', 'duration_s': 600,
-                             'error': 'timeout: no recent network activity'}]
-        assert state['hy2_open'] == {'hysteria|u2@x': [160.0]}
+                             'error': 'timeout: no recent network activity', 'ended_at': 700.0}]
+        assert state['hy2_open'] == {'hysteria|b:1|u2@x': [[160.0, '5.6.7.8:1']]}
 
-    def test_a_disconnect_closes_the_oldest_open_connect(self):
+    def test_a_lost_disconnect_does_not_stretch_the_next_sessions(self):
+        # the review's repro: one orphan connect, then sessions of 60 s and
+        # 30 s an hour apart — reported as 60 and 30, not 3660 and 3630
         state = {}
-        events = [('hysteria', 0.0, 'connected', 'u1@x', ''),
-                  ('hysteria', 100.0, 'connected', 'u1@x', ''),
-                  ('hysteria', 400.0, 'disconnected', 'u1@x', '')]
-        assert reporter.pair_sessions(events, state, now=400.0)[0]['duration_s'] == 400
-        assert state['hy2_open'] == {'hysteria|u1@x': [100.0]}
+        events = [('hysteria', 0.0, 'connected', 'u1@x', '', 'b:1', 'a:1'),
+                  ('hysteria', 3600.0, 'connected', 'u1@x', '', 'b:1', 'a:2'),
+                  ('hysteria', 3660.0, 'disconnected', 'u1@x', '', 'b:1', 'a:9'),
+                  ('hysteria', 7200.0, 'connected', 'u1@x', '', 'b:1', 'a:3'),
+                  ('hysteria', 7230.0, 'disconnected', 'u1@x', '', 'b:1', 'a:8')]
+        got = [x['duration_s'] for x in reporter.pair_sessions(events, state, now=7230.0)]
+        assert got == [60, 30]
+
+    def test_the_same_address_closes_its_own_connect(self):
+        state = {}
+        events = [('hysteria', 0.0, 'connected', 'u1@x', '', 'b:1', 'phone:1'),
+                  ('hysteria', 100.0, 'connected', 'u1@x', '', 'b:1', 'laptop:1'),
+                  ('hysteria', 500.0, 'disconnected', 'u1@x', '', 'b:1', 'phone:1')]
+        assert reporter.pair_sessions(events, state, now=500.0)[0]['duration_s'] == 500
+
+    def test_a_restart_drops_the_connects_it_killed(self):
+        state = {}
+        reporter.pair_sessions([('hysteria', 0.0, 'connected', 'u1@x', '', 'b:1', 'a:1')],
+                               state, now=0.0)
+        # hysteria restarted (new pid): no disconnect was logged for the old one
+        events = [('hysteria', 4000.0, 'connected', 'u1@x', '', 'b:2', 'a:2'),
+                  ('hysteria', 4060.0, 'disconnected', 'u1@x', '', 'b:2', 'a:7')]
+        got = reporter.pair_sessions(events, state, now=4060.0)
+        assert [x['duration_s'] for x in got] == [60]
+        assert state['hy2_open'] == {}
 
     def test_an_open_connect_carries_over_and_closes_later(self):
         state = {}
-        reporter.pair_sessions([('hysteria', 10.0, 'connected', 'u1@x', '')], state, now=10.0)
-        later = reporter.pair_sessions([('hysteria', 3610.0, 'disconnected', 'u1@x', '')],
+        reporter.pair_sessions([('hysteria', 10.0, 'connected', 'u1@x', '', 'b:1', 'a')],
+                               state, now=10.0)
+        later = reporter.pair_sessions([('hysteria', 3610.0, 'disconnected', 'u1@x', '', 'b:1', 'a')],
                                        state, now=3610.0)
         assert later[0]['duration_s'] == 3600
 
@@ -300,24 +326,107 @@ class TestHy2Sessions:
         reporter.pair_sessions([], state, now=25 * 3600.0)
         assert state['hy2_open'] == {}
 
-    def test_journal_lines_are_parsed(self, monkeypatch):
-        import json as _json
-        lines = [
-            {'__CURSOR': 'c1', '_SYSTEMD_UNIT': 'hysteria.service',
-             '__REALTIME_TIMESTAMP': '1762800000000000',
-             'MESSAGE': '2026-11-11T01:17:40+05:00\tINFO\tclient connected\t'
-                        '{"addr": "1.2.3.4:36389", "id": "u1@x", "tx": 0}'},
-            {'__CURSOR': 'c2', '_SYSTEMD_UNIT': 'hysteria.service',
-             '__REALTIME_TIMESTAMP': '1762800060000000', 'MESSAGE': 'something else'},
-        ]
+    def test_an_old_state_shape_is_dropped_not_crashed_on(self):
+        state = {'hy2_open': {'hysteria|u1@x': [10.0]}}
+        assert reporter.pair_sessions([], state, now=20.0) == []
+        assert state['hy2_open'] == {}
 
-        class Done:
-            stdout = '\n'.join(_json.dumps(x) for x in lines)
+
+class _Run:
+    def __init__(self, stdout='', rc=0, stderr=''):
+        self.stdout, self.returncode, self.stderr = stdout, rc, stderr
+
+
+def _entry(cursor, epoch_s, message, pid='77'):
+    import json as _json
+    return _json.dumps({'__CURSOR': cursor, '_SYSTEMD_UNIT': 'hysteria.service',
+                        '_BOOT_ID': 'boot', '_PID': pid,
+                        '__REALTIME_TIMESTAMP': str(int(epoch_s * 1e6)), 'MESSAGE': message})
+
+
+CONNECT = ('2026-11-11T01:17:40+05:00\tINFO\tclient connected\t'
+           '{"addr": "1.2.3.4:36389", "id": "u1@x", "tx": 0}')
+
+
+class TestJournalRead:
+
+    def test_journal_lines_are_parsed(self, monkeypatch):
+        now = 1762800100.0
+        out = '\n'.join([_entry('c1', 1762800000.0, CONNECT),
+                         _entry('c2', 1762800060.0, 'something else')])
         calls = []
         monkeypatch.setattr(reporter.subprocess, 'run',
-                            lambda cmd, **kw: calls.append(cmd) or Done())
-        state = {'journal_cursor': 'c0'}
-        events = reporter.read_hysteria_events(state)
-        assert events == [('hysteria', 1762800000.0, 'connected', 'u1@x', '')]
-        assert state['journal_cursor'] == 'c2'
+                            lambda cmd, **kw: calls.append(cmd) or _Run(out))
+        state = {'journal_cursor': 'c0', 'journal_cursor_ts': now - 300}
+        events = reporter.read_hysteria_events(state, now=now)
+        assert events == [('hysteria', 1762800000.0, 'connected', 'u1@x', '', 'boot:77',
+                           '1.2.3.4:36389')]
+        assert state['journal_cursor'] == 'c2' and state['journal_cursor_ts'] == 1762800060.0
         assert calls[0][-2:] == ['--after-cursor', 'c0']
+
+    def test_a_failing_journalctl_starts_over(self, monkeypatch):
+        monkeypatch.setattr(reporter.subprocess, 'run',
+                            lambda cmd, **kw: _Run('', rc=1, stderr='Failed to seek to cursor'))
+        state = {'journal_cursor': 'bad', 'journal_cursor_ts': 990.0,
+                 'hy2_open': {'hysteria|b:1|u1@x': [[900.0, 'a']]}}
+        assert reporter.read_hysteria_events(state, now=1000.0) == []
+        assert 'journal_cursor' not in state and state['hy2_open'] == {}
+
+    def test_a_timeout_starts_over(self, monkeypatch):
+        def slow(cmd, **kw):
+            raise reporter.subprocess.TimeoutExpired(cmd, 30)
+        monkeypatch.setattr(reporter.subprocess, 'run', slow)
+        state = {'journal_cursor': 'c', 'journal_cursor_ts': 990.0}
+        assert reporter.read_hysteria_events(state, now=1000.0) == []
+        assert 'journal_cursor' not in state
+
+    def test_an_old_cursor_is_not_replayed(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(reporter.subprocess, 'run',
+                            lambda cmd, **kw: calls.append(cmd) or _Run(''))
+        state = {'journal_cursor': 'c', 'journal_cursor_ts': 1000.0,
+                 'hy2_open': {'hysteria|b:1|u1@x': [[900.0, 'a']]}}
+        reporter.read_hysteria_events(state, now=1000.0 + 31 * 60)
+        assert calls[0][-2:] == ['--since', '-10min']
+        assert state['hy2_open'] == {}
+
+    def test_entries_from_before_the_cursor_are_skipped(self, monkeypatch):
+        # a vacuumed cursor: journalctl starts from the head with rc 0
+        out = '\n'.join([_entry('old', 100.0, CONNECT), _entry('new', 1000.0, CONNECT)])
+        monkeypatch.setattr(reporter.subprocess, 'run', lambda cmd, **kw: _Run(out))
+        state = {'journal_cursor': 'gone', 'journal_cursor_ts': 900.0}
+        events = reporter.read_hysteria_events(state, now=1001.0)
+        assert [e[1] for e in events] == [1000.0]
+
+    def test_the_journal_never_costs_the_report(self, tmp_path, monkeypatch):
+        logs = tmp_path / 'logs'
+        logs.mkdir()
+        (logs / 'access.log').write_text('')
+        (logs / 'error.log').write_text('')
+        monkeypatch.setattr(reporter, 'LOG_DIR', str(logs))
+        monkeypatch.setattr(reporter, 'STATE_PATH', str(tmp_path / 'state.json'), raising=False)
+        monkeypatch.setattr(reporter, 'TOKEN', 'sekret')
+
+        def broken(state):
+            raise RuntimeError('boom')
+        monkeypatch.setattr(reporter, 'read_hysteria_events', broken)
+        sent = []
+        monkeypatch.setattr(reporter, 'post_report', lambda payload: sent.append(payload) or True)
+        assert reporter.run_once() == 0
+        assert sent and sent[0]['hy2_sessions'] == []
+
+
+class TestUsageBlock:
+
+    def test_every_inbound_with_its_count(self):
+        lines = [
+            '2026/11/10 10:00:00.1 from 203.0.113.5:5555 accepted tcp:a.com:443 [inbound-443 >> direct] email: u1@x',
+            '2026/11/10 10:00:01.1 from 203.0.113.5:5556 accepted tcp:b.com:443 [inbound-443 >> direct] email: u1@x',
+            '2026/11/10 10:00:02.1 from 203.0.113.5:5557 accepted tcp:c.com:443 [inbound-2053 >> direct] email: u1@x',
+            '2026/11/10 10:00:03.1 from 127.0.0.1:5558 accepted tcp:d.com:443 [api >> api] email: u1@x',
+            '2026/11/10 10:00:04.1 from 203.0.113.6:5559 accepted tcp:e.com:443 [inbound-443 >> direct] email: probe_x@x',
+        ]
+        got = reporter.parse_usage(lines)
+        assert got == [{'email': 'u1@x', 'tag': 'inbound-2053', 'conns': 1},
+                       {'email': 'u1@x', 'tag': 'inbound-443', 'conns': 2}]
+

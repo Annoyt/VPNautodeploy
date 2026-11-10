@@ -102,12 +102,16 @@ from typing import Dict, List, Optional, Tuple
 def _load_probe_rules():
     """bot/services/probe_rules.py, loaded by its path: this script runs on
     the entry HOST, outside the container and without the bot's packages,
-    and that module is stdlib-only for exactly this reader. It is rsynced
-    with the rest of bot/ (scripts/deploy_to_entry.sh), so it is always
-    next to this file."""
+    and that module is stdlib-only for exactly this reader. The timer runs
+    a root-owned copy with the module next to it
+    (scripts/install_protocol_healthcheck.sh); a run from the repo (the
+    agent's STEP 0) finds it in bot/services, rsynced with the rest of bot/."""
     import importlib.util
     from pathlib import Path
-    path = Path(__file__).resolve().parent.parent / 'bot' / 'services' / 'probe_rules.py'
+    here = Path(__file__).resolve().parent
+    path = here / 'probe_rules.py'
+    if not path.exists():
+        path = here.parent / 'bot' / 'services' / 'probe_rules.py'
     spec = importlib.util.spec_from_file_location('nekovpn_probe_rules', str(path))
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -186,7 +190,7 @@ INLINE_A = r'''
 import json, sqlite3, subprocess, sys
 from datetime import datetime, timedelta
 DB = %(db)r
-out = {"probes": {}, "newest_ts": None, "alerts": [], "audit": {}}
+out = {"probes": {}, "newest_ts": None, "alerts": [], "audit": {}, "cascade_order": None}
 now = datetime.utcnow()
 cutoff = (now - timedelta(hours=%(window_h)d)).isoformat()
 try:
@@ -214,6 +218,9 @@ try:
         "WHERE replace(fired_at, 'T', ' ') >= ? "
         "AND (key LIKE 'protocol_down:%%' OR key LIKE 'dpi_%%') "
         "ORDER BY fired_at DESC LIMIT 20", (acut,))]
+    row = conn.execute(
+        "SELECT value FROM app_settings WHERE key = 'cascade_protocol_order'").fetchone()
+    out["cascade_order"] = row[0] if row else None
 except Exception as e:
     out["db_error"] = str(e)[:300]
 try:
@@ -448,7 +455,7 @@ def collect_layer_a() -> dict:
     the bot's /health from the host. The /health fetch is separate so a
     dead container still yields a clear 'bot down' instead of a stack."""
     out = {'ok': False, 'error': None, 'probes': {}, 'newest_ts': None,
-           'alerts': [], 'audit': {}, 'health': {}}
+           'alerts': [], 'audit': {}, 'health': {}, 'cascade_order': None}
     rc, so, se = _run(['docker', 'exec', '-e', 'PYTHONPATH=/app', BOT_CONTAINER,
                        'python3', '-c', INLINE_A], TIMEOUT_A)
     if rc != 0 and not so.strip():
@@ -456,7 +463,8 @@ def collect_layer_a() -> dict:
     else:
         try:
             data = json.loads(so.strip().splitlines()[-1])
-            out.update({k: data.get(k, out[k]) for k in ('probes', 'newest_ts', 'alerts', 'audit')})
+            out.update({k: data.get(k, out[k])
+                        for k in ('probes', 'newest_ts', 'alerts', 'audit', 'cascade_order')})
             if data.get('db_error'):
                 out['error'] = f"bot.db: {data['db_error']}"
             else:
@@ -691,15 +699,20 @@ CERT_WARN_BYTES = 7000       # the dest cert is creeping towards the 8192 buffer
 
 
 def findings_for(layers: dict) -> List[dict]:
-    """``[{key, severity, title, next}]`` from the raw layers. Pure."""
+    """``[{key, severity, title, next, layer}]`` from the raw layers. Pure.
+    ``layer`` is the one that looked ('a' bot db, 'b' entry, 'c' exit): the
+    bot keeps a finding's alert as it is while its layer could not look."""
     a = layers.get('a') or {}
     b = layers.get('b') or {}
     c = layers.get('c') or {}
     out: List[dict] = []
+    # Protocols the operator switched off (hy2t since 2026-09-21): their
+    # units and rules may be gone on purpose, nothing to page about.
+    off = probe_rules.operator_disabled(a.get('cascade_order')) if a.get('ok') else set()
     audit = _audit_flags(a.get('audit') or {}) if a.get('ok') else None
     if audit and audit['rc'] == 1:
         where = ', '.join(sorted(audit['broken_inbounds'])) or 'см. строки аудита'
-        out.append({'key': 'panel_audit', 'severity': 'critical',
+        out.append({'key': 'panel_audit', 'severity': 'critical', 'layer': 'a',
                     'title': f'аудит панели: поля клиентов сломаны ({where})',
                     'next': 'docker exec -e PYTHONPATH=/app vpn-bot python3 '
                             '/app/scripts/verify_panel_client_fields.py'})
@@ -711,13 +724,14 @@ def findings_for(layers: dict) -> List[dict]:
         if cert_len is not None and cert_len > CERT_WARN_BYTES:
             over = cert_len > CERT_LIMIT_BYTES
             out.append({'key': 'reality_dest_cert', 'severity': 'critical' if over else 'warn',
+                        'layer': 'c',
                         'title': (f'сертификат Reality-dest {sni}: {cert_len} байт '
                                   f'(предел xray 8192, порог {CERT_LIMIT_BYTES})'),
                         'next': 'scripts/rotate_reality_dest.py --sni <host>  # см. AGENTS.md §23'})
         for tag, unit in HYSTERIA_UNIT.items():
             svc = (c.get('services') or {}).get(unit)
-            if svc and svc != 'active':
-                out.append({'key': f'unit:{unit}',
+            if svc and svc != 'active' and tag not in off:
+                out.append({'key': f'unit:{unit}', 'layer': 'c',
                             'severity': 'critical' if tag == 'hy2' else 'warn',
                             'title': f'{unit} на exit: {svc}',
                             'next': f"ssh exit-node 'systemctl status {unit} --no-pager'"})
@@ -725,22 +739,22 @@ def findings_for(layers: dict) -> List[dict]:
             hop = parse_redirect_rules(c.get('nat_prerouting'))
             for tag, rules in EXIT_HOP_FOR.items():
                 missing = [f'{d}→:{p}' for d, p in rules if (d, p) not in hop]
-                if missing:
-                    out.append({'key': f'exit_hop:{tag}', 'severity': 'warn',
+                if missing and tag not in off:
+                    out.append({'key': f'exit_hop:{tag}', 'severity': 'warn', 'layer': 'c',
                                 'title': f'{tag}: нет REDIRECT {", ".join(missing)} на exit (порт-хоп)',
                                 'next': "ssh exit-node \"iptables -t nat -S PREROUTING | grep -E '8400|8402'\""})
     if b.get('ok'):
         dnat = parse_dnat_rules(b.get('nat_prerouting'))
         for tag, rules in ENTRY_DNAT_FOR.items():
             missing = [f'{d}→:{p}' for d, p in rules if (d, p) not in dnat]
-            if missing:
-                out.append({'key': f'entry_dnat:{tag}',
+            if missing and tag not in off:
+                out.append({'key': f'entry_dnat:{tag}', 'layer': 'b',
                             'severity': 'critical' if tag == 'hy2' else 'warn',
                             'title': f'{tag}: нет UDP DNAT {", ".join(missing)} на entry',
                             'next': "iptables -t nat -S PREROUTING | grep -E '8400|8402|dport 443'"})
         stls = (b.get('services') or {}).get('shadow-tls')
         if stls and stls != 'active':
-            out.append({'key': 'unit:shadow-tls', 'severity': 'critical',
+            out.append({'key': 'unit:shadow-tls', 'severity': 'critical', 'layer': 'b',
                         'title': f'shadow-tls на entry: {stls}',
                         'next': 'systemctl status shadow-tls --no-pager'})
     return out

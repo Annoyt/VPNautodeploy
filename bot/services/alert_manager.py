@@ -1901,18 +1901,41 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
 
     # ---- the healthcheck script on its timer (D1) ----
     HEALTHCHECK_STALE_MIN = 45     # the timer runs every 15 min
-    HEALTHCHECK_BLIND_RUNS = 3     # exit code 2 = "could not look", not "fine"
+    HEALTHCHECK_BLIND_RUNS = 3     # a layer that could not look three runs in a row
+    HEALTHCHECK_FIXED = ('healthcheck:stale', 'healthcheck:blind')
+
+    def _finding_layer(f: dict) -> str:
+        """Which layer a finding came from: the script says so; an older copy
+        of it that does not is read by the key."""
+        layer = f.get('layer') if isinstance(f, dict) else None
+        if layer in ('a', 'b', 'c'):
+            return layer
+        key = str((f or {}).get('key') or '')
+        if key == 'panel_audit':
+            return 'a'
+        if key.startswith('entry_dnat:') or key == 'unit:shadow-tls':
+            return 'b'
+        return 'c'
+
+    def _key_layer(key: str) -> str:
+        return _finding_layer({'key': key[len(HEALTHCHECK_PREFIX):]})
 
     def check_healthcheck():
         """What ``scripts/protocol_healthcheck.py --post`` found on its last
         run on entry (IMPROVEMENT_PLAN F, D1): its ``findings`` — the Reality
         dest certificate, entry DNAT, exit hop rules, the hysteria units,
         shadow-tls, the panel's client fields — each an alert
-        ``healthcheck:<key>``, before the probes go dark. A report older than
-        HEALTHCHECK_STALE_MIN pages ``healthcheck:stale`` (and its findings
-        are not trusted); three runs in a row that could not look page
-        ``healthcheck:blind``. No report ever = the timer is not installed:
-        nothing to say. No agent turn: the findings are the script's own."""
+        ``healthcheck:<key>``, before the probes go dark.
+
+        "Could not look" is never "fixed" (AlertManager's judged set): a
+        report older than HEALTHCHECK_STALE_MIN pages ``healthcheck:stale``
+        and judges no finding, and a finding of a layer that could not look
+        this run (ssh to exit failed…) keeps its alert as it is. A layer that
+        could not look HEALTHCHECK_BLIND_RUNS runs in a row pages
+        ``healthcheck:blind``. Both are critical: a dead adviser is the one
+        thing nobody would otherwise notice. No report ever = the timer is
+        not installed: nothing to say. A failed read judges nothing. No
+        agent turn: the findings are the script's own."""
         try:
             db_path = getattr(config, 'DB_PATH', None) or '/var/lib/vpn-bot/bot.db'
             import json as _json
@@ -1925,33 +1948,52 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
                     "ORDER BY id DESC LIMIT ?", (HEALTHCHECK_BLIND_RUNS,)).fetchall()
         except Exception as e:
             logger.warning(f"healthcheck alert read failed: {e}")
-            return (HEALTHCHECK_PREFIX, [])
+            return (HEALTHCHECK_PREFIX, [], frozenset())
         if not rows:
             return (HEALTHCHECK_PREFIX, [])
-        newest_ts, _code, newest_json = rows[0]
+
+        def parsed(raw):
+            try:
+                data = _json.loads(raw or '{}')
+            except (TypeError, ValueError):
+                return {}
+            return data if isinstance(data, dict) else {}
+
+        reports = [parsed(raw) for _ts, _code, raw in rows]
+        newest_ts = rows[0][0]
         age = _minutes_since(newest_ts, now)
         if age > HEALTHCHECK_STALE_MIN:
             return (HEALTHCHECK_PREFIX, [Alert(
-                key='healthcheck:stale', severity='warn', min_cycles=2,
+                key='healthcheck:stale', severity='critical', min_cycles=2,
                 title=f'Скрипт проверки не присылал отчёт {_humanize_minutes(age)}',
                 detail=('Таймер protocol-healthcheck на entry не отработал. Пока так, '
-                        'сертификат Reality-dest, DNAT и юниты hysteria не проверяются. '
+                        'сертификат Reality-dest, DNAT и юниты hysteria не проверяются, '
+                        'а его прежние находки остаются как были. '
                         'systemctl status protocol-healthcheck.timer'),
-            )])
+            )], frozenset({'healthcheck:blind'}))
+
+        def looked(report) -> set:
+            layers = report.get('layers') or {}
+            return {name for name in ('a', 'b', 'c') if layers.get(name) == 'ok'}
+
         alerts = []
-        if (len(rows) >= HEALTHCHECK_BLIND_RUNS
-                and all(code == 2 for _ts, code, _j in rows)):
-            alerts.append(Alert(
-                key='healthcheck:blind', severity='warn', min_cycles=1,
-                title=f'Скрипт проверки {HEALTHCHECK_BLIND_RUNS} раза подряд не смог посмотреть',
-                detail=('Код 2 — «не смог посмотреть», а не «всё хорошо». '
-                        'journalctl -u protocol-healthcheck -n 40'),
-            ))
-        try:
-            report = _json.loads(newest_json or '{}')
-        except (TypeError, ValueError):
-            report = {}
-        for f in (report.get('findings') or []):
+        newest = reports[0]
+        ok_now = looked(newest)
+        if len(reports) >= HEALTHCHECK_BLIND_RUNS:
+            blind = [name for name in ('a', 'b', 'c')
+                     if all(name not in looked(r) for r in reports)]
+            if blind:
+                names = {'a': 'A (bot.db)', 'b': 'B (entry)', 'c': 'C (exit)'}
+                why = '; '.join(f"{names[n]}: {str((newest.get('layers') or {}).get(n) or '—')[:120]}"
+                                for n in blind)
+                alerts.append(Alert(
+                    key='healthcheck:blind', severity='critical', min_cycles=1,
+                    title=(f'Скрипт проверки {HEALTHCHECK_BLIND_RUNS} раза подряд не смог '
+                           f'посмотреть слой {", ".join(names[n] for n in blind)}'),
+                    detail=(f'{why}. Находки этого слоя пока не проверяются и остаются как '
+                            f'были. journalctl -u protocol-healthcheck -n 40'),
+                ))
+        for f in (newest.get('findings') or []):
             if not isinstance(f, dict) or not f.get('key'):
                 continue
             severity = 'critical' if f.get('severity') == 'critical' else 'warn'
@@ -1960,7 +2002,13 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
                 title=str(f.get('title') or f['key'])[:200],
                 detail=f"Следующая команда: {str(f.get('next') or '—')[:400]}",
             ))
-        return (HEALTHCHECK_PREFIX, alerts)
+
+        def judged(key: str) -> bool:
+            if key in HEALTHCHECK_FIXED:
+                return True
+            return _key_layer(key) in ok_now
+
+        return (HEALTHCHECK_PREFIX, alerts, judged)
 
     def check_lockdown_active():
         """LOCKDOWN (IMPROVEMENT_PLAN B1, bot/services/lockdown.py) is
