@@ -137,12 +137,16 @@ class WebAppServer:
         # emails with a refresh in flight — a reconnect-looping client must
         # not stack refreshes (nor hammer the panel)
         self._hy2_quota_refreshing: set = set()
-        # hy2 auth: the last users row each key resolved to, for the
-        # moments bot.db cannot be read (_hy2_user_row).
-        # {uuid: (monotonic_ts, (chat_id, email, status, expiry))}
-        self._hy2_auth_rows: dict = {}
         # strong refs: the event loop keeps only weak ones to its tasks
         self._bg_tasks: set = set()
+        # hy2 auth's two writes (_spawn_hy2_record) get a thread of their
+        # own: on the shared default pool, a mass reconnect during a write
+        # lock queued them ahead of the users lookups they were moved out of
+        # the way of. Past HY2_RECORD_MAX_PENDING queued writes, new ones
+        # are dropped (the answer never waits for them anyway).
+        self._hy2_record_pool = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix='hy2-record')
+        self._hy2_record_pending = 0
         # DE reserve provisioning off the /sub path (see
         # _schedule_fallback_provisioning): uuids with a call queued or
         # running, and the one thread those calls get.
@@ -590,11 +594,8 @@ class WebAppServer:
         self._bg_tasks.add(task)
         task.add_done_callback(self._bg_tasks.discard)
 
-    # How long the last users row a key resolved to may stand in when
-    # bot.db cannot be read (IMPROVEMENT_PLAN F, A4). Every good read
-    # refreshes it, so an active user's row is minutes old; the limit only
-    # bounds how long a long outage keeps letting in what it last saw.
-    HY2_AUTH_ROW_MAX_S = 6 * 3600
+    # Queued audit writes past which new ones are dropped (_spawn_hy2_record).
+    HY2_RECORD_MAX_PENDING = 500
 
     def _hy2_lookup_user(self, password: str):
         """``(chat_id, email, status, expiry)`` of the key, or None when no
@@ -613,30 +614,31 @@ class WebAppServer:
         event loop a locked bot.db (5-s busy timeout) stalled every request
         the web server had in flight, not just this handshake.
 
-        A read that fails falls back to the last row this key resolved to,
-        if that is under ``HY2_AUTH_ROW_MAX_S`` old: the same status and
+        A read that fails falls back to the last row this key resolved to
+        (``bot/services/hy2_auth_rows.py``: at most 15 min old, dropped when
+        the key is revoked or its status changes): the same status and
         expiry gates then run on it, so an expired or demoted row still
         fails. A key never seen since the start fails closed, as before —
         a database error is never an "allow" for an unknown key. A good
         read without a row (revoked key) drops the remembered row."""
-        import time as _time
+        from bot.services import hy2_auth_rows
         try:
             row = await asyncio.to_thread(self._hy2_lookup_user, password)
         except Exception as e:
-            cached = self._hy2_auth_rows.get(password)
-            age = _time.monotonic() - cached[0] if cached else None
-            if cached is not None and age < self.HY2_AUTH_ROW_MAX_S:
+            kept = hy2_auth_rows.recall(password)
+            if kept is not None:
+                age, row = kept
                 logger.warning(
                     f"hy2_auth: db lookup failed ({e}); deciding from the row "
                     f"read {int(age)} s ago"
                 )
-                return cached[1]
+                return row
             logger.warning(f"hy2_auth: db lookup failed: {e}")
             return None
         if row:
-            self._hy2_auth_rows[password] = (_time.monotonic(), row)
+            hy2_auth_rows.remember(password, row)
         else:
-            self._hy2_auth_rows.pop(password, None)
+            hy2_auth_rows.forget(password)
         return row
 
     def _hy2_record(self, geo_chat_id, geo: tuple, audit: tuple) -> None:
@@ -674,15 +676,29 @@ class WebAppServer:
             logger.warning(f"hy2_auth: audit insert failed: {e}")
 
     def _spawn_hy2_record(self, geo_chat_id, geo: tuple, audit: tuple) -> None:
-        """Run ``_hy2_record`` on a worker thread after the answer is out.
-        Never raises: this sits on the auth path."""
+        """Run ``_hy2_record`` on its own thread after the answer is out.
+        One thread for every write, never asyncio's default pool, which the
+        users lookups use; past ``HY2_RECORD_MAX_PENDING`` queued writes a
+        new one is dropped. Never raises: this sits on the auth path."""
+        if self._hy2_record_pending >= self.HY2_RECORD_MAX_PENDING:
+            logger.warning("hy2_auth: audit write queue full — dropping one")
+            return
+
+        async def _write():
+            try:
+                await asyncio.get_running_loop().run_in_executor(
+                    self._hy2_record_pool, self._hy2_record, geo_chat_id, geo, audit)
+            except Exception as e:
+                logger.warning(f"hy2_auth: audit write failed: {e}")
+            finally:
+                self._hy2_record_pending -= 1
+
         try:
-            task = asyncio.get_running_loop().create_task(
-                asyncio.to_thread(self._hy2_record, geo_chat_id, geo, audit)
-            )
+            task = asyncio.get_running_loop().create_task(_write())
         except Exception as e:
             logger.warning(f"hy2_auth: could not schedule the audit write: {e}")
             return
+        self._hy2_record_pending += 1
         self._bg_tasks.add(task)
         task.add_done_callback(self._bg_tasks.discard)
 

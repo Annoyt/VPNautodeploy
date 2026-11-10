@@ -493,6 +493,16 @@ class SubscriptionService:
         return outbounds, proxy_tags, udp_call_tags
 
     @staticmethod
+    def _demoted_set(demoted) -> frozenset:
+        """``demoted`` as a frozenset of protocol names, read once: a one-shot
+        iterator must not demote in one group and not in the next. Anything
+        unusable demotes nothing."""
+        try:
+            return frozenset(p for p in (demoted or ()) if isinstance(p, str))
+        except TypeError:
+            return frozenset()
+
+    @staticmethod
     def _calls_order(tags: List[str], protocol_of: dict, demoted) -> List[str]:
         """The calls group in priority order, with the protocols DPIMonitor
         demotes for this network moved to the end (IMPROVEMENT_PLAN F, A2):
@@ -536,6 +546,9 @@ class SubscriptionService:
         ``get_cascade_order``. This service has no db; the flag is read
         once per request by the /sub handler.
         """
+        # Read more than once below: a one-shot iterator must not demote in
+        # one group and not in the next.
+        demoted = self._demoted_set(demoted)
         protocol_of: dict = {}
         outbounds, proxy_tags, udp_call_tags = self._collect_outbounds(
             user, enabled_protocols, protocols=protocol_of,
@@ -1152,6 +1165,7 @@ class SubscriptionService:
         without a profile update. Without WEBAPP_URL there is nothing to
         point at and the profile is exactly what it was before E1.
         """
+        demoted = self._demoted_set(demoted)
         proxies, calls, protocol_of = self._clash_proxies(user, enabled_protocols)
         names = [p['name'] for p in proxies]
         uuid = getattr(user, 'uuid', None) if user else None
