@@ -615,14 +615,15 @@ class TestHy2Sessions:
         _users(db)
         srv = _server(db)
         ended = time.time() - 3600
-        body = {'hy2_sessions': [{'id': 'u1@x', 'unit': 'hysteria', 'duration_s': 90,
-                                  'error': '', 'ended_at': ended}]}
-        for _ in range(2):
-            _post(srv, body, handler='handle_dpi_exit_report')
+        first = {'id': 'u1@x', 'unit': 'hysteria', 'duration_s': 90, 'error': '', 'ended_at': ended}
+        _post(srv, {'hy2_sessions': [first]}, handler='handle_dpi_exit_report')
+        # the window again, now with one more session that ended since
+        later = dict(first, duration_s=30, ended_at=ended + 600)
+        _post(srv, {'hy2_sessions': [first, later]}, handler='handle_dpi_exit_report')
         with db._connect() as conn:
-            rows = conn.execute("SELECT ended_at FROM hy2_sessions").fetchall()
-        assert len(rows) == 1
-        assert rows[0][0].startswith(datetime.utcfromtimestamp(ended).strftime('%Y-%m-%dT%H:%M'))
+            rows = sorted(r[0] for r in conn.execute("SELECT ended_at FROM hy2_sessions"))
+        assert len(rows) == 2
+        assert rows[0].startswith(datetime.utcfromtimestamp(ended).strftime('%Y-%m-%dT%H:%M'))
 
     def test_protocols_card_line(self, db):
         now = datetime.utcnow()
