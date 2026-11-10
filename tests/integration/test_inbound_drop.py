@@ -68,9 +68,13 @@ def check_for(db):
 
 
 def run(check):
-    prefix, alerts = check()
+    prefix, alerts = check()[:2]
     assert prefix == 'inbound_drop:'
     return {a.key: a for a in alerts}
+
+
+def judged(check):
+    return check()[2]
 
 
 class TestDrop:
@@ -125,7 +129,11 @@ class TestDrop:
             conn.execute("DELETE FROM dpi_metrics WHERE snapshot_at >= ?", (cut,))
             conn.commit()
         check.cache['at'] = 0.0                              # skip the 10-min cache
-        assert 'inbound_drop:ws' in run(check)
+        # no verdict on ws: not re-reported, and not judged, so AlertManager
+        # keeps the open key as it is (no recovery, no fresh page)
+        assert 'inbound_drop:ws' not in run(check)
+        assert 'inbound_drop:ws' not in judged(check)
+        assert 'inbound_drop:stls' not in judged(check)      # no reports for it either
 
     def test_history_before_the_heartbeat_counts_as_reported(self, db):
         # deploy day: exit_reports is empty, dpi_metrics snapshots vouch

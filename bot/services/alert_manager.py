@@ -105,6 +105,10 @@ class _Tracker:
     notify: bool = False
     open_title: str = ''
     healthy_ticks: int = 0
+    # The current (or last) incident: when the key opened and closed, unix
+    # seconds. check_inbound_drop keeps those blocks out of its baseline.
+    opened_ts: float = 0.0
+    closed_ts: float = 0.0
 
 
 # Alert keys with these prefixes are dashboard-only (no Telegram).
@@ -122,6 +126,9 @@ INBOUND_DROP_PREFIX = 'inbound_drop:'
 PROTOCOL_FAMILY_PREFIXES = (PROTOCOL_AGENT_PREFIX, INBOUND_DROP_PREFIX)
 # Families whose recovery is announced where the alert went (B2/B3).
 RECOVERY_PREFIXES = PROTOCOL_FAMILY_PREFIXES
+# Keys of that family that are about our own reporting, not a protocol: no
+# agent turn (a 300-s Hermes turn every 2 h while a reporter is down).
+AGENT_SKIP_KEYS = ('inbound_drop:no_reports', 'inbound_drop:empty_reports')
 
 # Agent budgets. Both families run on worker threads (see
 # _spawn_agent_worker), so a budget is "how long one Hermes turn may
@@ -206,16 +213,17 @@ class AlertManager:
         try:
             with self.db._connect() as conn:
                 rows = conn.execute(
-                    "SELECT key, last_fired_ts, acked_until_ts, open, notify, title "
-                    "FROM alert_state"
+                    "SELECT key, last_fired_ts, acked_until_ts, open, notify, title, "
+                    "opened_ts, closed_ts FROM alert_state"
                 ).fetchall()
         except Exception as e:
             logger.warning(f"alert state load failed: {e}")
             return
-        for key, fired, acked, is_open, notify, title in rows:
+        for key, fired, acked, is_open, notify, title, opened, closed in rows:
             self._state[key] = _Tracker(
                 last_fired_ts=float(fired or 0), acked_until_ts=float(acked or 0),
                 open=bool(is_open), notify=bool(notify), open_title=title or '',
+                opened_ts=float(opened or 0), closed_ts=float(closed or 0),
             )
 
     def _save_state(self, key: str, t: _Tracker) -> None:
@@ -226,15 +234,17 @@ class AlertManager:
             with self.db._connect() as conn:
                 conn.execute(
                     "INSERT INTO alert_state "
-                    "(key, last_fired_ts, acked_until_ts, open, notify, title, updated_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP) "
+                    "(key, last_fired_ts, acked_until_ts, open, notify, title, "
+                    "opened_ts, closed_ts, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP) "
                     "ON CONFLICT(key) DO UPDATE SET "
                     "last_fired_ts=excluded.last_fired_ts, "
                     "acked_until_ts=excluded.acked_until_ts, open=excluded.open, "
                     "notify=excluded.notify, title=excluded.title, "
+                    "opened_ts=excluded.opened_ts, closed_ts=excluded.closed_ts, "
                     "updated_at=CURRENT_TIMESTAMP",
                     (key, t.last_fired_ts, t.acked_until_ts, int(t.open),
-                     int(t.notify), t.open_title),
+                     int(t.notify), t.open_title, t.opened_ts, t.closed_ts),
                 )
                 conn.commit()
         except Exception as e:
@@ -292,11 +302,14 @@ class AlertManager:
         self._save_state(alert.key, t)
 
     def _mark_healthy(self, key: str, t: _Tracker) -> None:
-        """A tick on which ``key`` was not reported. The streak breaks at
-        once; an OPEN alert closes after ``RECOVERY_TICKS`` quiet ticks in
-        a row — then its repeat cooldown is cleared (a new failure is a new
-        incident and pages at once) and, for the protocol family, the
-        recovery is posted where the alert went."""
+        """A tick on which a check judged ``key`` and did not report it.
+        The streak breaks at once; an OPEN alert closes after
+        ``RECOVERY_TICKS`` quiet ticks in a row. For the families whose
+        recovery is posted (``RECOVERY_PREFIXES``) the close also clears the
+        repeat cooldown and the ack: the admin has just been told it is
+        over, so a new failure is a new incident and pages at once. Other
+        families keep both — a DPI bucket or the disk hovering at its
+        threshold must not page and start an agent turn on every flap."""
         t.consecutive_fails = 0
         if not t.open:
             return
@@ -305,16 +318,33 @@ class AlertManager:
             return
         t.open = False
         t.healthy_ticks = 0
-        t.last_fired_ts = 0.0
+        t.closed_ts = time.time()
+        announced = key.startswith(RECOVERY_PREFIXES)
+        if announced:
+            t.last_fired_ts = 0.0
+            t.acked_until_ts = 0.0
         notify, title = t.notify, t.open_title
         t.notify = False
         self._save_state(key, t)
-        if notify and key.startswith(RECOVERY_PREFIXES):
+        if notify and announced:
             self._deliver_to_admin(
                 f"✅ <b>Восстановилось:</b> {html.escape(title or key)}\n"
                 f"<code>{html.escape(key)}</code>",
             )
         logger.info(f"ALERT recovered: {key}")
+
+    @staticmethod
+    def _judged(judged, key: str) -> bool:
+        """Did a multi-bucket check have a verdict for ``key`` this tick?
+        ``judged`` None = for every key under its prefix."""
+        if judged is None:
+            return True
+        if callable(judged):
+            try:
+                return bool(judged(key))
+            except Exception:
+                return False
+        return key in judged
 
     def run_once(self) -> None:
         """Run every registered check once. Called by the scheduler.
@@ -330,44 +360,79 @@ class AlertManager:
             is the shared key prefix (e.g. ``"dpi_short:"``). Trackers
             whose key starts with that prefix but does NOT appear in the
             returned list count as healthy this tick.
+          - ``(prefix, [Alert, ...], judged)`` — the same, but only the
+            keys in ``judged`` (a set, or a predicate) count as healthy
+            when absent; every other key under ``prefix`` had no verdict
+            this tick and keeps its state: no healthy tick, no recovery,
+            no fire. "Could not look" (a failed read, stale probes, every
+            protocol dark at once, a thin window, missing exit reports) is
+            never "recovered".
 
-        A check that RAISES says nothing: no key of it changes. Agent
-        turns of the protocol family fired during the tick go out as ONE
-        turn at its end (``_kick_protocol_batch``).
+        A check that RAISES says nothing: no key of it changes. An open key
+        loaded from ``alert_state`` that no check of this process has spoken
+        for heals like any other (``_heal_orphans``). Agent turns of the
+        protocol family fired during the tick go out as ONE turn at its end
+        (``_kick_protocol_batch``).
         """
         now = time.time()
         self._tick_agent_batch = []
+        covered: list = []        # prefixes multi-bucket checks spoke for
+        reported: set = set()     # keys single checks reported this tick
+        raised = False
         try:
             for check in self._checks:
                 try:
                     result = check()
                 except Exception as e:
+                    raised = True
                     logger.exception(f"alert check {check.__name__} crashed: {e}")
                     continue
-                # Multi-bucket shape: (prefix, [Alert, ...])
-                if isinstance(result, tuple) and len(result) == 2 and isinstance(result[0], str):
-                    prefix, alerts = result
+                # Multi-bucket shape: (prefix, [Alert, ...][, judged])
+                if (isinstance(result, tuple) and len(result) in (2, 3)
+                        and isinstance(result[0], str)):
+                    prefix, alerts = result[0], result[1]
+                    judged = result[2] if len(result) == 3 else None
+                    covered.append(prefix)
                     live_keys = {a.key for a in alerts}
                     for k, tr in list(self._state.items()):
-                        if k.startswith(prefix) and k not in live_keys:
+                        if (k.startswith(prefix) and k not in live_keys
+                                and self._judged(judged, k)):
                             self._mark_healthy(k, tr)
                     for alert in alerts:
                         self._process_alert(alert, now)
                     continue
                 # Single shape: an Alert or None.
-                reported = {result.key} if isinstance(result, Alert) else set()
+                single = {result.key} if isinstance(result, Alert) else set()
+                reported |= single
                 known = self._check_keys.setdefault(check, set())
-                for k in known - reported:
+                for k in known - single:
                     tr = self._state.get(k)
                     if tr is not None:
                         self._mark_healthy(k, tr)
-                known |= reported
+                known |= single
                 if isinstance(result, Alert):
                     self._process_alert(result, now)
+            if not raised:
+                self._heal_orphans(covered, reported)
         finally:
             batch, self._tick_agent_batch = self._tick_agent_batch, None
         if batch:
             self._kick_protocol_batch(batch)
+
+    def _heal_orphans(self, covered: list, reported: set) -> None:
+        """An open key loaded from ``alert_state`` that no multi-bucket
+        prefix covers and no single check reports: a single check (disk,
+        opencode, tg_api…) whose problem healed while the bot was down. Its
+        check returns None and knows nothing of the key (``_check_keys`` is
+        in memory), so the key stayed open forever. Not called on a tick
+        where a check raised — then the silence proves nothing."""
+        known = set().union(*self._check_keys.values()) if self._check_keys else set()
+        for k, tr in list(self._state.items()):
+            if not tr.open or k in reported or k in known:
+                continue
+            if any(k.startswith(p) for p in covered):
+                continue
+            self._mark_healthy(k, tr)
 
     # ----- delivery -----
 
@@ -415,6 +480,8 @@ class AlertManager:
             f"{'(dashboard-only) ' if is_dashboard_only else ''}{alert.title}"
         )
 
+        if not tracker.open:
+            tracker.opened_ts = time.time()
         tracker.open = True
         tracker.notify = tracker.notify or not is_dashboard_only
         tracker.open_title = alert.title
@@ -426,7 +493,8 @@ class AlertManager:
         # row above is already persisted whatever happens here.
         if alert.key.startswith(DPI_AGENT_PREFIXES):
             self._kick_dpi_agent(alert, alert_db_id)
-        elif alert.key.startswith(PROTOCOL_FAMILY_PREFIXES):
+        elif (alert.key.startswith(PROTOCOL_FAMILY_PREFIXES)
+              and alert.key not in AGENT_SKIP_KEYS):
             # The diagnosis goes where the alert went: if the alert was
             # dashboard-only (below ALERT_TG_MIN_SEVERITY), the chat must
             # not receive a follow-up to a headline it never saw.
@@ -626,11 +694,16 @@ class AlertManager:
             lead = alerts[0]
         else:
             # "protocol_down:hy2+stls" — what the prompt and the session
-            # key show; the alert rows keep their own keys.
-            tails = sorted({a.key.split(':', 1)[1] for a in alerts})
-            family = alerts[0].key.split(':', 1)[0]
+            # key show; the alert rows keep their own keys. A batch of two
+            # families names each key in full ("inbound_drop:ws+protocol_down:hy2").
+            families = sorted({a.key.split(':', 1)[0] for a in alerts})
+            if len(families) == 1:
+                tails = sorted({a.key.split(':', 1)[1] for a in alerts})
+                lead_key = f"{families[0]}:{'+'.join(tails)}"
+            else:
+                lead_key = '+'.join(sorted({a.key for a in alerts}))
             lead = Alert(
-                key=f"{family}:{'+'.join(tails)}",
+                key=lead_key,
                 severity=('critical' if any(a.severity == 'critical' for a in alerts)
                           else 'warn'),
                 title='; '.join(a.title for a in alerts),
@@ -1189,9 +1262,16 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
 
         Protocols the operator switched off in the cascade are left alone
         (B4, problem 7): Turbo is off while its instance and probe stay
-        up, and its dark probe would page critical every two hours. The
-        DE reserve, when dark, pages as the reserve (B6). Every alert
-        carries the line with all protocols' numbers (B3).
+        up, and its dark probe would page critical every two hours. A
+        switched-off protocol that still answers does prove the channel
+        works, so it rules "all dark" out. The DE reserve, when dark, pages
+        as the reserve (B6). Every alert carries the line with all
+        protocols' numbers (B3).
+
+        Returns the judged set too: only keys this run had a verdict for can
+        heal. A failed read, stale probes, every protocol dark at once and a
+        thin window are "could not tell" — an open per-protocol alert keeps
+        its state through them instead of posting «Восстановилось».
         """
         try:
             db_path = getattr(config, 'DB_PATH', None) or '/var/lib/vpn-bot/bot.db'
@@ -1226,7 +1306,7 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
             # log at a level someone will see — this check exists
             # because a silent gap cost four days.
             logger.warning(f"protocol-probe alert read failed: {e}")
-            return ("protocol_down:", [])
+            return ("protocol_down:", [], frozenset())
 
         # The probe pipeline itself stopped producing rows.
         if not newest or _minutes_since(newest, now) > PROBE_STALE_MIN:
@@ -1245,7 +1325,7 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
                     "протокола НЕ будет замечено. Смотри джобу проб в "
                     "логах бота и контейнер «probe-proxy»."
                 ),
-            )])
+            )], frozenset())
 
         disabled = _pr.operator_disabled(order[0] if order else None)
         windows = {tag: _pr.judge_window(rows) for tag, rows in samples.items()}
@@ -1254,9 +1334,28 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
         cascade = {t: w for t, w in live.items() if t != _pr.RESERVE_TAG}
         dark = {t for t, w in live.items() if w['verdict'] == _pr.VERDICT_DARK}
         measured = [t for t, w in cascade.items() if w['verdict'] != _pr.VERDICT_THIN]
+        # Answers through a protocol the operator switched off still prove
+        # the channel up (the reserve does not: it is meant to outlive exit).
+        alive_switched_off = any(
+            w['verdict'] not in (_pr.VERDICT_DARK, _pr.VERDICT_THIN)
+            for t, w in windows.items() if t in disabled and t != _pr.RESERVE_TAG)
 
-        # Every cascade protocol dark at once = one upstream incident.
-        if measured and len(measured) >= 2 and all(t in dark for t in measured):
+        def _keys(tag):
+            return {f'protocol_down:{tag}', f'protocol_down:{tag}:degraded'}
+
+        judged = {'protocol_down:probe_pipeline'}
+        for tag in disabled:
+            judged |= _keys(tag)               # switched off: nothing to page
+        for tag, w in live.items():
+            if w['verdict'] != _pr.VERDICT_THIN:
+                judged |= _keys(tag)
+        if len(measured) >= 2 or alive_switched_off:
+            judged.add('protocol_down:all')
+
+        # Every cascade protocol dark at once = one upstream incident; the
+        # per-protocol keys have no verdict meanwhile.
+        if (measured and len(measured) >= 2 and all(t in dark for t in measured)
+                and not alive_switched_off):
             return ("protocol_down:", [Alert(
                 key='protocol_down:all',
                 severity='critical',
@@ -1269,7 +1368,7 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
                     "«probe-proxy» и доступность exit-узла.\n"
                     f"Сейчас по пробам: {summary}."
                 ),
-            )])
+            )], frozenset({'protocol_down:probe_pipeline'}))
 
         # "How long" — anchored on the last row that showed life, since
         # in some failure modes rows stop being written at all. Looked
@@ -1350,7 +1449,7 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
                     f"Сейчас по пробам: {summary}."
                 ),
             ))
-        return ("protocol_down:", alerts)
+        return ("protocol_down:", alerts, frozenset(judged))
 
     # ---- DPI / fingerprint checks (Phase C) ----
     # All three checks share the same DB read pattern: roll up the last
@@ -1525,6 +1624,15 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
     INBOUND_DROP_BLOCK_H = 2         # one block = two hours
     INBOUND_DROP_BLOCKS = 4          # four low blocks in a row = 8 h
     INBOUND_DROP_BASELINE_DAYS = 7   # the same clock block on each of 7 days
+    # The baseline is the 7 most recent USABLE days of the same clock block,
+    # looked for up to 21 days back (dpi_metrics keeps 30); fewer than 4 =
+    # no verdict. Not usable: a block the exit did not report (it is not
+    # zero connections), and a block of the key's current or last incident
+    # (alert_state opened_ts .. closed_ts, plus the 8 h that opened it) —
+    # the outage's own zeros dragged the median to 0, and an 84-h ws outage
+    # would have "recovered" on day four.
+    INBOUND_DROP_BASELINE_MAX_DAYS = 21
+    INBOUND_DROP_BASELINE_MIN_DAYS = 4
     INBOUND_DROP_MIN_MEDIAN = 50     # too quiet an inbound proves nothing
     INBOUND_DROP_RATIO = 0.2         # below a fifth of its usual count
     # A block counts only if the exit reported through most of it: the
@@ -1541,7 +1649,7 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
     _BOT_TAGS = ('hy2-8400',)
     # 'started': when this process began (the hy2 rollup has no heartbeat
     # but the bot itself); a test seam like the rest of the cache.
-    _drop_cache = {'at': 0.0, 'result': None, 'last': {}, 'started': time.time()}
+    _drop_cache = {'at': 0.0, 'result': None, 'started': time.time()}
 
     def _median(values):
         vals = sorted(values)
@@ -1560,9 +1668,15 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
         "The exit did not report" is told from "nobody connected": a block
         with fewer than INBOUND_DROP_MIN_REPORTS reports (the exit_reports
         heartbeat, or exit-tagged dpi_metrics snapshots before it existed)
-        gives no verdict, and an alert already open stays as it was. A
-        reporter silent for INBOUND_DROP_REPORT_STALE_MIN pages its own
-        warn, ``inbound_drop:no_reports``. Recomputed every 10 min."""
+        gives no verdict, and the key is left out of the judged set, so an
+        alert already open stays as it was — across a restart too (hy2's
+        blocks have no verdict for 8 h after the bot starts). Baseline
+        blocks without reports, and those of the key's own incident, are
+        skipped. A reporter silent for INBOUND_DROP_REPORT_STALE_MIN pages
+        its own warn, ``inbound_drop:no_reports`` (only once a report has
+        ever come); eight hours of reports that carry no rows at all page
+        ``inbound_drop:empty_reports`` instead of every inbound at once.
+        Recomputed every 10 min."""
         now_ts = time.time()
         if (_drop_cache['result'] is not None
                 and now_ts - _drop_cache['at'] < INBOUND_DROP_RECOMPUTE_S):
@@ -1574,12 +1688,26 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
             now = datetime.utcnow()
             now_iso = now.isoformat()
             per_day = 24 // INBOUND_DROP_BLOCK_H
-            span = INBOUND_DROP_BLOCKS + per_day * INBOUND_DROP_BASELINE_DAYS
-            since = (now - timedelta(hours=INBOUND_DROP_BLOCK_H * span)).isoformat()
+            window_s = INBOUND_DROP_BLOCK_H * INBOUND_DROP_BLOCKS * 3600
+            horizon = now_ts - (INBOUND_DROP_BASELINE_MAX_DAYS + 1) * 86400
             slot = (f"CAST((julianday(?) - julianday({{col}})) * {per_day} AS INTEGER)")
             tags = tuple(INBOUND_DROP_TAGS)
             marks = ','.join('?' * len(tags))
             with sqlite3.connect(db_path) as conn:
+                incidents = {}
+                try:
+                    for key, is_open, opened, closed in conn.execute(
+                            "SELECT key, open, opened_ts, closed_ts FROM alert_state "
+                            "WHERE key LIKE 'inbound_drop:%'"):
+                        opened = float(opened or 0)
+                        end = now_ts if is_open else float(closed or 0)
+                        if opened and end > opened and end > horizon:
+                            incidents[key] = (opened - window_s, end)
+                except sqlite3.Error:
+                    incidents = {}
+                back_days = INBOUND_DROP_BASELINE_MAX_DAYS
+                span = INBOUND_DROP_BLOCKS + per_day * back_days
+                since = (now - timedelta(hours=INBOUND_DROP_BLOCK_H * span)).isoformat()
                 counts = conn.execute(
                     f"SELECT inbound_tag, {slot.format(col='snapshot_at')} AS s, "
                     f"SUM(conn_count) FROM dpi_metrics "
@@ -1607,63 +1735,114 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
                     f"AND inbound_tag NOT IN ({','.join('?' * len(_BOT_TAGS))})",
                     (*tags, *_BOT_TAGS),
                 ).fetchone()[0]
+                window_cut = (now - timedelta(seconds=window_s)).isoformat()
+                n_window, rows_window = conn.execute(
+                    "SELECT COUNT(*), COALESCE(SUM(rows), 0) FROM exit_reports WHERE ts >= ?",
+                    (window_cut,),
+                ).fetchone()
         except Exception as e:
             logger.warning(f"inbound-drop alert read failed: {e}")
-            return ("inbound_drop:", list(_drop_cache['last'].values()))
+            return ("inbound_drop:", [], frozenset())   # no verdict on anything
 
         conns: dict = {}
         for tag, s_idx, total in counts:
             conns.setdefault(tag, {})[int(s_idx)] = int(total or 0)
-        per_day = 24 // INBOUND_DROP_BLOCK_H
+        block_s = INBOUND_DROP_BLOCK_H * 3600
+
+        def exit_reported(j) -> bool:
+            return max(beats.get(j, 0), snaps.get(j, 0)) >= INBOUND_DROP_MIN_REPORTS
 
         def reported(tag, i) -> bool:
             if tag in _BOT_TAGS:
-                block_start = now_ts - (i + 1) * INBOUND_DROP_BLOCK_H * 3600
+                block_start = now_ts - (i + 1) * block_s
                 return block_start >= _drop_cache['started']
-            return max(beats.get(i, 0), snaps.get(i, 0)) >= INBOUND_DROP_MIN_REPORTS
+            return exit_reported(i)
+
+        def in_incident(key, j) -> bool:
+            inc = incidents.get(key)
+            if not inc:
+                return False
+            start, end = now_ts - (j + 1) * block_s, now_ts - j * block_s
+            return start < inc[1] and end > inc[0]
+
+        def usual_for(tag, key, series, i):
+            """Median of the same clock block on the 7 most recent usable
+            days, or None (too little history: no verdict)."""
+            vals = []
+            for d in range(1, back_days + 1):
+                j = i + per_day * d
+                if in_incident(key, j):
+                    continue
+                if tag not in _BOT_TAGS and not exit_reported(j):
+                    continue
+                vals.append(series.get(j, 0))
+                if len(vals) == INBOUND_DROP_BASELINE_DAYS:
+                    break
+            if len(vals) < INBOUND_DROP_BASELINE_MIN_DAYS:
+                return None
+            return _median(vals)
+
+        # Eight hours of reports, none of them with a single row: the
+        # reporter reads nothing (log path moved, access log off), it is
+        # not every user of every inbound leaving at once.
+        empty = (int(n_window or 0) >= INBOUND_DROP_MIN_REPORTS * INBOUND_DROP_BLOCKS
+                 and int(rows_window or 0) == 0)
 
         alerts = []
-        last = _drop_cache['last']
+        judged = {'inbound_drop:no_reports', 'inbound_drop:empty_reports'}
         for tag, proto in INBOUND_DROP_TAGS.items():
             key = f'inbound_drop:{proto}'
-            series = conns.get(tag, {})
-            if not all(reported(tag, i) for i in range(INBOUND_DROP_BLOCKS)):
-                if key in last:           # no verdict: an open alert stays
-                    alerts.append(last[key])
+            bot_tag = tag in _BOT_TAGS
+            if empty and not bot_tag:
                 continue
+            if not all(reported(tag, i) for i in range(INBOUND_DROP_BLOCKS)):
+                continue                       # no verdict: the key keeps its state
+            series = conns.get(tag, {})
             blocks = []
             for i in range(INBOUND_DROP_BLOCKS):
-                usual = _median([series.get(i + per_day * d, 0)
-                                 for d in range(1, INBOUND_DROP_BASELINE_DAYS + 1)])
+                usual = usual_for(tag, key, series, i)
+                if usual is None:
+                    break
                 blocks.append((series.get(i, 0), usual))
+            if len(blocks) < INBOUND_DROP_BLOCKS:
+                continue
+            judged.add(key)
             if not all(usual >= INBOUND_DROP_MIN_MEDIAN and got < INBOUND_DROP_RATIO * usual
                        for got, usual in blocks):
-                last.pop(key, None)
                 continue
             got_total = sum(g for g, _u in blocks)
             usual_total = int(sum(u for _g, u in blocks))
             per_block = ' / '.join(f"{g} из ~{int(u)}" for g, u in reversed(blocks))
-            alert = Alert(
-                key=key,
-                severity='critical',
-                min_cycles=1,
-                title=(f"Подключения {proto} на exit упали: {got_total} за "
-                       f"{INBOUND_DROP_BLOCK_H * INBOUND_DROP_BLOCKS} ч при обычных ~{usual_total}"),
-                detail=(
+            hours = INBOUND_DROP_BLOCK_H * INBOUND_DROP_BLOCKS
+            if bot_tag:
+                title = (f"Авторизации {proto} упали: {got_total} за {hours} ч "
+                         f"при обычных ~{usual_total}")
+                detail = (
+                    f"{proto} по журналу авторизаций бота (hy2_auth_log): по 2 ч, от старых "
+                    f"к новым — {per_block} (обычное = медиана того же часа за "
+                    f"{INBOUND_DROP_BASELINE_DAYS} дней). Бот работал все эти часы, то есть "
+                    f"это не пробел в журнале, а пользователи перестали доходить до {proto}. "
+                    f"Пробы из датацентра такое не видят: блокировка у операторов, на участке "
+                    f"«пользователь → entry». Сравни с /protocols и с подключениями инбаундов."
+                )
+            else:
+                title = (f"Подключения {proto} на exit упали: {got_total} за {hours} ч "
+                         f"при обычных ~{usual_total}")
+                detail = (
                     f"Инбаунд {tag}: по 2 ч, от старых к новым — {per_block} "
                     f"(обычное = медиана того же часа за {INBOUND_DROP_BASELINE_DAYS} дней). "
                     f"Отчёты exit приходят, то есть это не обрыв отчёта, а пользователи "
                     f"перестали доходить. Пробы из датацентра такое не видят: блокировка "
                     f"у операторов, на участке «пользователь → entry/Cloudflare». "
                     f"Сравни с /protocols и с подключениями других инбаундов."
-                ),
-            )
-            last[key] = alert
-            alerts.append(alert)
+                )
+            alerts.append(Alert(key=key, severity='critical', min_cycles=1,
+                                title=title, detail=detail))
 
         newest = max((t for t in (newest_beat, newest_snap) if t), default=None)
-        if not newest or _minutes_since(newest, now) > INBOUND_DROP_REPORT_STALE_MIN:
-            age = '—' if not newest else _humanize_minutes(_minutes_since(newest, now))
+        # No report ever = the reporter is not installed: nothing to say.
+        if newest and _minutes_since(newest, now) > INBOUND_DROP_REPORT_STALE_MIN:
+            age = _humanize_minutes(_minutes_since(newest, now))
             alerts.append(Alert(
                 key='inbound_drop:no_reports',
                 severity='warn',
@@ -1676,7 +1855,22 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
                     "на exit, токен DPI_REPORT_TOKEN, доступ exit → entry :8080."
                 ),
             ))
-        result = ("inbound_drop:", alerts)
+        if empty:
+            alerts.append(Alert(
+                key='inbound_drop:empty_reports',
+                severity='warn',
+                min_cycles=2,
+                title=f'Отчёты exit пустые {INBOUND_DROP_BLOCK_H * INBOUND_DROP_BLOCKS} ч',
+                detail=(
+                    f"За {INBOUND_DROP_BLOCK_H * INBOUND_DROP_BLOCKS} ч пришло {int(n_window)} "
+                    "отчётов exit, и ни в одном нет ни строки подключений. Скорее всего "
+                    "exit_dpi_reporter.py ничего не читает (сменился путь access-лога, "
+                    "лог выключен), а не все пользователи ушли разом: алерт по "
+                    "подключениям на инбаундах exit пока молчит. Проверь access-лог xray "
+                    "на exit и /protocols."
+                ),
+            ))
+        result = ("inbound_drop:", alerts, frozenset(judged))
         _drop_cache['at'] = now_ts
         _drop_cache['result'] = result
         return result
