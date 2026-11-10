@@ -410,6 +410,9 @@ class SubscriptionService:
     # and 15 000 + 30 000 stays clear of the 65 535 wrap, past which the
     # comparison would flip and the group would chase the fastest again.
     _CALLS_URLTEST_TOLERANCE_MS = 30000
+    # hiddify-core leaves an outbound whose tag contains this out of its
+    # selector and balancers (v2/config/builder.go; IMPROVEMENT_PLAN F, C2).
+    HIDE_MARKER = '§hide§'
 
     def _collect_outbounds(
         self, user, enabled_protocols, *, protocols: Optional[dict] = None,
@@ -513,6 +516,7 @@ class SubscriptionService:
         *,
         lockdown: bool = False,
         demoted: Iterable[str] = frozenset(),
+        hiddify: bool = False,
     ) -> dict:
         """Build a complete sing-box JSON config.
 
@@ -520,10 +524,22 @@ class SubscriptionService:
         ``MyKeyAnswerHandler.get_cascade_order(db, user)`` — same set
         the user gets via /mykey rotation, but all bundled at once.
 
-        ``demoted`` — the protocols DPIMonitor demotes for the user's
-        network (``get_auto_demotions``): they go to the end of the
-        ``calls`` group (``_calls_order``). The cascade order itself
-        already carries them at its tail.
+        ``demoted`` — the protocols demoted for this user (DPIMonitor for
+        the network, the operator's /cascade demote, the user's own
+        telemetry): they go to the end of the ``calls`` group
+        (``_calls_order``) and leave the ``auto`` urltest (IMPROVEMENT_PLAN
+        F, C1) — the ``proxy`` selector keeps them for the manual pick.
+        A demotion of every cascade protocol excludes nothing.
+
+        ``hiddify`` (C2 — the /sub handler sets it by User-Agent): Hiddify
+        drops every group of the profile and balances over ALL outbounds,
+        so ``auto`` cannot steer it; but hiddify-core 4.1 leaves an outbound
+        whose tag carries ``§hide§`` out of its selector and both balancers
+        (checked on the built core, AGENTS.md §49). Marked for it: the
+        demoted servers, ShadowTLS's frontend (a detour, not a proxy — the
+        core balanced raw traffic onto it) and the RU-exit outbound of
+        ``lang='en'`` profiles (meant for RU sites only, by route rules
+        Hiddify drops).
 
         For ``lang='en'`` users, adds a RU-exit outbound so they can
         access RU-geo-blocked content (VK/Yandex/etc) from abroad.
@@ -541,16 +557,33 @@ class SubscriptionService:
             user, enabled_protocols, protocols=protocol_of,
         )
         udp_call_tags = self._calls_order(udp_call_tags, protocol_of, demoted)
+        excluded = self._clash_excluded(proxy_tags, protocol_of, demoted)
+        if hiddify:
+            # Every outbound that must stay out of Hiddify's balancer gets
+            # the marker; a chain's detour reference and every group that
+            # names a renamed outbound follow.
+            hide = set(excluded) | {
+                ob['tag'] for ob in outbounds if ob.get('type') == 'shadowtls'}
+            rename = {t: f'{t} {self.HIDE_MARKER}' for t in hide}
+            for ob in outbounds:
+                if ob.get('tag') in rename:
+                    ob['tag'] = rename[ob['tag']]
+                if ob.get('detour') in rename:
+                    ob['detour'] = rename[ob['detour']]
+            proxy_tags = [rename.get(t, t) for t in proxy_tags]
+            udp_call_tags = [rename.get(t, t) for t in udp_call_tags]
+            excluded = [rename[t] for t in excluded]
         lang = (getattr(user, 'lang', None) or 'ru') if user else 'ru'
 
-        # urltest auto-selector at the top so Hiddify's default mode
+        # urltest auto-selector at the top so the client's default mode
         # picks the fastest live outbound, falling back along the
-        # cascade order on probe failure.
+        # cascade order on probe failure — without the demoted ones (C1).
         selector_tags = ['auto'] + proxy_tags if proxy_tags else []
+        auto_tags = [t for t in proxy_tags if t not in excluded]
         outbounds.insert(0, {
             'type': 'urltest',
             'tag': 'auto',
-            'outbounds': proxy_tags or ['direct'],
+            'outbounds': auto_tags or ['direct'],
             'url': 'https://www.gstatic.com/generate_204',
             'interval': '3m',
             'tolerance': 50,
@@ -593,6 +626,8 @@ class SubscriptionService:
         if lang == 'en':
             ru_exit = self._build_ru_exit(user)
             if ru_exit:
+                if hiddify:
+                    ru_exit['tag'] = f"{ru_exit['tag']} {self.HIDE_MARKER}"
                 outbounds.append(ru_exit)
                 ru_exit_tag = ru_exit['tag']
 
@@ -1083,8 +1118,9 @@ class SubscriptionService:
 
     @staticmethod
     def _clash_excluded(names: List[str], protocol_of: dict, demoted) -> List[str]:
-        """Proxies Cascade and Auto leave out: the ones whose cascade
-        protocol DPIMonitor currently demotes (E3). Anything unusable as
+        """Proxies Cascade and Auto (and the sing-box ``auto``, C1) leave
+        out: the ones whose cascade protocol is demoted for this user (E3).
+        Anything unusable as
         a protocol set — None, a non-iterable, junk names — excludes
         nothing. Nor does a demotion that covers every cascade protocol:
         what would be left is the reserve node alone or nothing, and a

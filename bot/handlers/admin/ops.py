@@ -854,7 +854,9 @@ class AdminOpsMixin(AdminHandlerBase):
         "🔁 <b>/cascade</b> — каскад протоколов и авто-понижения DPIMonitor\n"
         "• <code>/cascade</code> — эффективный глобальный порядок + все авто-понижения\n"
         "• <code>/cascade AS31133</code> — порядок, который получают юзеры этого ASN\n"
-        "• <code>/cascade reset</code> — снять все авто-понижения (streaks обнуляются)\n"
+        "• <code>/cascade reset</code> — снять все авто- и ручные понижения (streaks обнуляются)\n"
+        "• <code>/cascade demote hy2 [AS31133] [6h]</code> — понизить вручную, на срок (по умолчанию 6 ч, до 7 д)\n"
+        "• <code>/cascade restore hy2 [AS31133]</code> — снять ручное понижение\n"
         "• <code>/cascade off</code> / <code>/cascade on</code> — пауза / запуск монитора"
     )
 
@@ -884,6 +886,10 @@ class AdminOpsMixin(AdminHandlerBase):
                 text = self._cascade_overview()
             elif low == 'reset':
                 text = self._cascade_reset()
+            elif low == 'demote':
+                text = self._cascade_demote(args[1:])
+            elif low == 'restore':
+                text = self._cascade_restore(args[1:])
             elif low in ('on', 'off'):
                 text = self._cascade_toggle(low == 'on')
             elif re.fullmatch(r'(as)?\d{1,10}', low):
@@ -925,12 +931,14 @@ class AdminOpsMixin(AdminHandlerBase):
                          f"{html.escape(', '.join(disabled))}</i>")
         lines.append("")
         lines.extend(self._asn_auto_lines(auto['asn'], now))
+        lines.extend(self._manual_lines(now))
         if not enabled and (auto['global'] or auto['asn']):
             lines.append("")
             lines.append("⚠️ монитор выключен, но авто-понижения продолжают "
                          "действовать — снять: /cascade reset")
         lines.append("")
-        lines.append("<i>/cascade AS31133 · /cascade reset · /cascade off|on</i>")
+        lines.append("<i>/cascade AS31133 · /cascade demote|restore · /cascade reset · "
+                     "/cascade off|on</i>")
         return "\n".join(lines)
 
     def _monitor_status_line(self, enabled: bool, state: dict, now: datetime) -> str:
@@ -1043,10 +1051,84 @@ class AdminOpsMixin(AdminHandlerBase):
                          + html.escape(", ".join(sorted(auto['global']))))
         return "\n".join(lines)
 
+    def _manual_lines(self, now: datetime) -> list:
+        """The operator's live /cascade demote entries (C6), if any."""
+        from bot.services import cascade_manual
+        manual = cascade_manual.load(self.db, now)
+        items = [(None, p, m) for p, m in sorted(manual['global'].items())]
+        items += [(asn, p, m) for asn, ps in sorted(manual['asn'].items())
+                  for p, m in sorted(ps.items())]
+        if not items:
+            return []
+        out = ["", f"<b>Ручные понижения</b> ({len(items)}):"]
+        for asn, p, m in items:
+            where = html.escape(asn) if asn else 'глобально'
+            until = str(m.get('until') or '')
+            out.append(f"• {html.escape(p)} ({where}) до {html.escape(until[:16].replace('T', ' '))} UTC"
+                       f" — {html.escape(str(m.get('by') or '?'))}")
+        return out
+
+    def _cascade_demote(self, rest: list) -> str:
+        """``/cascade demote <proto> [ASN] [ttl]`` (C6)."""
+        from bot.handlers.callbacks.user import MyKeyAnswerHandler as MK
+        from bot.services import cascade_manual
+        if not rest or rest[0].strip().lower() not in MK.PROTOCOL_METHOD_MAP:
+            return ("⚠️ " + "протокол: " + html.escape(', '.join(MK.PROTOCOL_METHOD_MAP))
+                    + "\n" + self.CASCADE_USAGE)
+        proto = rest[0].strip().lower()
+        asn = ttl = None
+        for token in rest[1:]:
+            asn = asn or cascade_manual.normalize_asn(token)
+            ttl = ttl or cascade_manual.parse_ttl(token)
+            if not (cascade_manual.normalize_asn(token) or cascade_manual.parse_ttl(token)):
+                return f"⚠️ не понял «{html.escape(token)}»: ASN (AS31133) или срок (30m, 6h, 2d)"
+        ttl = ttl or cascade_manual.DEFAULT_TTL
+        admin_id = self._caller_admin_id()
+        entry = cascade_manual.demote(self.db, proto, asn, ttl, by=f'admin:{admin_id}')
+        target = f"{'asn:' + asn if asn else 'global'}:{proto}"
+        self.db.log_admin_action(admin_id, 'cascade_manual_demote', target,
+                                 f"until {entry['until']}")
+        where = f"для {asn}" if asn else "глобально"
+        undo = f"/cascade restore {proto}" + (f" {asn}" if asn else "")
+        return (f"⬇️ <b>{html.escape(proto)} → в конец каскада</b> ({where}) до "
+                f"{entry['until'][:16].replace('T', ' ')} UTC.\n"
+                f"Монитор это понижение не снимет; снять раньше — <code>{html.escape(undo)}</code>. "
+                f"До клиентов дойдёт при обновлении профиля.")
+
+    def _cascade_restore(self, rest: list) -> str:
+        """``/cascade restore <proto> [ASN]`` (C6): drops the hand demotion
+        only — a monitor demotion of the same target stays."""
+        from bot.handlers.callbacks.user import MyKeyAnswerHandler as MK
+        from bot.services import cascade_manual
+        if not rest or rest[0].strip().lower() not in MK.PROTOCOL_METHOD_MAP:
+            return self.CASCADE_USAGE
+        proto = rest[0].strip().lower()
+        asn = cascade_manual.normalize_asn(rest[1]) if len(rest) > 1 else None
+        if len(rest) > 1 and not asn:
+            return f"⚠️ не понял «{html.escape(rest[1])}»: нужен ASN (AS31133)"
+        was, _after = cascade_manual.restore(self.db, proto, asn)
+        admin_id = self._caller_admin_id()
+        target = f"{'asn:' + asn if asn else 'global'}:{proto}"
+        self.db.log_admin_action(admin_id, 'cascade_manual_restore', target,
+                                 'removed' if was else 'nothing to remove')
+        where = f"для {asn}" if asn else "глобально"
+        text = (f"✅ Ручное понижение {html.escape(proto)} ({where}) снято."
+                if was else f"ℹ️ Ручного понижения {html.escape(proto)} ({where}) не было.")
+        auto = load_cascade_auto(self.db)
+        held = proto in (auto['asn'].get(asn, {}) if asn else auto['global'])
+        if held:
+            text += "\nАвто-понижение монитора по нему действует — снять всё: /cascade reset"
+        return text
+
     def _cascade_reset(self) -> str:
+        from bot.services import cascade_manual
         before = load_cascade_auto(self.db)
         cleared = [f"{p} (глобально)" for p in before['global']]
         cleared += [f"{asn}: {p}" for asn, m in sorted(before['asn'].items())
+                    for p in m]
+        manual = cascade_manual.clear(self.db)
+        cleared += [f"{p} (глобально, вручную)" for p in manual['global']]
+        cleared += [f"{asn}: {p} (вручную)" for asn, m in sorted(manual['asn'].items())
                     for p in m]
         admin_id = self._caller_admin_id()
         how = self._reset_auto_state(admin_id)
@@ -1054,7 +1136,7 @@ class AdminOpsMixin(AdminHandlerBase):
                    else "nothing was demoted") + f" [{how}]"
         self.db.log_admin_action(admin_id, 'cascade_auto_reset', None, details)
         if cleared:
-            lines = ["✅ <b>Авто-понижения сняты</b>",
+            lines = ["✅ <b>Понижения сняты</b>",
                      "снято: " + html.escape(", ".join(cleared))]
         else:
             lines = ["ℹ️ <b>Авто-понижений не было</b> — состояние монитора обнулено"]

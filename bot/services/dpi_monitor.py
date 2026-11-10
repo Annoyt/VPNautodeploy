@@ -112,6 +112,7 @@ logger = logging.getLogger(__name__)
 # ---- rule ids --------------------------------------------------------------
 RULE_PROBE_DARK = 'probe_dark'
 RULE_PROBE_DEGRADED = 'probe_degraded'
+RULE_CLIENT_DARK_GLOBAL = 'client_dark_global'
 RULE_CLIENT_DARK = 'client_dark'
 RULE_REALITY_ASN = 'reality_asn'
 RULE_UDP_STORM_ASN = 'udp_storm_asn'
@@ -123,6 +124,7 @@ RULE_USER_REPORTS_ASN = 'user_reports_asn'
 RULES = (
     RULE_PROBE_DARK,
     RULE_PROBE_DEGRADED,
+    RULE_CLIENT_DARK_GLOBAL,
     RULE_CLIENT_DARK,
     RULE_REALITY_ASN,
     RULE_UDP_STORM_ASN,
@@ -133,6 +135,7 @@ PROBE_RULES = frozenset({RULE_PROBE_DARK, RULE_PROBE_DEGRADED})
 # Which rules go UNKNOWN (frozen) when a collector fails — see Guards.
 COLLECTOR_RULES = {
     'probe': PROBE_RULES,
+    'client_dark_global': frozenset({RULE_CLIENT_DARK_GLOBAL}),
     'client_dark': frozenset({RULE_CLIENT_DARK}),
     'reality_asn': frozenset({RULE_REALITY_ASN}),
     'udp_storm_asn': frozenset({RULE_UDP_STORM_ASN}),
@@ -142,6 +145,7 @@ COLLECTOR_RULES = {
 RULE_TITLES_RU = {
     RULE_PROBE_DARK: 'пробы: протокол мёртв (DARK)',
     RULE_PROBE_DEGRADED: 'пробы: протокол деградировал (DEGRADED)',
+    RULE_CLIENT_DARK_GLOBAL: 'клиенты из разных сетей: протокол тёмен',
     RULE_CLIENT_DARK: 'клиенты: протокол тёмен в сети (ASN)',
     RULE_REALITY_ASN: 'Reality: handshake-fail по ASN',
     RULE_UDP_STORM_ASN: 'Hy2: reconnect-шторм по ASN',
@@ -193,6 +197,29 @@ CLIENT_DARK_MAX_ALIVE = 0
 CLIENT_TELEMETRY_PREFIX = 'p-'     # mirrors subscription.CLASH_TELEMETRY_PREFIX
 CLIENT_ACTIVE_STATUSES = ('demo', 'paid', 'support_topic')   # /sub serves them
 
+# ---- R6g: the same, across networks (IMPROVEMENT_PLAN F, C4) ----------------
+# R6 needs three dark clients in ONE network; on 2026-11-10 two clients sent
+# telemetry at all, one on MegaFon and one on ER-Telecom, and both lost ws on
+# 29.10 — a ws outage R6 could never see. Two dark clients in two different
+# (known) networks with nobody getting through is not a device or a carrier:
+# demote globally. Same guards as R6 (a live row through another cascade
+# protocol, the protocol offered to the client).
+CLIENT_DARK_GLOBAL_MIN_DEAD = 2
+CLIENT_DARK_GLOBAL_MIN_NETWORKS = 2
+
+# ---- C7: slow probes, normal users ------------------------------------------
+# A probe DEGRADED (R2) is the entry datacenter's view of a slow path; when
+# the users of that protocol keep connecting at their usual pace (exit-side
+# accepted connections, the B2 data) the slowness is the probe's, not
+# theirs — no global demotion. The last 2 h against the median of the same
+# block on the previous 7 days, half of usual or more, usual ≥ 50. A dark
+# probe (R1) is never vetoed: a tunnel that does not come up is not slow.
+VETO_BLOCK_H = 2
+VETO_BASELINE_DAYS = 7
+VETO_MIN_MEDIAN = 50
+VETO_MIN_RATIO = 0.5
+VETO_TAGS = {'reality': 'reality', 'ws': 'cf-ws', 'stls': 'ss2022', 'hy2': 'hy2-8400'}
+
 # ---- R3: Reality handshake failures per ASN --------------------------------
 # Reality users reach exit with their real IP (PROXY protocol via entry
 # haproxy), so a dpi_metrics row with inbound_tag='reality' AND an ASN is a
@@ -225,8 +252,17 @@ REPORTS_MAX_PER_ASN = 2
 # ---- hysteresis -------------------------------------------------------------
 DEMOTE_AFTER_BAD = 2        # consecutive bad evaluations (~20 min)
 RESTORE_AFTER_GOOD = 6      # consecutive good evaluations (~1 h)
+# C5: a target demoted again within a day waits twice as long to come back,
+# each time, up to 8 h (6 → 12 → 24 → 48 evaluations). On 2026-11-10 prod had
+# AS31133:reality demoted 12 times, each restored after ~1 h and demoted
+# again — the users of that network paid for every round trip.
+BACKOFF_WINDOW_H = 24
+BACKOFF_MAX_DOUBLINGS = 3
 MIN_CHANGE_GAP_MIN = 30     # between two changes of the same target
-MAX_CHANGES_PER_RUN = 2
+MAX_CHANGES_PER_RUN = 2     # demotions per run
+# Restores have a cap of their own (B/C, problem 15): with one shared cap,
+# demotions went first and a long outage could keep a restore waiting.
+MAX_RESTORES_PER_RUN = 2
 
 # ---- storage / audit --------------------------------------------------------
 AUTO_SETTING_KEY = 'cascade_auto'
@@ -327,7 +363,9 @@ def empty_signals() -> dict:
             'degraded': {},
             'measured': [],
             'all_dark': False,
+            'vetoed': {},           # {proto: evidence} — C7
         },
+        'client_dark_global': {},   # {proto: evidence} — C4
         'client_dark': {},          # {asn: {proto: evidence}}
         'reality_asn': {},
         'udp_storm_asn': {},
@@ -392,11 +430,31 @@ def normalize_state(raw: Any) -> dict:
                     'good': _int_or_zero(entry.get('good')),
                     'last_change': entry.get('last_change') or None,
                     'rule': entry.get('rule') or None,
+                    'demotions': [t for t in (entry.get('demotions') or [])
+                                  if isinstance(t, str)][-16:],
                 }
         st['auto'] = normalize_auto(raw.get('auto'))
         st['last_run'] = raw.get('last_run') or None
         st['runs'] = _int_or_zero(raw.get('runs'))
     return st
+
+
+def recent_demotions(entry: dict, now: datetime) -> List[str]:
+    """The target's demotions within BACKOFF_WINDOW_H, oldest first."""
+    out = []
+    for ts in entry.get('demotions') or []:
+        if isinstance(ts, str) and _minutes_since(ts, now) <= BACKOFF_WINDOW_H * 60:
+            out.append(ts)
+    return out
+
+
+def restore_after(entry: dict, now: datetime) -> int:
+    """C5: good evaluations a demoted target needs before it comes back —
+    RESTORE_AFTER_GOOD for the first demotion of a day, doubled for each
+    further one within BACKOFF_WINDOW_H, at most BACKOFF_MAX_DOUBLINGS
+    times."""
+    n = len(recent_demotions(entry, now))
+    return RESTORE_AFTER_GOOD * 2 ** min(max(n - 1, 0), BACKOFF_MAX_DOUBLINGS)
 
 
 def _int_or_zero(value: Any) -> int:
@@ -643,6 +701,7 @@ class DPIMonitor:
         try:
             for name, fn in (
                 ('probe', self._collect_probe),
+                ('client_dark_global', self._collect_client_dark_global),
                 ('client_dark', self._collect_client_dark),
                 ('reality_asn', self._collect_reality_asn),
                 ('udp_storm_asn', self._collect_udp_storm),
@@ -724,11 +783,45 @@ class DPIMonitor:
                     f"пробы ok {w['ok']}/{w['n']} за {PROBE_RUNS} прогона "
                     f"({_pr.degraded_threshold_text()}, DEGRADED)"
                 )
+        for tag in list(out['degraded']):
+            veto = self._users_connect_normally(conn, tag, now)
+            if veto:
+                out['vetoed'][tag] = veto
+                del out['degraded'][tag]
+                logger.info(f"dpi_monitor: {tag} probe DEGRADED vetoed — {veto}")
         measured = out['measured']
         out['all_dark'] = (
             bool(measured) and len(out['dark']) == len(measured) and len(measured) >= 2
         )
         return out
+
+    @staticmethod
+    def _users_connect_normally(conn, proto: str, now: datetime) -> Optional[str]:
+        """C7: the evidence line when ``proto``'s users keep connecting at
+        their usual pace over the last VETO_BLOCK_H (≥ VETO_MIN_RATIO of the
+        median of the same block on the previous VETO_BASELINE_DAYS days,
+        median ≥ VETO_MIN_MEDIAN), else None. Missing exit reports read as
+        few connections — no veto, the probe rule stands."""
+        tag = VETO_TAGS.get(proto)
+        if not tag:
+            return None
+        per_day = 24 // VETO_BLOCK_H
+        since = (now - timedelta(days=VETO_BASELINE_DAYS, hours=VETO_BLOCK_H)).isoformat()
+        rows = conn.execute(
+            f"SELECT CAST((julianday(?) - julianday(snapshot_at)) * {per_day} AS INTEGER) AS s, "
+            f"SUM(conn_count) FROM dpi_metrics WHERE snapshot_at >= ? AND inbound_tag = ? "
+            f"GROUP BY s",
+            (now.isoformat(), since, tag),
+        ).fetchall()
+        by_slot = {int(slot): int(total or 0) for slot, total in rows}
+        usual = sorted(by_slot.get(per_day * d, 0) for d in range(1, VETO_BASELINE_DAYS + 1))
+        mid = len(usual) // 2
+        median = usual[mid] if len(usual) % 2 else (usual[mid - 1] + usual[mid]) / 2
+        current = by_slot.get(0, 0)
+        if median >= VETO_MIN_MEDIAN and current >= VETO_MIN_RATIO * median:
+            return (f"пользователи {proto} подключаются как обычно: {current} за "
+                    f"{VETO_BLOCK_H} ч при обычных ~{int(median)}")
+        return None
 
     def _client_dark_offer(self) -> Tuple[set, set, frozenset]:
         """What a Clash profile can carry right now, for R6's eligibility:
@@ -747,6 +840,47 @@ class DPIMonitor:
         offered = enabled & set(built) & set(MK.PROTOCOL_METHOD_MAP)
         free = {p for p in offered if MK.PROTOCOL_TIER.get(p) == 'free'}
         return offered, free, frozenset(MK.PAID_USER_STATUSES)
+
+    def _collect_client_dark_global(self, conn, now: datetime) -> dict:
+        """C4: ``{proto: evidence}`` for every protocol that at least
+        CLIENT_DARK_GLOBAL_MIN_DEAD clients from CLIENT_DARK_GLOBAL_MIN_NETWORKS
+        different known networks stopped passing while nobody passes it —
+        R6 without the one-network bound (constants block above)."""
+        cutoff = (now - timedelta(hours=CLIENT_DARK_WINDOW_H)).strftime('%Y-%m-%d %H:%M:%S')
+        rows = conn.execute(
+            "SELECT c.chat_id, c.grp, UPPER(TRIM(COALESCE(u.last_asn, ''))), u.status "
+            "FROM client_probe c JOIN users u ON u.chat_id = c.chat_id "
+            "WHERE c.ts >= ? AND substr(c.grp, 1, ?) = ? "
+            "GROUP BY c.chat_id, c.grp",
+            (cutoff, len(CLIENT_TELEMETRY_PREFIX), CLIENT_TELEMETRY_PREFIX),
+        ).fetchall()
+        if not rows:
+            return {}
+        offered, free, paid_statuses = self._client_dark_offer()
+        cascade = self._known_protocols()
+        seen: Dict[str, set] = {}
+        who: Dict[str, Tuple[str, str]] = {}
+        for chat_id, grp, asn, status in rows:
+            seen.setdefault(str(chat_id), set()).add(str(grp)[len(CLIENT_TELEMETRY_PREFIX):])
+            who[str(chat_id)] = (asn or '', status or '')
+        clients = [(who[c][0], who[c][1], protos & cascade)
+                   for c, protos in seen.items() if protos & cascade]
+        out: Dict[str, str] = {}
+        for proto in sorted(offered):
+            if any(proto in up for _asn, _status, up in clients):
+                continue
+            dead = [(asn, status) for asn, status, up in clients
+                    if status in CLIENT_ACTIVE_STATUSES
+                    and (proto in free or status in paid_statuses)]
+            networks = {asn for asn, _status in dead if asn}
+            if (len(dead) >= CLIENT_DARK_GLOBAL_MIN_DEAD
+                    and len(networks) >= CLIENT_DARK_GLOBAL_MIN_NETWORKS):
+                out[proto] = (
+                    f"клиенты: 0/{len(dead)} по {proto} за {CLIENT_DARK_WINDOW_H} ч "
+                    f"в {len(networks)} сетях ({', '.join(sorted(networks))}), "
+                    f"другие протоколы живы"
+                )
+        return out
 
     def _collect_client_dark(self, conn, now: datetime) -> dict:
         """R6 (E8): ``{asn: {proto: evidence}}`` for every (network,
@@ -897,6 +1031,7 @@ class DPIMonitor:
         dark = probe.get('dark') or {}
         degraded = probe.get('degraded') or {}
         client_dark = (signals or {}).get('client_dark') or {}
+        client_global = (signals or {}).get('client_dark_global') or {}
         reality = (signals or {}).get('reality_asn') or {}
         storms = (signals or {}).get('udp_storm_asn') or {}
         reports = (signals or {}).get('reports_asn') or {}
@@ -921,6 +1056,8 @@ class DPIMonitor:
                 firing[target_key('global', None, proto)] = (RULE_PROBE_DARK, ev)
             for proto, ev in degraded.items():
                 firing.setdefault(target_key('global', None, proto), (RULE_PROBE_DEGRADED, ev))
+        for proto, ev in client_global.items():
+            firing.setdefault(target_key('global', None, proto), (RULE_CLIENT_DARK_GLOBAL, ev))
         # Per-ASN rules in rank order, each only where no higher-ranked
         # rule already claimed the target (R6 and R3 can both point at
         # reality@ASN; the owner is the rule whose silence restores it).
@@ -959,6 +1096,8 @@ class DPIMonitor:
                 if proto not in measured:
                     return None
                 return proto in dark or proto in degraded
+            if rule == RULE_CLIENT_DARK_GLOBAL:
+                return proto in client_global
             if rule == RULE_CLIENT_DARK:
                 # Judged per (ASN, protocol): the clients name the protocol.
                 return proto in (client_dark.get(asn) or {})
@@ -993,11 +1132,12 @@ class DPIMonitor:
                 entry['rule'] = rule
                 entry['good'] = 0 if active else int(entry.get('good') or 0) + 1
                 targets[key] = entry
-                if entry['good'] >= RESTORE_AFTER_GOOD and gap_ok(entry):
+                need = restore_after(entry, now)
+                if entry['good'] >= need and gap_ok(entry):
                     candidates.append((
                         'restore', rule or '', key,
                         f"{RULE_TITLES_RU.get(rule, rule or '?')}: сигнал молчит "
-                        f"{RESTORE_AFTER_GOOD} оценок подряд",
+                        f"{need} оценок подряд",
                     ))
             elif key in firing:
                 rule, ev = firing[key]
@@ -1012,22 +1152,28 @@ class DPIMonitor:
                     targets[key] = entry            # frozen: the bad streak waits
                     continue
                 # Quiet and not demoted: the streak is broken. Keep the row
-                # only while last_change still matters for the gap rule.
-                if entry.get('last_change'):
+                # while last_change still matters for the gap rule or the
+                # day's demotions for the back-off (C5).
+                history = recent_demotions(entry, now)
+                if entry.get('last_change') or history:
                     targets[key] = {'bad': 0, 'good': 0,
-                                    'last_change': entry['last_change'], 'rule': None}
+                                    'last_change': entry.get('last_change'), 'rule': None,
+                                    'demotions': history}
                 else:
                     targets.pop(key, None)
 
         candidates.sort(key=lambda c: (
             0 if c[0] == 'demote' else 1, RULE_RANK.get(c[1], 99), c[2]))
+        demotes = [c for c in candidates if c[0] == 'demote'][:MAX_CHANGES_PER_RUN]
+        restores = [c for c in candidates if c[0] == 'restore'][:MAX_RESTORES_PER_RUN]
         changes: List[Change] = []
-        for action, rule, key, ev in candidates[:MAX_CHANGES_PER_RUN]:
+        for action, rule, key, ev in demotes + restores:
             scope, asn, proto = parse_target_key(key)
             entry = targets[key]
             if action == 'demote':
                 _auto_set(auto, key, {'since': now_iso, 'reason': rule, 'evidence': ev})
-                entry.update(bad=0, good=0, last_change=now_iso, rule=rule)
+                entry.update(bad=0, good=0, last_change=now_iso, rule=rule,
+                             demotions=recent_demotions(entry, now) + [now_iso])
             else:
                 _auto_del(auto, key)
                 entry.update(bad=0, good=0, last_change=now_iso, rule=None)

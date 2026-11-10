@@ -1429,14 +1429,18 @@ class WebAppServer:
         text_body = None
 
         def demoted_here() -> frozenset:
-            # What DPIMonitor demotes for this network. E3: the Clash
-            # profile's Cascade/Auto leave it out (VPN keeps it for the
-            # manual pick); both profiles move it to the end of the calls
-            # group (IMPROVEMENT_PLAN F, A2). Tolerant read — junk
-            # collapses to nothing.
-            return frozenset(MyKeyAnswerHandler.get_auto_demotions(
+            # What is demoted for this user: DPIMonitor's and the
+            # operator's demotions for this network, plus what the user's
+            # own client stopped passing (IMPROVEMENT_PLAN F, C3). E3/C1:
+            # Cascade/Auto (Clash) and auto (sing-box) leave it out, the
+            # manual pick keeps it; both profiles move it to the end of the
+            # calls group (A2). Tolerant reads — junk collapses to nothing.
+            from bot.services.personal_demotion import personal_dark
+            network = MyKeyAnswerHandler.get_auto_demotions(
                 self.db, asn or getattr(user, 'last_asn', None),
-            ))
+            )
+            return frozenset(network) | personal_dark(
+                self.db, getattr(user, 'chat_id', None), cascade)
 
         if abroad_clash is not None:
             text_body = abroad_clash
@@ -1451,8 +1455,11 @@ class WebAppServer:
         elif fmt == 'xray':
             config_obj = self.subscription.build_xray_config(user, cascade)
         else:
+            # C2: Hiddify drops the profile's groups, so only the §hide§
+            # marker keeps a server out of its balancer.
             config_obj = self.subscription.build_singbox_config(
                 user, cascade, lockdown=lockdown, demoted=demoted_here(),
+                hiddify='hiddify' in ua,
             )
 
         # Surface quota/expiry to Hiddify's profile panel via the

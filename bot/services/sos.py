@@ -267,7 +267,9 @@ def build_kit(db, config, user) -> List[Tuple[str, bytes]]:
     from bot.services.subscription import SubscriptionService
     cascade = emergency_cascade(db, user)
     sub = SubscriptionService(config)
-    demoted = frozenset(MK.get_auto_demotions(db, getattr(user, 'last_asn', None)))
+    from bot.services.personal_demotion import personal_dark
+    demoted = (frozenset(MK.get_auto_demotions(db, getattr(user, 'last_asn', None)))
+               | personal_dark(db, getattr(user, 'chat_id', None), cascade))
     clash = sub.build_clash_config(user, cascade, lockdown=True, demoted=demoted)
     singbox = sub.build_singbox_config(user, cascade, lockdown=True, demoted=demoted)
     return [

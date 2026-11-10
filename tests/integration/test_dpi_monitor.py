@@ -651,7 +651,10 @@ class TestHysteresis:
             self.sig(), state, demoted_at + timedelta(minutes=30))
         assert [c.action for c in changes] == ['restore']
 
-    def test_restores_are_ranked_after_demotes_under_the_cap(self):
+    def test_restores_have_a_cap_of_their_own(self):
+        """IMPROVEMENT_PLAN F, problem 15: with one shared cap of two, the
+        demotions took both slots and a ripe restore waited a run (or, in a
+        long outage, many). Restores now have their own cap."""
         state = dm.empty_state()
         # A target long demoted and ready to be restored…
         state['auto']['global']['stls'] = {'since': (T0 - timedelta(hours=2)).isoformat(),
@@ -664,10 +667,8 @@ class TestHysteresis:
                                      'last_change': None}
         state, changes = DPIMonitor.evaluate(self.sig(dark=('ws', 'hy2')), state, T0)
         assert [(c.action, c.protocol) for c in changes] == [
-            ('demote', 'hy2'), ('demote', 'ws')]
-        assert 'stls' in state['auto']['global']
-        state, changes = DPIMonitor.evaluate(self.sig(dark=('ws', 'hy2')), state, T0 + STEP)
-        assert [(c.action, c.protocol) for c in changes] == [('restore', 'stls')]
+            ('demote', 'hy2'), ('demote', 'ws'), ('restore', 'stls')]
+        assert 'stls' not in state['auto']['global']
 
     def test_worsening_from_degraded_to_dark_keeps_it_demoted(self):
         state = dm.empty_state()
@@ -938,7 +939,8 @@ class TestGuards:
         s = mon_state(db)
         assert set(s) == {'targets', 'last_run', 'runs'}
         assert s['runs'] == 2 and s['last_run'] == (T0 + STEP).isoformat()
-        assert set(s['targets']['global:ws']) == {'bad', 'good', 'last_change', 'rule'}
+        assert set(s['targets']['global:ws']) == {'bad', 'good', 'last_change', 'rule',
+                                                  'demotions'}
         assert set(s['targets']) == {'global:ws', f'asn:{MEGAFON}:reality'}
 
         st = monitor.status()
