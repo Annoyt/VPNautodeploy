@@ -929,8 +929,11 @@ def assess(layers: dict, now: Optional[datetime] = None) -> dict:
 
     # --- suspects ---------------------------------------------------------------
     states = {t: protocols[t]['state'] for t in REPORT_ORDER if t in protocols}
-    probed_down = [t for t in probed if states.get(t) == 'DOWN']
-    all_dark = len(probed_down) == len(probed)
+    # The DE reserve is meant to outlive exit: alive while every cascade
+    # protocol is dark it is that same upstream incident (the pager agrees).
+    cascade_probed = [t for t in probed if t != probe_rules.RESERVE_TAG]
+    probed_down = [t for t in cascade_probed if states.get(t) == 'DOWN']
+    all_dark = len(probed_down) == len(cascade_probed)
 
     if all_dark:
         pp = (b.get('containers') or {}).get('probe-proxy')

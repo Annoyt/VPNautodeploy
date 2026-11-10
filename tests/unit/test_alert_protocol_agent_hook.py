@@ -158,7 +158,7 @@ def _pager_alerts(config):
     from bot.services.alert_manager import build_default_checks
     check = next(c for c in build_default_checks(config, Mock())
                  if c.__name__ == 'check_protocol_probe_down')
-    _prefix, alerts = check()
+    _prefix, alerts = check()[:2]
     return alerts
 
 

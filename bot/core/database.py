@@ -937,8 +937,10 @@ class Database:
         cooldown), until when an admin's ack silences it, and whether it is
         open — fired and not yet recovered, so a recovery notice still
         comes after a deploy (``notify`` = it was posted to the chat, so its
-        recovery is posted too). Times are unix seconds. Streak counters
-        are not kept: after a restart a check simply counts again."""
+        recovery is posted too). ``opened_ts`` / ``closed_ts`` bound the
+        current or last incident (check_inbound_drop keeps those blocks out
+        of its baseline). Times are unix seconds. Streak counters are not
+        kept: after a restart a check simply counts again."""
         try:
             with self._connect() as conn:
                 conn.execute(
@@ -949,8 +951,15 @@ class Database:
                     "open INTEGER NOT NULL DEFAULT 0, "
                     "notify INTEGER NOT NULL DEFAULT 0, "
                     "title TEXT, "
+                    "opened_ts REAL NOT NULL DEFAULT 0, "
+                    "closed_ts REAL NOT NULL DEFAULT 0, "
                     "updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"
                 )
+                have = {r[1] for r in conn.execute("PRAGMA table_info(alert_state)")}
+                for col in ('opened_ts', 'closed_ts'):
+                    if col not in have:
+                        conn.execute(
+                            f"ALTER TABLE alert_state ADD COLUMN {col} REAL NOT NULL DEFAULT 0")
                 conn.commit()
         except sqlite3.Error as e:
             logger.error(f"_init_alert_state failed: {e}")

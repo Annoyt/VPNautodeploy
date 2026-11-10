@@ -475,6 +475,18 @@ class TestHy2TurboProbed:
         assert not any('upstream' in t for t in titles(report))
         assert any(s['protocol'] == 'reality' for s in report['suspects'])
 
+    def test_exit_down_with_the_reserve_alive_is_still_one_upstream_suspect(self):
+        """The mirror of the pager's rule: the DE reserve is meant to outlive
+        exit, so it answering while every cascade protocol is dark is that
+        one upstream incident, not four inbounds (review of B, finding 5)."""
+        probes = {t: {'rows': dark_rows(), 'last_alive': NOW.isoformat()} for t in hc.PROBED}
+        probes['de'] = {'rows': rows(), 'last_alive': NOW.isoformat()}
+        report = hc.assess(layers(a=layer_a(probes=probes)), now=NOW)
+        assert report['protocols']['de']['state'] == 'OK'
+        assert len(report['suspects']) == 1
+        assert 'upstream' in report['suspects'][0]['title']
+        assert report['verdict'].startswith('ИТОГ: ВСЕ протоколы DOWN')
+
     def test_dead_probe_proxy_container_is_evidence_for_hy2t_too(self):
         report = hc.assess(layers(a=hy2t_probed_a(), b=layer_b(probe_proxy='exited')), now=NOW)
         assert 'контейнер probe-proxy exited' in '\n'.join(report['protocols']['hy2t']['evidence'])

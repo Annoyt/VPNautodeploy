@@ -1980,11 +1980,15 @@ class NotificationService:
         )
         # Daily: drop the one-shot agent sessions (alerts, /sos, the daily
         # DPI summary) older than AI_SESSIONS_ONE_SHOT_DAYS — B4, problem 10.
+        # First run 15 min after start, not 24 h: with a deploy a day the
+        # interval alone never came round.
+        from datetime import datetime as _dt, timedelta as _td, timezone as _tz
         self.scheduler.add_job(
             self._cleanup_ai_sessions_sync,
             IntervalTrigger(hours=24),
             id='ai_sessions_cleanup',
             replace_existing=True,
+            next_run_time=_dt.now(_tz.utc) + _td(minutes=15),
         )
         # Every 15 minutes: health check all outbounds against popular domains.
         self.scheduler.add_job(

@@ -74,7 +74,7 @@ def pager(db):
     cfg.DB_PATH = db.db_path
     check = next(c for c in build_default_checks(cfg, Mock())
                  if c.__name__ == 'check_protocol_probe_down')
-    prefix, alerts = check()
+    prefix, alerts = check()[:2]
     assert prefix == 'protocol_down:'
     return {a.key: a for a in alerts}
 
@@ -203,12 +203,24 @@ class TestPager:
         set_cascade(db)                                      # switched back on
         assert 'protocol_down:hy2t' in pager(db)
 
-    def test_disabled_does_not_turn_one_dark_into_all_dark(self, db):
+    def test_a_switched_off_protocol_that_answers_rules_out_all_dark(self, db):
+        # ws and stls are off in the cascade but their probes answer: the
+        # channel is up, so reality and hy2 dark are two inbounds, not one
+        # upstream incident (review of B: the old rule said «общий канал»)
         set_cascade(db, 'ws', 'stls')
         for tag in ('reality', 'hy2'):
             seed_window(db, tag, 0, alive_fail=False)
         for tag in ('ws', 'stls'):
             seed_window(db, tag, 8)
+        alerts = pager(db)
+        assert 'protocol_down:all' not in alerts
+        assert {'protocol_down:reality', 'protocol_down:hy2'} <= set(alerts)
+        assert not any(k.startswith(('protocol_down:ws', 'protocol_down:stls')) for k in alerts)
+
+    def test_switched_off_and_dark_too_is_all_dark(self, db):
+        set_cascade(db, 'ws', 'stls')
+        for tag in ('reality', 'hy2', 'ws', 'stls'):
+            seed_window(db, tag, 0, alive_fail=False)
         alerts = pager(db)
         assert 'protocol_down:all' in alerts and len(alerts) == 1
 
