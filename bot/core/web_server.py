@@ -137,12 +137,16 @@ class WebAppServer:
         # emails with a refresh in flight — a reconnect-looping client must
         # not stack refreshes (nor hammer the panel)
         self._hy2_quota_refreshing: set = set()
-        # hy2 auth: the last users row each key resolved to, for the
-        # moments bot.db cannot be read (_hy2_user_row).
-        # {uuid: (monotonic_ts, (chat_id, email, status, expiry))}
-        self._hy2_auth_rows: dict = {}
         # strong refs: the event loop keeps only weak ones to its tasks
         self._bg_tasks: set = set()
+        # hy2 auth's two writes (_spawn_hy2_record) get a thread of their
+        # own: on the shared default pool, a mass reconnect during a write
+        # lock queued them ahead of the users lookups they were moved out of
+        # the way of. Past HY2_RECORD_MAX_PENDING queued writes, new ones
+        # are dropped (the answer never waits for them anyway).
+        self._hy2_record_pool = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix='hy2-record')
+        self._hy2_record_pending = 0
         # DE reserve provisioning off the /sub path (see
         # _schedule_fallback_provisioning): uuids with a call queued or
         # running, and the one thread those calls get.
@@ -593,11 +597,8 @@ class WebAppServer:
         self._bg_tasks.add(task)
         task.add_done_callback(self._bg_tasks.discard)
 
-    # How long the last users row a key resolved to may stand in when
-    # bot.db cannot be read (IMPROVEMENT_PLAN F, A4). Every good read
-    # refreshes it, so an active user's row is minutes old; the limit only
-    # bounds how long a long outage keeps letting in what it last saw.
-    HY2_AUTH_ROW_MAX_S = 6 * 3600
+    # Queued audit writes past which new ones are dropped (_spawn_hy2_record).
+    HY2_RECORD_MAX_PENDING = 500
 
     def _hy2_lookup_user(self, password: str):
         """``(chat_id, email, status, expiry)`` of the key, or None when no
@@ -616,30 +617,31 @@ class WebAppServer:
         event loop a locked bot.db (5-s busy timeout) stalled every request
         the web server had in flight, not just this handshake.
 
-        A read that fails falls back to the last row this key resolved to,
-        if that is under ``HY2_AUTH_ROW_MAX_S`` old: the same status and
+        A read that fails falls back to the last row this key resolved to
+        (``bot/services/hy2_auth_rows.py``: at most 15 min old, dropped when
+        the key is revoked or its status changes): the same status and
         expiry gates then run on it, so an expired or demoted row still
         fails. A key never seen since the start fails closed, as before —
         a database error is never an "allow" for an unknown key. A good
         read without a row (revoked key) drops the remembered row."""
-        import time as _time
+        from bot.services import hy2_auth_rows
         try:
             row = await asyncio.to_thread(self._hy2_lookup_user, password)
         except Exception as e:
-            cached = self._hy2_auth_rows.get(password)
-            age = _time.monotonic() - cached[0] if cached else None
-            if cached is not None and age < self.HY2_AUTH_ROW_MAX_S:
+            kept = hy2_auth_rows.recall(password)
+            if kept is not None:
+                age, row = kept
                 logger.warning(
                     f"hy2_auth: db lookup failed ({e}); deciding from the row "
                     f"read {int(age)} s ago"
                 )
-                return cached[1]
+                return row
             logger.warning(f"hy2_auth: db lookup failed: {e}")
             return None
         if row:
-            self._hy2_auth_rows[password] = (_time.monotonic(), row)
+            hy2_auth_rows.remember(password, row)
         else:
-            self._hy2_auth_rows.pop(password, None)
+            hy2_auth_rows.forget(password)
         return row
 
     def _hy2_record(self, geo_chat_id, geo: tuple, audit: tuple) -> None:
@@ -677,15 +679,29 @@ class WebAppServer:
             logger.warning(f"hy2_auth: audit insert failed: {e}")
 
     def _spawn_hy2_record(self, geo_chat_id, geo: tuple, audit: tuple) -> None:
-        """Run ``_hy2_record`` on a worker thread after the answer is out.
-        Never raises: this sits on the auth path."""
+        """Run ``_hy2_record`` on its own thread after the answer is out.
+        One thread for every write, never asyncio's default pool, which the
+        users lookups use; past ``HY2_RECORD_MAX_PENDING`` queued writes a
+        new one is dropped. Never raises: this sits on the auth path."""
+        if self._hy2_record_pending >= self.HY2_RECORD_MAX_PENDING:
+            logger.warning("hy2_auth: audit write queue full — dropping one")
+            return
+
+        async def _write():
+            try:
+                await asyncio.get_running_loop().run_in_executor(
+                    self._hy2_record_pool, self._hy2_record, geo_chat_id, geo, audit)
+            except Exception as e:
+                logger.warning(f"hy2_auth: audit write failed: {e}")
+            finally:
+                self._hy2_record_pending -= 1
+
         try:
-            task = asyncio.get_running_loop().create_task(
-                asyncio.to_thread(self._hy2_record, geo_chat_id, geo, audit)
-            )
+            task = asyncio.get_running_loop().create_task(_write())
         except Exception as e:
             logger.warning(f"hy2_auth: could not schedule the audit write: {e}")
             return
+        self._hy2_record_pending += 1
         self._bg_tasks.add(task)
         task.add_done_callback(self._bg_tasks.discard)
 
@@ -869,6 +885,16 @@ class WebAppServer:
     # user's handshake come through the same front door.
     DPI_TUNNEL_BUCKET_CC = '*TUNNEL*'
 
+    def _dpi_token_ok(self, request) -> bool:
+        """The exit / healthcheck reporters' shared token, compared in
+        constant time as bytes: a non-ASCII header made ``compare_digest``
+        raise on str, a 500 instead of a 403."""
+        expected = (getattr(self.config, 'DPI_REPORT_TOKEN', '') or '').strip()
+        got = request.headers.get('X-DPI-Token', '') or ''
+        if not expected:
+            return False
+        return hmac.compare_digest(got.encode('utf-8', 'replace'), expected.encode('utf-8'))
+
     async def handle_dpi_exit_report(self, request: web.Request) -> web.Response:
         """Ingest the exit node's 5-min xray-log summary into dpi_metrics.
 
@@ -879,9 +905,7 @@ class WebAppServer:
         of the DPI heatmap real: per-protocol accept counts plus
         scanner/probe rejects with their true source IPs.
         """
-        expected = (getattr(self.config, 'DPI_REPORT_TOKEN', '') or '').strip()
-        got = request.headers.get('X-DPI-Token', '')
-        if not expected or not hmac.compare_digest(got, expected):
+        if not self._dpi_token_ok(request):
             return web.json_response({'ok': False}, status=403)
         try:
             payload = await request.json()
@@ -889,6 +913,8 @@ class WebAppServer:
             return web.json_response({'ok': False}, status=400)
 
         await asyncio.to_thread(self._store_presence, payload or {})
+        # Idempotent (a unique key on the journal's own end time): a retried
+        # window does not store its sessions twice.
         await asyncio.to_thread(self._store_hy2_sessions, payload or {})
 
         rows = await asyncio.to_thread(self._dpi_exit_rows, payload or {})
@@ -911,6 +937,10 @@ class WebAppServer:
             except Exception as e:
                 logger.warning(f"dpi_exit_report: insert failed: {e}")
                 return web.json_response({'ok': False}, status=500)
+        # After the dpi rows: a 500 above makes the reporter re-send this
+        # window, and the usage it adds up must not count twice.
+        await asyncio.to_thread(self._store_protocol_usage_from, payload or {},
+                                self._presence_rows(payload or {}))
         return web.json_response({'ok': True, 'rows': len(rows)})
 
     # The healthcheck report (D1) is small JSON; a bigger body is junk.
@@ -921,9 +951,7 @@ class WebAppServer:
         on its timer on entry (IMPROVEMENT_PLAN F, D1, ``--post``). Same
         shared token as the exit report. Stores the report; the alert
         ``check_healthcheck`` reads the newest one."""
-        expected = (getattr(self.config, 'DPI_REPORT_TOKEN', '') or '').strip()
-        got = request.headers.get('X-DPI-Token', '')
-        if not expected or not hmac.compare_digest(got, expected):
+        if not self._dpi_token_ok(request):
             return web.json_response({'ok': False}, status=403)
         length = request.content_length
         if length is not None and length > self.HEALTHCHECK_MAX_BYTES:
@@ -1001,7 +1029,9 @@ class WebAppServer:
         items = payload.get('hy2_sessions') or []
         if not isinstance(items, list) or not items:
             return 0
+        import time as _time
         from datetime import datetime
+        now_s = _time.time()
         ts = datetime.utcnow().isoformat()
         rows = []
         emails = set()
@@ -1019,7 +1049,17 @@ class WebAppServer:
             err = str(item.get('error') or '').lower()
             reason = next((label for needle, label in self._HY2_END_REASONS if needle in err),
                           'other' if err else 'none')
-            rows.append((email, unit, duration, reason))
+            # The journal's own end time (a current reporter): a day of
+            # backlog stored at "now" counted in the 24-h line, and a
+            # retried window is recognised by it (INSERT OR IGNORE).
+            ended = ts
+            try:
+                epoch = float(item.get('ended_at'))
+                if now_s - 7 * 86400 <= epoch <= now_s + 300:
+                    ended = datetime.utcfromtimestamp(epoch).isoformat(timespec='milliseconds')
+            except (TypeError, ValueError):
+                pass
+            rows.append((email, unit, duration, reason, ended))
             if email:
                 emails.add(email)
         if not rows:
@@ -1033,9 +1073,9 @@ class WebAppServer:
                         f"SELECT email, chat_id FROM users WHERE email IN ({marks})",
                         tuple(emails)).fetchall()}
                 conn.executemany(
-                    "INSERT INTO hy2_sessions (ended_at, chat_id, instance, duration_s, reason) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    [(ts, chat_of.get(e), u, d, r) for e, u, d, r in rows],
+                    "INSERT OR IGNORE INTO hy2_sessions "
+                    "(ended_at, chat_id, instance, duration_s, reason) VALUES (?, ?, ?, ?, ?)",
+                    [(t, chat_of.get(e), u, d, r) for e, u, d, r, t in rows],
                 )
                 conn.commit()
         except Exception as e:
@@ -1067,9 +1107,32 @@ class WebAppServer:
         offsets on a 2xx, and dropping this feed silently would be
         worse than showing no protocol at all.
         """
+        rows = self._presence_rows(payload)
+        if not rows:
+            return 0
+        try:
+            with self.db._connect() as conn:
+                conn.executemany(
+                    "INSERT INTO user_presence "
+                    "(email, inbound_tag, proto, conns, seen_at) "
+                    "VALUES (?, ?, ?, ?, ?) "
+                    "ON CONFLICT(email) DO UPDATE SET "
+                    "inbound_tag=excluded.inbound_tag, "
+                    "proto=excluded.proto, conns=excluded.conns, "
+                    "seen_at=excluded.seen_at",
+                    rows,
+                )
+        except Exception as e:
+            logger.warning(f"dpi_exit_report: presence upsert failed: {e}")
+            return 0
+        return len(rows)
+
+    def _presence_rows(self, payload: dict) -> list:
+        """The presence block as ``(email, tag, proto, conns, ts)`` rows,
+        malformed items skipped."""
         presence = payload.get('presence') or []
         if not isinstance(presence, list):
-            return 0
+            return []
         from datetime import datetime
         ts = datetime.utcnow().isoformat()
         rows = []
@@ -1089,25 +1152,32 @@ class WebAppServer:
             rows.append(
                 (email, tag, self._EXIT_TAG_PROTO.get(tag, tag), conns, ts)
             )
-        if not rows:
-            return 0
-        try:
-            with self.db._connect() as conn:
-                conn.executemany(
-                    "INSERT INTO user_presence "
-                    "(email, inbound_tag, proto, conns, seen_at) "
-                    "VALUES (?, ?, ?, ?, ?) "
-                    "ON CONFLICT(email) DO UPDATE SET "
-                    "inbound_tag=excluded.inbound_tag, "
-                    "proto=excluded.proto, conns=excluded.conns, "
-                    "seen_at=excluded.seen_at",
-                    rows,
-                )
-        except Exception as e:
-            logger.warning(f"dpi_exit_report: presence upsert failed: {e}")
-            return 0
+        return rows
+
+    def _store_protocol_usage_from(self, payload: dict, presence_rows: list) -> None:
+        """D3: the report's per-(user, inbound) counts — the ``usage`` block
+        of a current reporter (every inbound a user was accepted on, with
+        its count), else the presence rows (an older reporter: the last tag
+        per user only). Never raises."""
+        usage = payload.get('usage')
+        if not isinstance(usage, list):
+            self._store_protocol_usage(presence_rows or [])
+            return
+        from datetime import datetime
+        ts = datetime.utcnow().isoformat()
+        rows = []
+        for item in usage[:20000]:
+            if not isinstance(item, dict):
+                continue
+            email = str(item.get('email') or '').strip()
+            tag = str(item.get('tag') or '').strip()
+            try:
+                conns = int(item.get('conns') or 0)
+            except (TypeError, ValueError):
+                continue
+            if email and tag and conns > 0:
+                rows.append((email, tag, self._EXIT_TAG_PROTO.get(tag, tag), conns, ts))
         self._store_protocol_usage(rows)
-        return len(rows)
 
     def _store_protocol_usage(self, rows: list) -> None:
         """D3: add this report's per-user accepted connections to the day's
@@ -1115,7 +1185,7 @@ class WebAppServer:
         A user switching protocols within a window shows under the one it
         ended on — the reporter keeps the last tag. Never raises."""
         day = rows[0][4][:10] if rows else None
-        if not day:
+        if not day or not any(r[0] for r in rows):
             return
         try:
             with self.db._connect() as conn:
@@ -1590,18 +1660,21 @@ class WebAppServer:
         abroad = ru_exit is not None
         text_body = None
 
-        def demoted_here() -> frozenset:
+        def demoted_here(personal: bool = True) -> frozenset:
             # What is demoted for this user: DPIMonitor's and the
             # operator's demotions for this network, plus what the user's
             # own client stopped passing (IMPROVEMENT_PLAN F, C3). E3/C1:
             # Cascade/Auto (Clash) and auto (sing-box) leave it out, the
             # manual pick keeps it; both profiles move it to the end of the
             # calls group (A2). Tolerant reads — junk collapses to nothing.
+            # Runs on a worker thread: two sqlite reads per fetch.
             from bot.services.personal_demotion import personal_dark
-            network = MyKeyAnswerHandler.get_auto_demotions(
+            network = frozenset(MyKeyAnswerHandler.get_auto_demotions(
                 self.db, asn or getattr(user, 'last_asn', None),
-            )
-            return frozenset(network) | personal_dark(
+            ))
+            if not personal:
+                return network
+            return network | personal_dark(
                 self.db, getattr(user, 'chat_id', None), cascade)
 
         if abroad_clash is not None:
@@ -1616,7 +1689,8 @@ class WebAppServer:
             clash_cascade = (cascade if neko_app_version(request.headers.get('User-Agent', ''))
                              else tuple(p for p in cascade if p != 'xhr'))
             text_body = self.subscription.build_clash_config(
-                user, clash_cascade, lockdown=lockdown, demoted=demoted_here(),
+                user, clash_cascade, lockdown=lockdown,
+                demoted=await asyncio.to_thread(demoted_here),
                 big_check=self._big_check_for(user),
             )
         elif fmt == 'links' or (not fmt and 'happ' in ua):
@@ -1625,10 +1699,14 @@ class WebAppServer:
             config_obj = self.subscription.build_xray_config(user, cascade)
         else:
             # C2: Hiddify drops the profile's groups, so only the §hide§
-            # marker keeps a server out of its balancer.
+            # marker keeps a server out of its balancer. There a demotion
+            # hides the server, and the user's own telemetry came from
+            # another device (Hiddify sends none): network demotions only.
+            hiddify = 'hiddify' in ua
             config_obj = self.subscription.build_singbox_config(
-                user, cascade, lockdown=lockdown, demoted=demoted_here(),
-                hiddify='hiddify' in ua,
+                user, cascade, lockdown=lockdown,
+                demoted=await asyncio.to_thread(demoted_here, not hiddify),
+                hiddify=hiddify,
             )
 
         # Surface quota/expiry to Hiddify's profile panel via the

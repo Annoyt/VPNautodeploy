@@ -8,10 +8,13 @@ acts — on 2026-11-10 two clients sent telemetry at all — so a user whose
 network blocks one protocol kept it in Cascade and Auto. Here the user's
 own rows decide, for that user's next profile:
 
-* the client checked in through OTHER cascade protocols at least
-  ``PERSONAL_MIN_OTHER_ROWS`` times in the last ``PERSONAL_WINDOW_H`` hours
-  (about two hours of an open app — silence is never a signal: a closed app
-  or a sleeping phone leaves no rows on any protocol);
+* the client checked in through OTHER cascade protocols in at least
+  ``PERSONAL_MIN_CHECKS`` distinct 10-minute slots of the last
+  ``PERSONAL_WINDOW_H`` hours (about two hours of an open app — its
+  providers check every 10 min; silence is never a signal: a closed app or
+  a sleeping phone leaves no rows on any protocol). Slots, not rows: a paid
+  profile checks three other protocols at once, and twelve rows were then
+  forty minutes;
 * and not once through this one, which it did pass within the last
   ``PERSONAL_SEEN_DAYS`` days — a protocol the client never passed (new in
   its profile, or never working for it) is not "stopped passing".
@@ -22,9 +25,12 @@ pick, and its telemetry provider keeps checking it — the first row through
 it again lifts the demotion at the next profile fetch.
 
 Per user, not per device: the rows carry our egress address, not the
-device's network, so a phone's blocked protocol is hidden on the same
-user's laptop too. That costs a server choice, never connectivity: a
-demotion of every protocol excludes nothing (SubscriptionService).
+device's network, so a phone's blocked protocol sinks on the same user's
+laptop too. In NekoVPN / FlClash / Karing that costs a server choice, never
+connectivity: the manual pick keeps it, and a demotion of every protocol
+excludes nothing (SubscriptionService). Hiddify gets no personal demotions:
+there a demotion hides the server, and the telemetry came from another
+device (the /sub handler).
 """
 
 import logging
@@ -34,7 +40,8 @@ from typing import Iterable, Optional
 logger = logging.getLogger(__name__)
 
 PERSONAL_WINDOW_H = 3
-PERSONAL_MIN_OTHER_ROWS = 12      # ≈ 2 h of other protocols' 10-min checks
+PERSONAL_MIN_CHECKS = 12          # distinct 10-min slots ≈ 2 h of an open app
+PERSONAL_SLOT_S = 600
 PERSONAL_SEEN_DAYS = 7
 TELEMETRY_PREFIX = 'p-'           # subscription.CLASH_TELEMETRY_PREFIX
 RESERVE = 'de'                    # the reserve is not a cascade protocol
@@ -58,23 +65,34 @@ def personal_dark(db, chat_id, cascade: Iterable[str],
     week = _space_ts(now - timedelta(days=PERSONAL_SEEN_DAYS))
     try:
         with db._connect() as conn:
-            rows = conn.execute(
-                "SELECT substr(grp, ?), SUM(ts >= ?), COUNT(*) FROM client_probe "
-                "WHERE chat_id = ? AND ts >= ? AND substr(grp, 1, ?) = ? "
-                "GROUP BY grp",
-                (len(TELEMETRY_PREFIX) + 1, recent, str(chat_id), week,
+            seen_week = {str(r[0]) for r in conn.execute(
+                "SELECT DISTINCT substr(grp, ?) FROM client_probe "
+                "WHERE chat_id = ? AND ts >= ? AND substr(grp, 1, ?) = ?",
+                (len(TELEMETRY_PREFIX) + 1, str(chat_id), week,
+                 len(TELEMETRY_PREFIX), TELEMETRY_PREFIX),
+            )}
+            slots_rows = conn.execute(
+                "SELECT DISTINCT substr(grp, ?), "
+                f"CAST(strftime('%s', ts) AS INTEGER) / {PERSONAL_SLOT_S} "
+                "FROM client_probe "
+                "WHERE chat_id = ? AND ts >= ? AND substr(grp, 1, ?) = ?",
+                (len(TELEMETRY_PREFIX) + 1, str(chat_id), recent,
                  len(TELEMETRY_PREFIX), TELEMETRY_PREFIX),
             ).fetchall()
     except Exception as e:
         logger.warning(f"personal demotion read failed for {chat_id}: {e}")
         return frozenset()
-    recent_rows = {str(p): int(r or 0) for p, r, _w in rows}
-    seen_week = {str(p) for p, _r, w in rows if w}
+    slots: dict = {}
+    for proto, slot in slots_rows:
+        slots.setdefault(str(proto), set()).add(slot)
     dark = set()
     for proto in protocols:
-        if recent_rows.get(proto, 0) or proto not in seen_week:
+        if slots.get(proto) or proto not in seen_week:
             continue
-        others = sum(n for p, n in recent_rows.items() if p != proto and p in protocols)
-        if others >= PERSONAL_MIN_OTHER_ROWS:
+        others = set()
+        for p, s in slots.items():
+            if p != proto and p in protocols:
+                others |= s
+        if len(others) >= PERSONAL_MIN_CHECKS:
             dark.add(proto)
     return frozenset(dark)

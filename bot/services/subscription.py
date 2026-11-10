@@ -450,6 +450,10 @@ class SubscriptionService:
     # hiddify-core leaves an outbound whose tag contains this out of its
     # selector and balancers (v2/config/builder.go; IMPROVEMENT_PLAN F, C2).
     HIDE_MARKER = '§hide§'
+    # In Hiddify a hidden server is gone from the manual pick as well, so
+    # a demotion there is removal: demoted servers are hidden only while at
+    # least this many cascade servers stay visible (the reserve not counted).
+    HIDDIFY_MIN_VISIBLE = 2
 
     def _fp(self, uuid) -> str:
         """This user's TLS fingerprint (IMPROVEMENT_PLAN F, E1): one value
@@ -554,6 +558,16 @@ class SubscriptionService:
         return outbounds, proxy_tags, udp_call_tags
 
     @staticmethod
+    def _demoted_set(demoted) -> frozenset:
+        """``demoted`` as a frozenset of protocol names, read once: a one-shot
+        iterator must not demote in one group and not in the next. Anything
+        unusable demotes nothing."""
+        try:
+            return frozenset(p for p in (demoted or ()) if isinstance(p, str))
+        except TypeError:
+            return frozenset()
+
+    @staticmethod
     def _calls_order(tags: List[str], protocol_of: dict, demoted) -> List[str]:
         """The calls group in priority order, with the protocols DPIMonitor
         demotes for this network moved to the end (IMPROVEMENT_PLAN F, A2):
@@ -597,7 +611,10 @@ class SubscriptionService:
         demoted servers, ShadowTLS's frontend (a detour, not a proxy — the
         core balanced raw traffic onto it) and the RU-exit outbound of
         ``lang='en'`` profiles (meant for RU sites only, by route rules
-        Hiddify drops).
+        Hiddify drops). A hidden server is out of Hiddify's manual pick
+        too — there a demotion is removal — so the demoted servers are
+        hidden only while ``HIDDIFY_MIN_VISIBLE`` cascade servers stay
+        visible; otherwise Hiddify sees every server, as before C2.
 
         For ``lang='en'`` users, adds a RU-exit outbound so they can
         access RU-geo-blocked content (VK/Yandex/etc) from abroad.
@@ -610,6 +627,9 @@ class SubscriptionService:
         ``get_cascade_order``. This service has no db; the flag is read
         once per request by the /sub handler.
         """
+        # Read more than once below: a one-shot iterator must not demote in
+        # one group and not in the next.
+        demoted = self._demoted_set(demoted)
         protocol_of: dict = {}
         outbounds, proxy_tags, udp_call_tags = self._collect_outbounds(
             user, enabled_protocols, protocols=protocol_of, emergency=lockdown,
@@ -630,8 +650,9 @@ class SubscriptionService:
             # Every outbound that must stay out of Hiddify's balancer gets
             # the marker; a chain's detour reference and every group that
             # names a renamed outbound follow.
-            hide = set(excluded) | {
-                ob['tag'] for ob in outbounds if ob.get('type') == 'shadowtls'}
+            visible = [t for t in proxy_tags if t in protocol_of and t not in excluded]
+            hide = set(excluded) if len(visible) >= self.HIDDIFY_MIN_VISIBLE else set()
+            hide |= {ob['tag'] for ob in outbounds if ob.get('type') == 'shadowtls'}
             rename = {t: f'{t} {self.HIDE_MARKER}' for t in hide}
             for ob in outbounds:
                 if ob.get('tag') in rename:
@@ -640,7 +661,7 @@ class SubscriptionService:
                     ob['detour'] = rename[ob['detour']]
             proxy_tags = [rename.get(t, t) for t in proxy_tags]
             udp_call_tags = [rename.get(t, t) for t in udp_call_tags]
-            excluded = [rename[t] for t in excluded]
+            excluded = [rename.get(t, t) for t in excluded]
         lang = (getattr(user, 'lang', None) or 'ru') if user else 'ru'
 
         # urltest auto-selector at the top so the client's default mode
@@ -1266,6 +1287,7 @@ class SubscriptionService:
         without a profile update. Without WEBAPP_URL there is nothing to
         point at and the profile is exactly what it was before E1.
         """
+        demoted = self._demoted_set(demoted)
         proxies, calls, protocol_of = self._clash_proxies(user, enabled_protocols,
                                                           emergency=lockdown)
         names = [p['name'] for p in proxies]

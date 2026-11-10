@@ -269,10 +269,14 @@ def build_kit(db, config, user) -> List[Tuple[str, bytes]]:
     cascade = emergency_cascade(db, user)
     sub = SubscriptionService(config)
     from bot.services.personal_demotion import personal_dark
-    demoted = (frozenset(MK.get_auto_demotions(db, getattr(user, 'last_asn', None)))
-               | personal_dark(db, getattr(user, 'chat_id', None), cascade))
+    network = frozenset(MK.get_auto_demotions(db, getattr(user, 'last_asn', None)))
+    demoted = network | personal_dark(db, getattr(user, 'chat_id', None), cascade)
     clash = sub.build_clash_config(user, cascade, lockdown=True, demoted=demoted)
-    singbox = sub.build_singbox_config(user, cascade, lockdown=True, demoted=demoted)
+    # The .json is the one Hiddify imports (it has no Clash support): built
+    # as /sub builds it for a Hiddify client — §hide§ markers, network
+    # demotions only (IMPROVEMENT_PLAN F, C2).
+    singbox = sub.build_singbox_config(user, cascade, lockdown=True, demoted=network,
+                                       hiddify=True)
     return [
         (KIT_YAML_NAME, clash.encode('utf-8')),
         (KIT_JSON_NAME,

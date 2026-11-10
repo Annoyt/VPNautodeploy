@@ -122,10 +122,18 @@ def seed_rows(db, chat_id, protos, *, now=T0, minutes_ago=5):
         c.commit()
 
 
+# Every protocol a client "stops passing" must have passed within the week
+# (dm.CLIENT_DARK_SEEN_DAYS): by default the clients passed all of them a
+# day ago.
+EVERY = ('reality', 'ws', 'stls', 'hy2', 'hy2t')
+
+
 def network(db, ids, *, asn=MEGAFON, status='paid', alive=('reality', 'ws', 'stls'),
-            minutes_ago=5, now=T0):
+            minutes_ago=5, now=T0, seen=EVERY):
     for cid in ids:
         seed_user(db, cid, asn=asn, status=status)
+        if seen:
+            seed_rows(db, cid, seen, now=now, minutes_ago=24 * 60)
         seed_rows(db, cid, alive, now=now, minutes_ago=minutes_ago)
 
 
@@ -307,18 +315,35 @@ class TestR6Monitor:
         assert auto(db) == {'asn': {}, 'global': {}}
 
     def test_judged_per_protocol_not_per_network(self):
-        """hy2 demoted by R6; now the clients call REALITY dark there —
-        hy2 is quiet and counts toward its restore."""
+        """hy2 demoted by R6; now the clients there pass hy2 and call
+        REALITY dark — hy2 is quiet and counts toward its restore."""
         state = dm.empty_state()
         state['auto']['asn'][MEGAFON] = {'hy2': {'since': T0.isoformat(),
                                                  'reason': 'client_dark', 'evidence': 'x'}}
         sig = dm.empty_signals()
         sig['client_dark'] = {MEGAFON: {'reality': 'reality dark'}}
+        sig['client_alive'] = {'global': ['hy2', 'ws'], 'asn': {MEGAFON: ['hy2', 'ws']}}
         state, _ = DPIMonitor.evaluate(sig, state, T0 + STEP)
         assert state['targets'][f'asn:{MEGAFON}:hy2']['good'] == 1
         sig['client_dark'] = {MEGAFON: {'hy2': 'hy2 dark'}}
         state, _ = DPIMonitor.evaluate(sig, state, T0 + 2 * STEP)
         assert state['targets'][f'asn:{MEGAFON}:hy2']['good'] == 0
+
+    def test_no_client_evidence_is_no_verdict(self):
+        """Every app closed: nobody passes hy2 and nobody is dead on it.
+        That is not "quiet" — the demotion waits (review of C)."""
+        state = dm.empty_state()
+        state['auto']['asn'][MEGAFON] = {'hy2': {'since': T0.isoformat(),
+                                                 'reason': 'client_dark', 'evidence': 'x'}}
+        state['auto']['global'] = {'ws': {'since': T0.isoformat(),
+                                          'reason': 'client_dark_global', 'evidence': 'x'}}
+        sig = dm.empty_signals()
+        for i in range(1, 10):
+            state, changes = DPIMonitor.evaluate(sig, state, T0 + i * STEP)
+            assert changes == []
+        assert state['targets'][f'asn:{MEGAFON}:hy2']['good'] == 0
+        assert state['targets']['global:ws']['good'] == 0
+        assert 'hy2' in state['auto']['asn'][MEGAFON] and 'ws' in state['auto']['global']
 
     def test_ranked_below_the_probe_rules_and_above_reality_asn(self):
         state = dm.empty_state()

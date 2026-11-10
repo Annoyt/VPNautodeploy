@@ -13,12 +13,16 @@ monitor within the hour, because none of its rules fired for it.
 Every entry carries ``until``; an expired one is ignored on read and dropped
 on the next write. ``MyKeyAnswerHandler.get_auto_demotions`` unions these
 with the monitor's, so /sub, the key card, the SOS kit and the cascade order
-all honour them. Readers never raise (they run inside /sub).
+all honour them. Readers never raise (they run inside /sub). Writers read
+strictly: a locked read taken for "nothing stored" would overwrite every
+other live entry (the rule_lists hazard, AGENTS.md §31), and a write that
+did not land raises instead of being reported as done.
 """
 
 import json
 import logging
 import re
+import sqlite3
 from datetime import datetime, timedelta
 from typing import Optional, Tuple
 
@@ -51,23 +55,53 @@ def normalize_asn(raw) -> Optional[str]:
     return f'AS{m.group(1)}' if m else None
 
 
+class ManualStoreError(RuntimeError):
+    """cascade_manual could not be read before a write, or the write did
+    not land."""
+
+
 def _parse_ts(value) -> Optional[datetime]:
+    """Naive UTC; an offset (a hand-edited ``…+00:00``) is converted, not
+    compared against naive times (that raised and dropped every entry)."""
     try:
-        return datetime.fromisoformat(str(value).replace('Z', ''))
+        ts = datetime.fromisoformat(str(value).replace('Z', '+00:00'))
     except (TypeError, ValueError):
         return None
+    if ts.tzinfo is not None:
+        ts = (ts - ts.utcoffset()).replace(tzinfo=None)
+    return ts
 
 
-def load(db, now: Optional[datetime] = None) -> dict:
+def _read_strict(db) -> Optional[str]:
+    """The stored value, None when there is none; raises ManualStoreError
+    on a sqlite error (``get_setting`` folds that into "nothing stored")."""
+    connect = getattr(db, '_connect', None)
+    if connect is None:
+        return db.get_setting(SETTING_KEY)
+    try:
+        with connect() as conn:
+            row = conn.execute("SELECT value FROM app_settings WHERE key = ?",
+                               (SETTING_KEY,)).fetchone()
+    except sqlite3.Error as e:
+        raise ManualStoreError(f'{SETTING_KEY} не читается: {e}') from e
+    return row[0] if row else None
+
+
+def load(db, now: Optional[datetime] = None, *, strict: bool = False) -> dict:
     """The live entries: ``{'global': {proto: entry}, 'asn': {ASN: {proto:
-    entry}}}``, expired and malformed ones left out. Never raises."""
+    entry}}}``, expired and malformed ones left out. Never raises, unless
+    ``strict`` (the writers): then an unreadable store raises
+    ManualStoreError."""
     now = now or datetime.utcnow()
     out = {'global': {}, 'asn': {}}
-    try:
-        raw = db.get_setting(SETTING_KEY) if db else None
-    except Exception as e:
-        logger.warning(f"cascade_manual read failed: {e}")
-        return out
+    if strict:
+        raw = _read_strict(db)
+    else:
+        try:
+            raw = db.get_setting(SETTING_KEY) if db else None
+        except Exception as e:
+            logger.warning(f"cascade_manual read failed: {e}")
+            return out
     if not isinstance(raw, str) or not raw.strip():
         return out
     try:
@@ -112,14 +146,17 @@ def demoted_for(db, asn: Optional[str], now: Optional[datetime] = None) -> set:
 
 
 def _save(db, manual: dict) -> None:
-    db.set_setting(SETTING_KEY, json.dumps(manual, ensure_ascii=False, sort_keys=True))
+    ok = db.set_setting(SETTING_KEY, json.dumps(manual, ensure_ascii=False, sort_keys=True))
+    if ok is False:
+        raise ManualStoreError(f'{SETTING_KEY} не записался')
 
 
 def demote(db, proto: str, asn: Optional[str], ttl: timedelta, by: str,
            now: Optional[datetime] = None) -> dict:
-    """Add (or extend) one entry; returns it. Expired entries go on the way."""
+    """Add (or extend) one entry; returns it. Expired entries go on the way.
+    Raises ManualStoreError when the store cannot be read or written."""
     now = now or datetime.utcnow()
-    manual = load(db, now)
+    manual = load(db, now, strict=True)
     entry = {'since': now.isoformat(timespec='seconds'),
              'until': (now + ttl).isoformat(timespec='seconds'), 'by': by}
     if asn:
@@ -132,18 +169,21 @@ def demote(db, proto: str, asn: Optional[str], ttl: timedelta, by: str,
 
 def restore(db, proto: str, asn: Optional[str],
             now: Optional[datetime] = None) -> Tuple[bool, dict]:
-    """Drop one entry; ``(was_there, manual_after)``."""
-    manual = load(db, now)
+    """Drop one entry; ``(was_there, manual_after)``. Raises
+    ManualStoreError when the store cannot be read or written."""
+    manual = load(db, now, strict=True)
     scope = manual['asn'].get(asn, {}) if asn else manual['global']
     was = scope.pop(proto, None) is not None
     if asn and asn in manual['asn'] and not manual['asn'][asn]:
         manual['asn'].pop(asn)
-    _save(db, manual)
+    if was:
+        _save(db, manual)
     return was, manual
 
 
 def clear(db) -> dict:
     """Drop every hand demotion (``/cascade reset``); returns what was live."""
     before = load(db)
-    db.set_setting(SETTING_KEY, '{}')
+    if db.set_setting(SETTING_KEY, '{}') is False:
+        raise ManualStoreError(f'{SETTING_KEY} не записался')
     return before

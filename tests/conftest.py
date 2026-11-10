@@ -23,6 +23,17 @@ def _fresh_lockdown_front_cache():
 
 
 @pytest.fixture(autouse=True)
+def _fresh_hy2_auth_memory():
+    """hy2 auth's remembered rows are process-wide
+    (bot/services/hy2_auth_rows.py): a key one test let in must not be let
+    in from memory by the next test's broken db."""
+    from bot.services import hy2_auth_rows
+    hy2_auth_rows.clear()
+    yield
+    hy2_auth_rows.clear()
+
+
+@pytest.fixture(autouse=True)
 def _hermetic_geoip(monkeypatch, tmp_path_factory):
     """GeoIP never downloads anything and never reads /var/lib in tests.
 

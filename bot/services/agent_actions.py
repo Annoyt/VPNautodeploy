@@ -18,7 +18,11 @@ The list is short on purpose:
   ``/cascade demote <proto>``.
 
 A button lives ``BUTTON_TTL_S``: older presses are refused, an advice
-about an outage two hours ago is not an advice about now.
+about an outage two hours ago is not an advice about now. A button runs
+once: a double tap, or a second press after the message could not be
+edited, is refused (``already_done``: the audit row carries the button).
+The ДЕЙСТВИЕ line must be exactly the action: «restart_xray не нужен» is no
+button.
 """
 
 import logging
@@ -55,12 +59,10 @@ def parse(reply: Optional[str]) -> Optional[Tuple[str, Optional[str]]]:
     m = _ACTION_RE.search(reply or '')
     if not m:
         return None
-    words = re.sub(r'[«»"\'`]', ' ', m.group(1)).lower().split()
-    if not words:
-        return None
-    if words[0] == 'restart_xray':
+    words = re.sub(r'[«»"\'`.,;!]', ' ', m.group(1)).lower().split()
+    if words == ['restart_xray']:
         return ('restart_xray', None)
-    if words[0] == 'demote' and len(words) > 1 and words[1] in _protocols():
+    if len(words) == 2 and words[0] == 'demote' and words[1] in _protocols():
         return ('demote', words[1])
     return None
 
@@ -103,9 +105,32 @@ def parse_callback(data: str, now: Optional[float] = None):
     return 'неизвестное действие'
 
 
-def execute(action: str, arg: Optional[str], *, db, config, xui, admin_id: str) -> str:
+def button_id(chat_id, message_id, data: str) -> str:
+    """What makes one button: its message and its data (stamp included)."""
+    return f"{chat_id}:{message_id}:{(data or '')[len(CALLBACK_PREFIX):]}"
+
+
+def already_done(db, button: str) -> bool:
+    """Has this button run (its audit row, within the TTL)? A failed read
+    says yes: refusing a second restart is cheap, running it twice is not."""
+    try:
+        with db._connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM admin_actions WHERE action LIKE 'agent_action_%' "
+                "AND details LIKE ? AND created_at >= datetime('now', ?) LIMIT 1",
+                (f'%[{button}]%', f'-{BUTTON_TTL_S + 3600} seconds'),
+            ).fetchone()
+        return row is not None
+    except Exception as e:
+        logger.warning(f"agent action: audit read failed: {e}")
+        return True
+
+
+def execute(action: str, arg: Optional[str], *, db, config, xui, admin_id: str,
+            button: str = '') -> str:
     """Run one whitelisted action; returns the line for the chat. Audited
-    as ``agent_action_<action>``. Never raises."""
+    as ``agent_action_<action>`` with ``[button]`` in the details. Never
+    raises."""
     try:
         if action == 'restart_xray':
             if xui is None:
@@ -125,7 +150,8 @@ def execute(action: str, arg: Optional[str], *, db, config, xui, admin_id: str) 
         logger.exception(f"agent action {action} failed")
         result = f'❌ не вышло: {str(e)[:150]}'
     try:
-        db.log_admin_action(admin_id, f'agent_action_{action}', arg, result[:200])
+        db.log_admin_action(admin_id, f'agent_action_{action}', arg,
+                            f"{result[:160]} [{button}]" if button else result[:200])
     except Exception as e:
         logger.warning(f"agent action audit failed: {e}")
     return result

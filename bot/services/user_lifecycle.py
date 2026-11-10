@@ -41,6 +41,14 @@ def revoke_user_key(user, xui_service, db) -> None:
     # Mirror the revocation onto the reserve fallback node (paid tier).
     # Best-effort: a dead reserve panel must not block the local revoke.
     uuid = getattr(user, "uuid", None)
+    # hy2 auth must not let this key in from memory when bot.db cannot be
+    # read later (bot/services/hy2_auth_rows.py).
+    try:
+        from bot.services import hy2_auth_rows
+        hy2_auth_rows.forget(uuid)
+        hy2_auth_rows.forget_chat(getattr(user, "chat_id", None))
+    except Exception as e:
+        logger.warning(f"revoke_user_key: hy2 auth memory not cleared: {e}")
     if uuid:
         try:
             from bot.services.fallback_node import FallbackNodeService
