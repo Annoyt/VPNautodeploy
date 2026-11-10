@@ -910,7 +910,7 @@ class WebAppServer:
         except Exception:
             return web.json_response({'ok': False}, status=400)
 
-        presence_rows = await asyncio.to_thread(self._store_presence, payload or {})
+        await asyncio.to_thread(self._store_presence, payload or {})
         # Idempotent (a unique key on the journal's own end time): a retried
         # window does not store its sessions twice.
         await asyncio.to_thread(self._store_hy2_sessions, payload or {})
@@ -937,7 +937,8 @@ class WebAppServer:
                 return web.json_response({'ok': False}, status=500)
         # After the dpi rows: a 500 above makes the reporter re-send this
         # window, and the usage it adds up must not count twice.
-        await asyncio.to_thread(self._store_protocol_usage_from, payload or {}, presence_rows)
+        await asyncio.to_thread(self._store_protocol_usage_from, payload or {},
+                                self._presence_rows(payload or {}))
         return web.json_response({'ok': True, 'rows': len(rows)})
 
     # The healthcheck report (D1) is small JSON; a bigger body is junk.
@@ -1083,6 +1084,29 @@ class WebAppServer:
         offsets on a 2xx, and dropping this feed silently would be
         worse than showing no protocol at all.
         """
+        rows = self._presence_rows(payload)
+        if not rows:
+            return 0
+        try:
+            with self.db._connect() as conn:
+                conn.executemany(
+                    "INSERT INTO user_presence "
+                    "(email, inbound_tag, proto, conns, seen_at) "
+                    "VALUES (?, ?, ?, ?, ?) "
+                    "ON CONFLICT(email) DO UPDATE SET "
+                    "inbound_tag=excluded.inbound_tag, "
+                    "proto=excluded.proto, conns=excluded.conns, "
+                    "seen_at=excluded.seen_at",
+                    rows,
+                )
+        except Exception as e:
+            logger.warning(f"dpi_exit_report: presence upsert failed: {e}")
+            return 0
+        return len(rows)
+
+    def _presence_rows(self, payload: dict) -> list:
+        """The presence block as ``(email, tag, proto, conns, ts)`` rows,
+        malformed items skipped."""
         presence = payload.get('presence') or []
         if not isinstance(presence, list):
             return []
@@ -1105,22 +1129,6 @@ class WebAppServer:
             rows.append(
                 (email, tag, self._EXIT_TAG_PROTO.get(tag, tag), conns, ts)
             )
-        if not rows:
-            return []
-        try:
-            with self.db._connect() as conn:
-                conn.executemany(
-                    "INSERT INTO user_presence "
-                    "(email, inbound_tag, proto, conns, seen_at) "
-                    "VALUES (?, ?, ?, ?, ?) "
-                    "ON CONFLICT(email) DO UPDATE SET "
-                    "inbound_tag=excluded.inbound_tag, "
-                    "proto=excluded.proto, conns=excluded.conns, "
-                    "seen_at=excluded.seen_at",
-                    rows,
-                )
-        except Exception as e:
-            logger.warning(f"dpi_exit_report: presence upsert failed: {e}")
         return rows
 
     def _store_protocol_usage_from(self, payload: dict, presence_rows: list) -> None:
