@@ -192,7 +192,7 @@ class HealthChecker:
             return None
         if protocol == self.XHR_TAG:
             host = (getattr(self.config, 'PROBE_PROXY_MIHOMO_HOST', '') or
-                    'probe-proxy-mihomo')
+                    'probe-proxy-mihomo')   # Settings + compose pass it
             host = host.strip() if isinstance(host, str) else 'probe-proxy-mihomo'
             return f'http://{host}:{port}'
         return f'http://{self.proxy_host}:{port}'
@@ -227,6 +227,15 @@ class HealthChecker:
         the probe config predates B6 — rows saying "dark" would page about
         a reserve that may be fine."""
         proxy = self._proxy_url(protocol)
+        # A sidecar of its own that does not answer at all (not created yet,
+        # stopped, its name unresolvable) is not a dark protocol: aiohttp
+        # reports a name it cannot resolve as a plain error, not proxy_down,
+        # and the rows would page "xhr dark" and demote it (review of E).
+        if (protocol in self.OPTIONAL_SIDECAR_TAGS and proxy
+                and not await self._sidecar_answers(proxy)):
+            logger.warning(f"health_checker: the probe sidecar for {protocol} "
+                           f"({proxy}) does not answer — no rows written")
+            return None
         connector = aiohttp.TCPConnector(limit=len(self.TARGET_DOMAINS))
         async with aiohttp.ClientSession(connector=connector) as session:
             statuses = await asyncio.gather(
@@ -255,6 +264,24 @@ class HealthChecker:
             bulk = await self._check_bulk(session, proxy)
             self._write_bulk(protocol, bulk)
         return protocol_results
+
+    SIDECAR_CONNECT_S = 3
+
+    async def _sidecar_answers(self, proxy: str) -> bool:
+        """Does the sidecar's port take a TCP connection at all?"""
+        from urllib.parse import urlsplit
+        parts = urlsplit(proxy)
+        try:
+            _reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(parts.hostname, parts.port), self.SIDECAR_CONNECT_S)
+        except Exception:
+            return False
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except Exception:
+            pass
+        return True
 
     async def _check_bulk(self, session: aiohttp.ClientSession,
                           proxy: Optional[str]) -> Dict:

@@ -494,20 +494,13 @@ class TestProfileDemotions:
 class TestLockdownProfile:
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize('status,normal,expected,ws_seen', [
-        # IMPROVEMENT_PLAN F, E6: ws leads only where a client of the network
-        # was seen through it; otherwise the TCP-direct protocols go first
-        ('paid', ('reality', 'hy2', 'ws', 'stls', 'de'), ('stls', 'reality', 'ws', 'hy2', 'de'), False),
-        ('demo', ('hy2', 'ws', 'stls'), ('stls', 'ws', 'hy2'), False),
-        ('paid', ('reality', 'hy2', 'ws', 'stls', 'de'), ('ws', 'stls', 'reality', 'hy2', 'de'), True),
+    @pytest.mark.parametrize('status,normal,expected', [
+        ('paid', ('reality', 'hy2', 'ws', 'stls', 'de'), ('ws', 'stls', 'reality', 'hy2', 'de')),
+        ('demo', ('hy2', 'ws', 'stls'), ('ws', 'stls', 'hy2')),
     ])
     async def test_ws_first_and_dns_through_the_tunnel(self, tmp_path, geo, status,
-                                                       normal, expected, ws_seen):
-        srv, db = _server(tmp_path, status=status, last_asn='AS31133' if ws_seen else None)
-        if ws_seen:
-            with db._connect() as conn:
-                conn.execute("INSERT INTO client_probe (chat_id, grp) VALUES ('1', 'p-ws')")
-                conn.commit()
+                                                       normal, expected):
+        srv, db = _server(tmp_path, status=status)
         before = json.loads((await _sub(srv, {'format': 'clash'})).text)
         assert _groups(before)['Cascade']['proxies'] == _names(*normal)
         assert before['dns']['nameserver'] == ['77.88.8.8', '77.88.8.1']

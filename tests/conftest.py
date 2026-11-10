@@ -13,6 +13,16 @@ pytest_plugins = ('pytest_asyncio',)
 
 
 @pytest.fixture(autouse=True)
+def _fresh_lockdown_front_cache():
+    """lockdown.fronted_passes keeps its answer per (db, ASN) for 5 min, and
+    object ids are reused between tests."""
+    from bot.services import lockdown
+    lockdown._fronted_cache.clear()
+    yield
+    lockdown._fronted_cache.clear()
+
+
+@pytest.fixture(autouse=True)
 def _hermetic_geoip(monkeypatch, tmp_path_factory):
     """GeoIP never downloads anything and never reads /var/lib in tests.
 

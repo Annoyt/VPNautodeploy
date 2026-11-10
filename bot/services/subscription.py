@@ -645,9 +645,12 @@ class SubscriptionService:
 
         # urltest auto-selector at the top so the client's default mode
         # picks the fastest live outbound, falling back along the
-        # cascade order on probe failure — without the demoted ones (C1).
+        # cascade order on probe failure — without the demoted ones (C1)
+        # and without SSH (E4): a last resort with no traffic accounting and
+        # no UDP must not win a speed test (it skips entry and often would).
         selector_tags = ['auto'] + proxy_tags if proxy_tags else []
-        auto_tags = [t for t in proxy_tags if t not in excluded]
+        last_resort = {ob['tag'] for ob in outbounds if ob.get('type') == 'ssh'}
+        auto_tags = [t for t in proxy_tags if t not in excluded and t not in last_resort]
         outbounds.insert(0, {
             'type': 'urltest',
             'tag': 'auto',
@@ -1283,10 +1286,14 @@ class SubscriptionService:
         if names:
             excluded = self._clash_excluded(names, protocol_of, demoted)
             kept = [n for n in names if n not in excluded]
+            # SSH (E4) is the last resort: the tail of Cascade (it comes
+            # last in the profile), never the fastest-wins Auto.
+            last_resort = {p['name'] for p in proxies if p.get('type') == 'ssh'}
             cascade = {'name': 'Cascade', 'type': 'fallback', 'proxies': kept,
                        'url': test_url,
                        'interval': self._CLASH_GROUP_INTERVAL}
-            auto = {'name': 'Auto', 'type': 'url-test', 'proxies': kept,
+            auto = {'name': 'Auto', 'type': 'url-test',
+                    'proxies': [n for n in kept if n not in last_resort] or kept,
                     'url': test_url,
                     'interval': self._CLASH_GROUP_INTERVAL, 'tolerance': 50}
             for group in (cascade, auto):
@@ -1893,9 +1900,9 @@ class SubscriptionService:
         sing-box-like shape the Clash converter reads — NOT valid sing-box
         (``transport.type`` xhttp): ``build_singbox_config`` drops it.
 
-        Reaches the exit's own inbound (XHR_EXIT_PORT) through entry's
-        haproxy :8443, which routes it there by its SNI (``XHR_SNI``, a
-        dest of its own). One multiplexed HTTP/2 session instead of a TLS
+        Reaches its server through entry's haproxy :8443, which routes it by
+        its SNI (``XHR_SNI``, a dest of its own). The server must be an xray
+        of its own on exit, not a panel inbound (AGENTS.md §51). One multiplexed HTTP/2 session instead of a TLS
         handshake per connection; the client keeps at most
         ``XHR_MAX_CONNECTIONS`` of them (the advice for RU networks is
         three). No Vision flow: XHTTP does not carry it. Off while XHR_SNI

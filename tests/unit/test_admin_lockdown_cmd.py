@@ -41,10 +41,8 @@ from bot.handlers.callbacks.user import MyKeyAnswerHandler as MK
 
 PAID_DEFAULT = 'hy2t → stls → ws → hy2 → reality'
 DEMO_DEFAULT = 'stls → ws → hy2'
-# IMPROVEMENT_PLAN F, E6: with no sign that the CDN front passes in the
-# network (the operator's card has none), ws goes after the TCP-direct ones
-PAID_LOCKDOWN = 'stls → reality → ws → hy2 → hy2t'
-DEMO_LOCKDOWN = 'stls → ws → hy2'
+PAID_LOCKDOWN = 'ws → stls → reality → hy2 → hy2t'
+DEMO_LOCKDOWN = 'ws → stls → hy2'
 DEFAULT_STATE = {'mode': 'auto', 'active': False, 'since': None, 'by': 'system',
                  'reason': '', 'streak_on': 0, 'streak_off': 0, 'last_change': None}
 SIGNATURE = ('прямые протоколы (reality, hy2, hy2t, stls) не отвечают 20+ мин, '
@@ -259,7 +257,7 @@ class TestOverview:
             [{'name': n, 'enabled': n != 'stls'} for n in MK.DEFAULT_CASCADE_ORDER]))
         seed(db, active=True, by='auto:probe_signature')
         text = text_of(handler)
-        assert '• paid: reality → ws → hy2 → hy2t' in text   # E6: no evidence for ws
+        assert '• paid: ws → reality → hy2 → hy2t' in text
         assert '• demo: ws → hy2' in text
 
 

@@ -1369,6 +1369,14 @@ class AdminOpsMixin(AdminHandlerBase):
             top, override = lockdown_order_preview(self.db, MK.PROTOCOL_METHOD_MAP)
             lines.append("при включении наверх: " + html.escape(", ".join(top))
                          + (" (override cascade_lockdown)" if override else ""))
+        try:
+            from bot.services.lockdown import front_evidence_enabled
+            front_evidence = front_evidence_enabled(self.db)
+        except Exception:          # the card renders without the module
+            front_evidence = False
+        if front_evidence:
+            lines.append("<i>lockdown_front_evidence=1: ws первым только в сетях, где "
+                         "CDN-фронт виден за сутки; в остальных — после TCP-прямых</i>")
         lines.append("")
         lines.append("<i>/lockdown on · /lockdown off · /lockdown auto · "
                      "оповестить юзеров: /broadcast</i>")

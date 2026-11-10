@@ -31,7 +31,9 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from bot.core.database import Database
+from bot.core.web_server import WebAppServer
 from bot.handlers.callbacks.user import MyKeyAnswerHandler as MK
+from bot.models.user import User
 from bot.services import lockdown as ld
 from bot.services import ssh_exit, tls_fingerprint
 from bot.services.health_checker import HealthChecker
@@ -60,7 +62,7 @@ def _config(**over):
         SS_SERVER_PASSWORD='srv-pw', SS_USER_SALT='salt', SUB_MIRROR_URLS='',
         FALLBACK_NODE_HOST='', TLS_FINGERPRINTS='',
         XHR_SNI='', XHR_PATH='/xhr', XHR_PUBLIC_KEY='', XHR_SID='', XHR_PORT=0,
-        XHR_EXIT_PORT=2055, XHR_INBOUND_ID=0, XHR_MAX_CONNECTIONS=3,
+        XHR_MAX_CONNECTIONS=3,
         SSH_EXIT_HOST='', SSH_EXIT_PORT='22022', SSH_HOST_KEY='', SSH_USER_SECRET='',
     )
     cfg.update(over)
@@ -200,37 +202,17 @@ class TestXhr:
                                      'port': 18087, 'proxy': 'probe_monitor-xhr'}]
         assert mih['proxies'][0]['network'] == 'xhttp'
 
-    def test_inbound_script_shapes(self):
-        setup = _load('setup_xhr_inbound.py')
-        source = {
-            'streamSettings': json.dumps({'network': 'tcp', 'security': 'reality',
-                                          'tcpSettings': {'acceptProxyProtocol': True},
-                                          'realitySettings': {'privateKey': 'PRIV', 'xver': 0,
-                                                              'shortIds': ['aa', 'bb'],
-                                                              'settings': {'publicKey': 'PUB'}}}),
-            'settings': json.dumps({'clients': [{'id': UUID, 'email': 'u1@x', 'flow': 'xtls-rprx-vision',
-                                                  'totalGB': 0, 'enable': True}]}),
-        }
-        inbound = setup.build_inbound(source, sni='dl.google.com', port=2055, path='/xhr')
-        stream = json.loads(inbound['streamSettings'])
-        assert (inbound['port'], inbound['protocol']) == (2055, 'vless')
-        assert stream['network'] == 'xhttp' and stream['xhttpSettings'] == {'path': '/xhr', 'mode': 'auto'}
-        r = stream['realitySettings']
-        assert (r['dest'], r['serverNames'], r['privateKey'], r['shortIds']) == \
-            ('dl.google.com:443', ['dl.google.com'], 'PRIV', ['aa'])
-        assert stream['sockopt'] == {'acceptProxyProtocol': True}
-        assert setup.clients_for(source) == [{'id': UUID, 'email': 'u1@x', 'totalGB': 0,
-                                              'enable': True, 'flow': ''}]
-        assert 'send-proxy-v2' in setup.haproxy_lines('dl.google.com', '198.51.100.1', 2055, True)
-        with pytest.raises(ValueError):
-            setup.build_inbound({'streamSettings': '{}'}, sni='x', port=1, path='/')
-
-    def test_provisioning_attaches_new_keys(self):
+    def test_no_panel_inbound_is_attached(self):
+        # the panel gives every VLESS inbound the client's Vision flow; an
+        # XHTTP inbound would reject every user (AGENTS.md §51): the bot
+        # never attaches keys to one
         from bot.services.xui_service import XUIService
         svc = XUIService.__new__(XUIService)
         svc.config = SimpleNamespace(WS_INBOUND_ID=3, SS_INBOUND_ID=5, WS2_INBOUND_ID=6,
                                      XHR_INBOUND_ID=7)
-        assert svc._client_inbound_ids(1) == [1, 3, 5, 6, 7]
+        assert svc._client_inbound_ids(1) == [1, 3, 5, 6]
+        assert not os.path.exists(os.path.join(os.path.dirname(__file__), '..', '..',
+                                               'scripts', 'setup_xhr_inbound.py'))
 
 
 def _load(name):
@@ -310,6 +292,20 @@ class TestSshExit:
         for line in ('PermitTTY no', 'ForceCommand /bin/false', 'AllowTcpForwarding local',
                      'PermitRootLogin no', 'AllowGroups vpn', 'X11Forwarding no'):
             assert line in out.splitlines()
+        permit = next(l for l in out.splitlines() if l.startswith('PermitOpen '))
+        ports = {p.split(':')[1] for p in permit.split()[1:]}
+        assert '443' in ports and '25' not in ports and 'any' not in permit
+
+    def test_the_entrypoint_firewalls_before_sshd(self):
+        out = subprocess.run(['bash', os.path.join(os.path.dirname(__file__), '..', '..',
+                                                   'scripts', 'setup_ssh_exit.sh'),
+                              '--print-entrypoint'], capture_output=True, text=True, check=True).stdout
+        rules = out.index('iptables -A OUTPUT -d')
+        assert rules < out.index('exec /usr/sbin/sshd')
+        for net in ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '169.254.0.0/16',
+                    '127.0.0.0/8', '100.64.0.0/10'):
+            assert net in out
+        assert '--dport 25 -j REJECT' in out and out.startswith('#!/bin/sh\nset -eu')
 
 
 # ------------------------------------------------------------------ E5 -------
@@ -346,16 +342,24 @@ class TestBigCheck:
 # ------------------------------------------------------------------ E6 -------
 
 class TestLockdownFront:
+    """E6 is a switch (app_settings.lockdown_front_evidence), off by default:
+    then lockdown keeps ws first everywhere, as before E6."""
 
-    def _db(self, tmp_path):
+    def _db(self, tmp_path, evidence_switch=True):
         db = Database(str(tmp_path / 'bot.db'))
         db.set_setting('cascade_protocol_order', json.dumps(['reality', 'hy2', 'ws', 'stls']))
         db.set_setting('lockdown_mode', json.dumps({'mode': 'on', 'active': True, 'by': 'admin:1'}))
+        if evidence_switch:
+            db.set_setting('lockdown_front_evidence', '1')
         with db._connect() as conn:
             conn.execute("INSERT INTO users (chat_id, username, status, last_asn) "
                          "VALUES ('9', 'x', 'paid', 'AS31133')")
             conn.commit()
         return db
+
+    def test_off_by_default_ws_leads(self, tmp_path):
+        db = self._db(tmp_path, evidence_switch=False)
+        assert MK.get_cascade_order(db, asn='AS31133')[:3] == ('ws', 'stls', 'reality')
 
     def test_no_evidence_keeps_tcp_direct_first(self, tmp_path):
         db = self._db(tmp_path)
@@ -383,6 +387,140 @@ class TestLockdownFront:
             ['stls', 'reality', 'ws', 'hy2']
         assert ld.apply_lockdown_order(['reality', 'hy2', 'ws', 'stls']) == \
             ['ws', 'stls', 'reality', 'hy2']
+
+    def test_an_override_keeps_its_order_but_ws(self):
+        # the operator put hy2 first: only ws moves (after the TCP-direct ones)
+        assert ld.apply_lockdown_order(['reality', 'hy2', 'ws', 'stls'], ['hy2', 'ws', 'stls'],
+                                       fronted_ok=False) == ['hy2', 'stls', 'ws', 'reality']
+        assert ld.apply_lockdown_order(['hy2', 'ws'], ['ws', 'hy2'], fronted_ok=False) == \
+            ['ws', 'hy2']
+
+    def test_the_evidence_is_read_once_per_window(self, tmp_path, monkeypatch):
+        db = self._db(tmp_path)
+        calls = []
+        real = ld._fronted_passes_read
+        monkeypatch.setattr(ld, '_fronted_passes_read', lambda d, a: calls.append(a) or real(d, a))
+        for _ in range(3):
+            ld.fronted_passes(db, 'AS31133')
+        assert calls == ['AS31133']
+
+
+class TestOptionalSidecar:
+
+    @pytest.mark.asyncio
+    async def test_a_sidecar_that_does_not_answer_writes_nothing(self, tmp_path):
+        db = Database(str(tmp_path / 'bot.db'))
+        hc = HealthChecker(db, _config(**XHR, PROBE_PROXY_MIHOMO_HOST='no-such-sidecar.invalid'))
+        assert await hc._check_protocol('xhr') is None
+        with db._connect() as conn:
+            assert conn.execute("SELECT COUNT(*) FROM outbound_health").fetchone()[0] == 0
+
+    @pytest.mark.asyncio
+    async def test_reachability(self):
+        import asyncio
+        server = await asyncio.start_server(lambda r, w: w.close(), '127.0.0.1', 0)
+        port = server.sockets[0].getsockname()[1]
+        hc = HealthChecker.__new__(HealthChecker)
+        try:
+            assert await hc._sidecar_answers(f'http://127.0.0.1:{port}') is True
+        finally:
+            server.close()
+            await server.wait_closed()
+        assert await hc._sidecar_answers(f'http://127.0.0.1:{port}') is False
+
+
+class TestSshIsTheLastResort:
+
+    def test_out_of_auto_in_the_pick_and_at_the_tail(self):
+        cfg = _config(**SSH)
+        clash = _clash(config=cfg, lockdown=True)
+        groups = {g['name']: g for g in clash['proxy-groups']}
+        ssh = next(p['name'] for p in clash['proxies'] if p['type'] == 'ssh')
+        assert ssh not in groups['Auto']['proxies']
+        assert groups['Cascade']['proxies'][-1] == ssh
+        assert ssh in groups['VPN']['proxies']
+        sb = SubscriptionService(cfg).build_singbox_config(_user(), ALL, lockdown=True)
+        ob = {o['tag']: o for o in sb['outbounds']}
+        ssh_tag = next(t for t, o in ob.items() if o.get('type') == 'ssh')
+        assert ssh_tag not in ob['auto']['outbounds'] and ssh_tag in ob['proxy']['outbounds']
+
+
+class TestShaCryptWithoutTheModule:
+
+    def test_the_specs_vector(self):
+        assert ssh_exit.sha512_crypt('Hello world!', 'saltstring') == (
+            '$6$saltstring$svn8UoSVapNtMuq1ukKS4tPQd8iKwSMHWjl/O817G3uBnIFNjnQJuesI68u4OT'
+            'LiBFdcbYEdFCoEOfaS35inz1')
+
+    def test_matches_the_system_crypt(self):
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            crypt = pytest.importorskip('crypt')
+        for pw in ('', 'x', 'p' * 64, 'p' * 65, 'пароль-' * 20):
+            for salt in ('ab', 'abcdefghijklmnop'):
+                assert ssh_exit.sha512_crypt(pw, salt) == crypt.crypt(pw, f'$6${salt}$')
+        h = ssh_exit._crypt_sha512('secret')
+        assert crypt.crypt('secret', h) == h
+
+
+class TestXhrOnlyForTheApp:
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize('ua,carried', [('NekoVPN/v0.9.2-neko.1 clash-verge Platform/android', True),
+                                           ('FlClash/v0.8.90', False), ('', False)])
+    async def test_by_user_agent(self, tmp_path, monkeypatch, ua, carried):
+        from bot.services import geoip
+        monkeypatch.setattr(geoip, 'lookup', lambda ip: None)
+        monkeypatch.setattr(geoip, 'lookup_asn', lambda ip: None)
+        monkeypatch.setattr(geoip, 'lookup_city', lambda ip: None)
+        db = Database(str(tmp_path / 'bot.db'))
+        db._users.save(User(chat_id='1', username='u1', status='paid', uuid=UUID,
+                            email='u1@x', quota_gb=100.0, lang='ru'))
+        db.set_setting('cascade_protocol_order', json.dumps(
+            [{'name': n, 'enabled': True} for n in ('reality', 'hy2', 'ws', 'stls', 'xhr')]))
+        srv = WebAppServer(_config(**XHR), db, xui_service=Mock())
+        srv.xui.get_client_traffic = AsyncMock(return_value={})
+        srv._schedule_fallback_provisioning = Mock()
+        srv._schedule_neko_app = Mock()
+        req = Mock()
+        req.match_info = {'token': srv.subscription.derive_token(UUID)}
+        req.rel_url = SimpleNamespace(query={'format': 'clash'})
+        req.headers = {'User-Agent': ua, 'X-Forwarded-For': '198.51.100.7'}
+        req.remote = ''
+        clash = json.loads((await srv.handle_subscription(req)).text)
+        assert any(p.get('network') == 'xhttp' for p in clash['proxies']) is carried
+
+
+class TestUnsetSettingsChangeNothing:
+    """Every E setting at its unset value builds exactly what a config
+    without any of them builds (the review checked 149 hashes by hand)."""
+
+    E_UNSET = dict(TLS_FINGERPRINTS='', XHR_SNI='', XHR_PATH='/xhr', XHR_PUBLIC_KEY='',
+                   XHR_SID='', XHR_PORT=0, XHR_MAX_CONNECTIONS=3, SSH_EXIT_HOST='',
+                   SSH_EXIT_PORT='22022', SSH_HOST_KEY='', SSH_USER_SECRET='',
+                   PROBE_PROXY_MIHOMO_HOST='probe-proxy-mihomo')
+
+    def _bare(self):
+        cfg = vars(_config()).copy()
+        for k in self.E_UNSET:
+            cfg.pop(k, None)
+        return SimpleNamespace(**cfg)
+
+    @pytest.mark.parametrize('status', ['paid', 'demo'])
+    @pytest.mark.parametrize('lockdown', [False, True])
+    def test_profiles_and_links(self, status, lockdown):
+        protos = ALL if status == 'paid' else ('ws', 'stls', 'hy2')
+        out = []
+        for cfg in (self._bare(), _config(**self.E_UNSET)):
+            svc = SubscriptionService(cfg)
+            user = _user(status=status)
+            out.append((json.dumps(svc.build_singbox_config(user, protos, lockdown=lockdown),
+                                   sort_keys=True),
+                        svc.build_clash_config(user, protos, lockdown=lockdown),
+                        json.dumps(svc.build_xray_config(user, protos), sort_keys=True),
+                        svc.build_links(user, protos)))
+        assert out[0] == out[1]
 
 
 # ------------------------------------------------------------------ stands ---
@@ -415,25 +553,26 @@ def _api(port, path):
 @pytest.mark.requires_docker
 @pytest.mark.requires_network
 def test_stand_xhr_in_mihomo_against_xray(tmp_path):
-    """The bot's own xhr proxy against the inbound setup_xhr_inbound.py would
-    create, on the exit's xray (26.6.22): a delay test passes, an unknown
-    uuid does not."""
+    """The bot's own xhr proxy against an xray of its own (26.6.22, the exit's
+    version) serving VLESS + XHTTP + Reality to flow-less clients: a delay
+    test passes, an unknown uuid does not."""
     if not (_have(XRAY) and _have(MIHOMO)):
         pytest.skip('stand images not pulled')
     keys = dict(l.split(':', 1) for l in _docker('run', '--rm', XRAY, 'x25519').splitlines() if ':' in l)
     priv = keys['PrivateKey'].strip()
     pub = next(v for k, v in keys.items() if k.startswith('Password')).strip()
-    setup = _load('setup_xhr_inbound.py')
-    source = {'streamSettings': json.dumps({'realitySettings': {'privateKey': priv,
-                                                                 'shortIds': ['0123456789abcdef']}}),
-              'settings': json.dumps({'clients': [{'id': UUID, 'email': 'u1@x'}]})}
-    inbound = setup.build_inbound(source, sni='www.google.com', port=443, path='/xhr')
-    stream = json.loads(inbound['streamSettings'])
+    # an xray of its own (not a panel inbound): VLESS + XHTTP + Reality,
+    # flow-less clients — what the exit needs for xhr (AGENTS.md §51)
+    stream = {'network': 'xhttp', 'security': 'reality',
+              'xhttpSettings': {'path': '/xhr', 'mode': 'auto'},
+              'realitySettings': {'show': False, 'dest': 'www.google.com:443',
+                                  'serverNames': ['www.google.com'], 'privateKey': priv,
+                                  'shortIds': ['0123456789abcdef']}}
     (tmp_path / 'x').mkdir()
     (tmp_path / 'm').mkdir()
     (tmp_path / 'x' / 'config.json').write_text(json.dumps({
         'inbounds': [{'port': 443, 'protocol': 'vless', 'settings': {
-            'clients': [{'id': c['id']} for c in setup.clients_for(source)], 'decryption': 'none'},
+            'clients': [{'id': UUID, 'flow': ''}], 'decryption': 'none'},
             'streamSettings': stream}],
         'outbounds': [{'protocol': 'freedom'}]}))
     cfg = _config(ENTRY_NODE_IP='e-xray', XHR_SNI='www.google.com', XHR_PORT=443,
@@ -464,21 +603,27 @@ def test_stand_xhr_in_mihomo_against_xray(tmp_path):
 @pytest.mark.requires_docker
 @pytest.mark.requires_network
 def test_stand_ssh_in_mihomo_against_the_scripts_sshd(tmp_path):
-    """The script's sshd_config in an alpine sshd, the bot's hashed user,
-    the bot's own ssh proxy in mihomo: it forwards; a wrong password does
-    not get in."""
+    """The script's sshd_config and entrypoint (its egress rules, the user
+    plan applied at start) in the script's image, the bot's hashed user, the
+    bot's own ssh proxy in mihomo: it forwards to the internet; it does not
+    reach a private address (another container) nor take a wrong password."""
     if not _have(MIHOMO):
         pytest.skip('mihomo image not pulled')
     script = os.path.join(os.path.dirname(__file__), '..', '..', 'scripts', 'setup_ssh_exit.sh')
-    sshd = subprocess.run(['bash', script, '--print-config'], capture_output=True, text=True,
-                          check=True).stdout
-    (tmp_path / 'sshd_config').write_text(sshd)
+
+    def printed(flag):
+        return subprocess.run(['bash', script, flag], capture_output=True, text=True,
+                              check=True).stdout
+    (tmp_path / 'sshd_config').write_text(printed('--print-config'))
+    (tmp_path / 'entrypoint.sh').write_text(printed('--print-entrypoint'))
+    (tmp_path / 'entrypoint.sh').chmod(0o755)
     (tmp_path / 'keys').mkdir()
+    base = next(l.split('=', 1)[1] for l in open(script).read().splitlines()
+                if l.startswith('BASE_IMAGE='))
     image = 'nekovpn-ssh-stand:local'
     build = subprocess.run(['docker', 'build', '-q', '-t', image, '-'], input=(
-        'FROM alpine:3.20\nRUN apk add --no-cache openssh-server shadow && addgroup vpn\n'
-        'CMD ["/usr/sbin/sshd", "-D", "-e", "-f", "/etc/ssh/sshd_config"]\n'),
-        capture_output=True, text=True)
+        f'FROM {base}\nRUN apk add --no-cache openssh-server shadow iptables procps && addgroup vpn\n'
+        'CMD ["/entrypoint.sh"]\n'), capture_output=True, text=True)
     if build.returncode:
         pytest.skip(f'could not build the sshd image: {build.stderr[-200:]}')
     _docker('run', '--rm', '-v', f'{tmp_path}/keys:/k', image, 'ssh-keygen', '-q', '-t', 'ed25519',
@@ -488,15 +633,22 @@ def test_stand_ssh_in_mihomo_against_the_scripts_sshd(tmp_path):
                   SSH_USER_SECRET='stand-secret')
     name = ssh_exit.username_for(UUID)
     hashed = ssh_exit._crypt_sha512(ssh_exit.password_for(cfg, UUID))
+    (tmp_path / 'users.plan').write_text(f'{name}\t{hashed}\n')
+    web = subprocess.run(['docker', 'build', '-q', '-t', 'nekovpn-ssh-stand-web:local', '-'], input=(
+        f'FROM {base}\nRUN apk add --no-cache busybox-extras\n'
+        'CMD ["httpd", "-f", "-p", "80", "-h", "/etc"]\n'), capture_output=True, text=True)
+    if web.returncode:
+        pytest.skip(f'could not build the web image: {web.stderr[-200:]}')
     net = 'nekovpn-ssh-stand'
     _docker('network', 'create', net, check=False)
     try:
+        _docker('run', '-d', '--name', 'e-web', '--network', net, 'nekovpn-ssh-stand-web:local')
         _docker('run', '-d', '--name', 'e-sshd', '--network', net,
+                '--cap-add', 'NET_ADMIN', '--dns', '1.1.1.1',
                 '-v', f'{tmp_path}/sshd_config:/etc/ssh/sshd_config:ro',
-                '-v', f'{tmp_path}/keys:/etc/ssh/keys:ro', image)
-        _docker('exec', 'e-sshd', 'adduser', '-D', '-H', '-s', '/bin/false', '-G', 'vpn', name)
-        subprocess.run(['docker', 'exec', '-i', 'e-sshd', 'chpasswd', '-e'],
-                       input=f'{name}:{hashed}\n', text=True, check=True)
+                '-v', f'{tmp_path}/keys:/etc/ssh/keys:ro',
+                '-v', f'{tmp_path}/entrypoint.sh:/entrypoint.sh:ro',
+                '-v', f'{tmp_path}/users.plan:/etc/ssh/users.plan:ro', image)
         proxy = next(p for p in _clash(config=cfg, lockdown=True)['proxies'] if p['type'] == 'ssh')
         wrong = dict(proxy, name='u1-ssh-wrong', password='x' * 32)
         (tmp_path / 'm').mkdir()
@@ -505,11 +657,18 @@ def test_stand_ssh_in_mihomo_against_the_scripts_sshd(tmp_path):
             'rules': ['MATCH,DIRECT']}))
         _docker('run', '-d', '--name', 'e-mihomo-ssh', '--network', net, '-p', '127.0.0.1:19390:9090',
                 '-v', f'{tmp_path}/m:/root/.config/mihomo', MIHOMO, '-d', '/root/.config/mihomo')
-        time.sleep(4)
+        time.sleep(5)
+        web_ip = _docker('inspect', '-f', '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}',
+                         'e-web').strip()
         q = '?url=https://www.gstatic.com/generate_204&timeout=10000'
         assert _api(19390, f"/proxies/{proxy['name']}/delay{q}") == 200
         assert _api(19390, f'/proxies/u1-ssh-wrong/delay{q}') != 200
+        # the private web server answers mihomo directly (a sanity check)...
+        private = f'?url=http://{web_ip}:80/hostname&timeout=5000'
+        assert _api(19390, f'/proxies/DIRECT/delay{private}') == 200
+        # ...but not through the ssh exit: private destinations are rejected
+        assert _api(19390, f"/proxies/{proxy['name']}/delay{private}") != 200
     finally:
-        for c in ('e-sshd', 'e-mihomo-ssh'):
+        for c in ('e-sshd', 'e-mihomo-ssh', 'e-web'):
             _docker('rm', '-f', c, check=False)
         _docker('network', 'rm', net, check=False)

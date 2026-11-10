@@ -191,18 +191,16 @@ class TestForceLockdown:
         demo = add_user(db, '2', status='demo', uuid='22222222-1d4b-4c5e-9f7a-2b3c4d5e6f70')
         # RU users: the resilience ladder, hy2t first for paid
         assert MK.get_cascade_order(db, user=paid) == ('hy2t', 'stls', 'ws', 'hy2', 'reality')
-        # IMPROVEMENT_PLAN F, E6: no sign that ws passes in the user's
-        # network, so the TCP-direct protocols lead the emergency order
         assert MK.get_cascade_order(db, user=paid, force_lockdown=True) == \
-            ('stls', 'reality', 'ws', 'hy2', 'hy2t')
+            ('ws', 'stls', 'reality', 'hy2', 'hy2t')
         assert MK.get_cascade_order(db, user=demo) == ('stls', 'ws', 'hy2')
         assert MK.get_cascade_order(db, user=demo, force_lockdown=True) == \
-            ('stls', 'ws', 'hy2')
+            ('ws', 'stls', 'hy2')
 
     def test_wins_over_apply_lockdown_false(self, db):
         u = add_user(db)
         assert MK.get_cascade_order(db, user=u, apply_lockdown=False,
-                                    force_lockdown=True)[0] == 'stls'   # E6
+                                    force_lockdown=True)[0] == 'ws'
 
     def test_operator_lockdown_order_is_used(self, db):
         u = add_user(db)
@@ -259,13 +257,13 @@ class TestEmergencySub:
         assert cfg['dns']['rules'] == [{'clash_mode': 'Direct', 'server': 'local'}]
         assert cfg['dns']['final'] == 'remote'
         selector = next(o for o in cfg['outbounds'] if o['tag'] == 'proxy')
-        assert selector['outbounds'][1].endswith('-stls')   # E6: no ws evidence
+        assert selector['outbounds'][1].endswith('-cdn-ws')
 
     def test_clash_emergency_is_ws_first_with_dns_through_the_tunnel(self, server):
         resp = self._get(server, {'format': 'clash', 'emergency': '1'})
         cfg = json.loads(resp.text)
         assert cfg['dns']['nameserver'] == ['https://1.1.1.1/dns-query#VPN']
-        assert cfg['proxies'][0]['name'].endswith('-stls')   # E6: no ws evidence
+        assert cfg['proxies'][0]['name'].endswith('-cdn-ws')
         assert 'NekoVPN-SOS.yaml' in resp.headers['content-disposition']
         assert resp.headers['profile-title'] == 'NekoVPN SOS'
 
@@ -328,8 +326,7 @@ class TestSos:
         assert f'<code>{base}?format=clash&amp;emergency=1</code>' in text
         assert 'Обнови основную подписку' in text
         assert '✅ Cloudflare (WS) — работает' in text
-        # E6: without a sign that ws passes there, ShadowTLS leads
-        assert text.index('ShadowTLS') < text.index('Reality') < text.index('Cloudflare (WS)')
+        assert text.index('Cloudflare (WS)') < text.index('ShadowTLS') < text.index('Reality')
         callbacks = [b.get('callback_data') for row in kb['inline_keyboard'] for b in row]
         assert 'sos:kit' in callbacks and 'sos:share' in callbacks
 
@@ -343,7 +340,7 @@ class TestSos:
         assert '<code>@ziriki</code>' in report
         assert 'Last traffic: 12 мин назад' in report
         assert 'Network: RU / AS31133' in report
-        assert 'Аварийный каскад: stls, reality, ws, hy2' in report
+        assert 'Аварийный каскад: ws, stls, reality, hy2' in report
         assert 'Агент не настроен' in report
         assert not sent(bot, ADMIN)                      # never a PM
 
@@ -586,10 +583,10 @@ class TestKit:
         assert files['NekoVPN-emergency.yaml'].decode() == \
             SubscriptionService(config).build_clash_config(user, cascade, lockdown=True)
         assert clash['dns']['nameserver'] == ['https://1.1.1.1/dns-query#VPN']
-        assert clash['proxies'][0]['name'].endswith('-stls')       # E6
+        assert clash['proxies'][0]['name'].endswith('-cdn-ws')
         assert singbox['dns']['final'] == 'remote'
         selector = next(o for o in singbox['outbounds'] if o['tag'] == 'proxy')
-        assert selector['outbounds'][1].endswith('-stls')
+        assert selector['outbounds'][1].endswith('-cdn-ws')
 
     def test_instruction_first_then_files(self, bot, db, config):
         add_user(db)

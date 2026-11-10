@@ -13,7 +13,8 @@ from bot.core.state_machine import StateMachine
 from bot.handlers.callbacks.base import BaseCallbackHandler
 from bot.services.billing import readd_client, tier_client_values
 from bot.services.lockdown import (
-    apply_lockdown_order, fronted_passes, is_lockdown_active, load_lockdown_order,
+    apply_lockdown_order, front_evidence_enabled, fronted_passes, is_lockdown_active,
+    load_lockdown_order,
 )
 from bot.services.notifications import NotificationService
 from bot.services.vpn import VPNService
@@ -1202,9 +1203,12 @@ class MyKeyAnswerHandler(BaseCallbackHandler):
         # and the key card run through here. A forced projection (the
         # emergency profile) does not even read the mode.
         if force_lockdown or (apply_lockdown and is_lockdown_active(db)):
-            # E6: ws leads only where the CDN front is seen to pass.
+            # E6 (a switch, off by default): ws leads only where the CDN
+            # front is seen to pass.
+            fronted_ok = (not front_evidence_enabled(db)
+                          or fronted_passes(db, effective_asn))
             ordered = apply_lockdown_order(ordered, load_lockdown_order(db),
-                                           fronted_ok=fronted_passes(db, effective_asn))
+                                           fronted_ok=fronted_ok)
 
         # DPIMonitor's verdicts: stable partition, demoted to the tail.
         # Reads happen here (not earlier) so the base order above is

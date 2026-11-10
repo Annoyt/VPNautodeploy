@@ -856,8 +856,6 @@ class WebAppServer:
         'inbound-2053': 'cf-ws',
         'inbound-8444': 'ss2022',
         'inbound-2054': 'xhttp',
-        # VLESS + XHTTP + Reality (E3) — scripts/setup_xhr_inbound.py's port
-        'inbound-2055': 'xhr',
     }
     _REJECT_KIND_TAG = {
         'reality': 'reality',
@@ -1611,8 +1609,14 @@ class WebAppServer:
         elif abroad_obj is not None:
             config_obj = abroad_obj
         elif fmt == 'clash':
+            # xhr (E3) only for the NekoVPN app, whose mihomo is known to
+            # speak XHTTP: an older FlClash core may refuse the whole
+            # profile over a network type it does not know.
+            from bot.services.demo_tiers import neko_app_version
+            clash_cascade = (cascade if neko_app_version(request.headers.get('User-Agent', ''))
+                             else tuple(p for p in cascade if p != 'xhr'))
             text_body = self.subscription.build_clash_config(
-                user, cascade, lockdown=lockdown, demoted=demoted_here(),
+                user, clash_cascade, lockdown=lockdown, demoted=demoted_here(),
                 big_check=self._big_check_for(user),
             )
         elif fmt == 'links' or (not fmt and 'happ' in ua):

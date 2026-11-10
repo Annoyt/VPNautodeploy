@@ -141,9 +141,8 @@ services:
       - XHR_PUBLIC_KEY=${XHR_PUBLIC_KEY:-}
       - XHR_SID=${XHR_SID:-}
       - XHR_PORT=${XHR_PORT:-}
-      - XHR_EXIT_PORT=${XHR_EXIT_PORT:-}
-      - XHR_INBOUND_ID=${XHR_INBOUND_ID:-}
       - XHR_MAX_CONNECTIONS=${XHR_MAX_CONNECTIONS:-}
+      - PROBE_PROXY_MIHOMO_HOST=${PROBE_PROXY_MIHOMO_HOST:-probe-proxy-mihomo}
       # OpenCode AI agent — host-side `opencode serve` (headless HTTP).
       # Empty OPENCODE_URL disables the /ai command. Basic-auth password
       # must match OPENCODE_SERVER_PASSWORD set on the opencode.service unit.

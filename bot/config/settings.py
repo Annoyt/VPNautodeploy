@@ -284,10 +284,12 @@ class Settings:
         # each user gets one value by uuid; unset = chrome for everyone.
         self.TLS_FINGERPRINTS: str = os.getenv('TLS_FINGERPRINTS', '').strip()
         # VLESS + XHTTP + Reality (IMPROVEMENT_PLAN F, E3): one multiplexed
-        # HTTP/2 session instead of a handshake per connection. A separate
-        # exit inbound (XHR_EXIT_PORT, created by scripts/setup_xhr_inbound.py)
-        # behind entry's haproxy :8443, routed there by its own SNI. Empty
-        # XHR_SNI = the protocol is off everywhere (profiles, probes).
+        # HTTP/2 session instead of a handshake per connection, behind
+        # entry's haproxy :8443, routed by its own SNI. The server is NOT a
+        # panel inbound: the relational panel gives every VLESS inbound the
+        # client's Vision flow, and xray rejects flow-less TLS-in-TLS on it
+        # (the CDN inbound is VMess for that reason) — it needs an xray of
+        # its own on exit. Empty XHR_SNI = the protocol is off everywhere.
         # SSH as the paid users' emergency path (IMPROVEMENT_PLAN F, E4;
         # bot/services/ssh_exit.py, scripts/setup_ssh_exit.sh on exit).
         self.SSH_EXIT_HOST: str = os.getenv('SSH_EXIT_HOST', '').strip()
@@ -300,12 +302,14 @@ class Settings:
         self.XHR_SID: str = os.getenv('XHR_SID', '').strip()
         try:
             self.XHR_PORT: int = int(os.getenv('XHR_PORT', '0') or '0')
-            self.XHR_EXIT_PORT: int = int(os.getenv('XHR_EXIT_PORT', '2055') or '2055')
-            self.XHR_INBOUND_ID: int = int(os.getenv('XHR_INBOUND_ID', '0') or '0')
+            # The mihomo probe sidecar (compose profile xhr) that probes xhr.
+            self.PROBE_PROXY_MIHOMO_HOST: str = (
+                os.getenv('PROBE_PROXY_MIHOMO_HOST', 'probe-proxy-mihomo').strip()
+                or 'probe-proxy-mihomo')
             self.XHR_MAX_CONNECTIONS: int = int(os.getenv('XHR_MAX_CONNECTIONS', '3') or '3')
         except ValueError:
-            self.XHR_PORT, self.XHR_EXIT_PORT, self.XHR_INBOUND_ID = 0, 2055, 0
-            self.XHR_MAX_CONNECTIONS = 3
+            self.XHR_PORT, self.XHR_MAX_CONNECTIONS = 0, 3
+            self.PROBE_PROXY_MIHOMO_HOST = 'probe-proxy-mihomo'
 
         # OpenCode AI agent — the bot talks to a local `opencode serve`
         # HTTP server (headless). Optional: if OPENCODE_URL is empty, the

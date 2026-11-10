@@ -858,8 +858,6 @@ class XUIService:
             int(getattr(self.config, 'WS_INBOUND_ID', 0) or 0),
             int(getattr(self.config, 'SS_INBOUND_ID', 0) or 0),
             int(getattr(self.config, 'WS2_INBOUND_ID', 0) or 0),
-            # VLESS + XHTTP + Reality (IMPROVEMENT_PLAN F, E3)
-            int(getattr(self.config, 'XHR_INBOUND_ID', 0) or 0),
         ):
             if extra and extra not in inbound_ids:
                 inbound_ids.append(extra)

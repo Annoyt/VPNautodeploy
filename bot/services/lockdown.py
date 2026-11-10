@@ -346,9 +346,11 @@ def apply_lockdown_order(ordered: Iterable[str],
     (a protocol the operator disabled stays disabled) and nothing is
     dropped.
 
-    ``fronted_ok=False`` (IMPROVEMENT_PLAN F, E6): no evidence that the
-    CDN front passes in this network, so ws does not lead — it goes right
-    after the TCP-direct protocols. Public measurements put Cloudflare
+    ``fronted_ok=False`` (IMPROVEMENT_PLAN F, E6, only with
+    ``front_evidence_enabled``): no evidence that the CDN front passes in
+    this network, so ws does not lead — it moves right after the last
+    TCP-direct protocol of the order; everything else keeps its place, an
+    operator's override included. Public measurements put Cloudflare
     outside the mobile whitelists, and Cloudflare cuts Russian connections
     after 16 KB; ws first was the right bet only where it is seen to work
     (``fronted_passes``)."""
@@ -357,16 +359,36 @@ def apply_lockdown_order(ordered: Iterable[str],
     if not fronted_ok:
         fronted = [p for p in order if p in FRONTED_PROTOCOLS]
         rest = [p for p in order if p not in FRONTED_PROTOCOLS]
-        tcp = [p for p in rest if p not in ('hy2', 'hy2t')]
-        order = tuple(tcp + fronted + [p for p in rest if p in ('hy2', 'hy2t')])
+        tcp_at = [i for i, p in enumerate(rest) if p not in ('hy2', 'hy2t')]
+        cut = tcp_at[-1] + 1 if tcp_at else 0
+        order = tuple(rest[:cut] + fronted + rest[cut:])
     present = set(ordered)
     head = [p for p in order if p in present]
     head_set = set(head)
     return head + [p for p in ordered if p not in head_set]
 
 
-# How far back a sign that the CDN front passes in a network counts (E6).
+# How far back a sign that the CDN front passes in a network counts (E6):
+# 24 h of client telemetry; the exit's presence counts by day, so "today or
+# yesterday" there.
 FRONTED_EVIDENCE_H = 24
+# E6 is a switch, off by default: app_settings.lockdown_front_evidence = 1.
+# Off, lockdown keeps ws first everywhere, as before E6. The detector fires
+# on "direct dark, ws alive" from entry's vantage, and only the operator
+# knows whether that vantage speaks for the mobile networks.
+FRONT_EVIDENCE_SETTING = 'lockdown_front_evidence'
+_FRONTED_CACHE_S = 300
+_fronted_cache: dict = {}
+
+
+def front_evidence_enabled(db) -> bool:
+    """``app_settings.lockdown_front_evidence`` is 1 / true / on. Never
+    raises (a read error = off)."""
+    try:
+        raw = db.get_setting(FRONT_EVIDENCE_SETTING) if db is not None else None
+    except Exception:
+        return False
+    return str(raw or '').strip().lower() in ('1', 'true', 'on', 'yes')
 
 
 def fronted_passes(db, asn: Optional[str]) -> bool:
@@ -378,6 +400,19 @@ def fronted_passes(db, asn: Optional[str]) -> bool:
     front. Never raises."""
     if not asn or not isinstance(asn, str):
         return False
+    import time as _time
+    key = (id(db), asn.strip().upper())
+    hit = _fronted_cache.get(key)
+    if hit and _time.monotonic() - hit[0] < _FRONTED_CACHE_S:
+        return hit[1]
+    answer = _fronted_passes_read(db, asn)
+    _fronted_cache[key] = (_time.monotonic(), answer)
+    if len(_fronted_cache) > 2000:
+        _fronted_cache.clear()
+    return answer
+
+
+def _fronted_passes_read(db, asn: str) -> bool:
     from datetime import datetime, timedelta
     now = datetime.utcnow()
     since_space = (now - timedelta(hours=FRONTED_EVIDENCE_H)).strftime('%Y-%m-%d %H:%M:%S')
