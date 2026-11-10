@@ -23,6 +23,7 @@ from typing import Optional
 
 from bot.config.constants import BYTES_PER_GB
 from .base import AdminHandlerBase
+from bot.services import probe_rules
 
 logger = logging.getLogger(__name__)
 
@@ -94,25 +95,32 @@ def _humanize_minutes(mins: float) -> str:
 def probe_verdict(info: Optional[dict], *, min_samples: int) -> str:
     """The /protocols judgement of one protocol's probe window (the dict
     ``read_probe_state`` builds per tag), shared with the user-facing
-    /sos summary so the card and what users are told cannot disagree:
+    /sos summary so the card and what users are told cannot disagree.
+    The window verdict is ``probe_rules.judge_window`` — the pager's and
+    the monitor's (IMPROVEMENT_PLAN F, B5):
 
-    ``down``     no sign of life across the whole window (≥ ``min_samples``
-                 rows, none alive) — what the pager calls protocol_down;
-    ``silent``   the LAST run had no answer at all — possibly the first
-                 minutes of an outage;
-    ``degraded`` fewer than half of the last run's probes succeeded;
-    ``ok``       otherwise (7/10 is the everyday baseline — RU domestic
-                 targets fail through the tunnel by design);
+    ``down``     no sign of life across the window — protocol_down;
+    ``degraded`` the tunnel comes up but fewer than a quarter of the
+                 window's probes succeed — protocol_down:<tag>:degraded;
+    ``silent``   the window is not judged bad yet, but the newest full run
+                 had not a single ok: possibly the first minutes of an
+                 outage (``probe_rules.last_run_dark``), never a verdict;
+    ``ok``       otherwise;
     ``unknown``  no rows in the window at all.
+
+    ``min_samples`` is kept for the callers; the threshold is the shared
+    one (``probe_rules.PROBE_MIN_SAMPLES``).
     """
     if not info:
         return 'unknown'
-    if info['alive_window'] == 0 and info['rows'] >= min_samples:
+    window = info.get('window') or {}
+    verdict = window.get('verdict')
+    if verdict == probe_rules.VERDICT_DARK:
         return 'down'
-    if info['last_alive'] == 0:
-        return 'silent'
-    if info['last_ok'] * 2 < info['last_n']:
+    if verdict == probe_rules.VERDICT_DEGRADED:
         return 'degraded'
+    if info.get('last_run_dark'):
+        return 'silent'
     return 'ok'
 
 
@@ -130,11 +138,27 @@ def _format_probe_line(tag: str, info: Optional[dict], now: datetime,
                     if since else 'всё время наблюдений')
         return (f"🔴 <b>{tag}</b> — {rate}, лежит {how_long} "
                 f"(ни одного ответа за {info['rows']} попыток)")
+    bulk = _bulk_note(info.get('bulk'))
     if verdict == 'silent':
-        return f"🟡 <b>{tag}</b> — {rate}, последний прогон без единого ответа"
+        return f"🟡 <b>{tag}</b> — {rate}, последний прогон без единого ответа{bulk}"
     if verdict == 'degraded':
-        return f"🟡 <b>{tag}</b> — {rate}, деградация"
-    return f"🟢 <b>{tag}</b> — {rate}"
+        window = info.get('window') or {}
+        return (f"🟡 <b>{tag}</b> — {rate}, деградация: ok {window.get('ok')}/"
+                f"{window.get('n')} ({probe_rules.degraded_threshold_text()}){bulk}")
+    return f"🟢 <b>{tag}</b> — {rate}{bulk}"
+
+
+def _bulk_note(bulk) -> str:
+    """The newest bulk probe (B1) in a few words: nothing when it passed,
+    "128 КБ за 0,4 с" style is noise on a green card."""
+    if not bulk:
+        return ''
+    status, got = bulk[0], int(bulk[1] or 0)
+    if status == 'ok':
+        return ''
+    if status == 'partial':
+        return f"; объёмная проба оборвалась на {got // 1024} КБ"
+    return f"; объёмная проба: {status}"
 
 
 def read_probe_state(db, config, now: datetime, *, window_h: int,
@@ -183,6 +207,10 @@ def read_probe_state(db, config, now: datetime, *, window_h: int,
                 'last_ok': sum(1 for r in last_run if r[0] == 'ok'),
                 'last_alive': sum(1 for r in last_run if _probe_alive(r)),
                 'last_alive_ts': None,
+                # The shared verdicts (probe_rules, B5).
+                'window': probe_rules.judge_window(rows),
+                'last_run_dark': probe_rules.last_run_dark(rows),
+                'bulk': None,
             }
             if info['alive_window'] == 0:
                 # "How long" is anchored on the last row that showed
@@ -193,6 +221,15 @@ def read_probe_state(db, config, now: datetime, *, window_h: int,
                     "OR status = 'ok')",
                     (tag,),
                 ).fetchone()[0]
+            try:
+                bulk = conn.execute(
+                    "SELECT status, bytes, duration_ms FROM outbound_bulk "
+                    "WHERE outbound_tag = ? AND ts >= ? ORDER BY ts DESC LIMIT 1",
+                    (tag, cutoff),
+                ).fetchone()
+            except Exception:       # an old db without the table
+                bulk = None
+            info['bulk'] = tuple(bulk) if bulk else None
             per_tag[tag] = info
     return {'newest': newest, 'tags': tags, 'per_tag': per_tag}
 
@@ -613,14 +650,14 @@ class AdminOpsMixin(AdminHandlerBase):
 
     # ----- /protocols -----
 
-    # Window/threshold twins of check_protocol_probe_down in
-    # bot/services/alert_manager.py — the card and the pager must agree
-    # on what "dark" means, or the admin sees a red line the pager never
-    # fired on (or vice versa). Class attrs so tests can shrink them.
-    PROTO_RUNS = 3              # probe runs shown per protocol
-    PROTO_WINDOW_H = 3          # only rows this recent count
-    PROTO_STALE_MIN = 45        # 3 missed runs at the 15-min cadence
-    PROTO_MIN_SAMPLES = 15      # fewer rows than this cannot be "DOWN"
+    # The pager's window and thresholds (bot/services/probe_rules.py,
+    # IMPROVEMENT_PLAN F, B5) — the card and the pager must agree on what
+    # "dark" means, or the admin sees a red line the pager never fired on
+    # (or vice versa). Class attrs so tests can shrink them.
+    PROTO_RUNS = probe_rules.PROBE_RUNS              # probe runs shown per protocol
+    PROTO_WINDOW_H = probe_rules.PROBE_WINDOW_H      # only rows this recent count
+    PROTO_STALE_MIN = probe_rules.PROBE_STALE_MIN    # 3 missed runs at the 15-min cadence
+    PROTO_MIN_SAMPLES = probe_rules.PROBE_MIN_SAMPLES  # fewer rows cannot be "DOWN"
     PROTO_ALERT_HOURS = 6       # alert_history lookback
     PROTO_AUDIT_TIMEOUT_S = 40  # panel-audit subprocess budget
     # /cascade: the monitor ticks every 10 min (DPI_MONITOR_INTERVAL_MIN);

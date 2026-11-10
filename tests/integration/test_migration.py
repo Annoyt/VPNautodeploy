@@ -65,6 +65,30 @@ class TestMigrationV3:
         assert {'idx_client_probe_chat_grp_ts', 'idx_client_probe_ts'} <= idx
         assert ts  # CURRENT_TIMESTAMP default
 
+    def test_resilience_tables(self, mock_bot_db):
+        """IMPROVEMENT_PLAN F: the bulk probe rows (B1), the exit report
+        heartbeat (B2) and the alert state that outlives a restart (B3)."""
+        conn = mock_bot_db._connect()
+        try:
+            def cols(table):
+                return [(r[1], r[2], r[3]) for r in conn.execute(f"PRAGMA table_info({table})")]
+            bulk, reports, state = cols('outbound_bulk'), cols('exit_reports'), cols('alert_state')
+            idx = {r[1] for t in ('outbound_bulk', 'exit_reports')
+                   for r in conn.execute(f"PRAGMA index_list({t})")}
+            conn.execute("INSERT INTO alert_state (key) VALUES ('protocol_down:hy2')")
+            row = conn.execute("SELECT last_fired_ts, acked_until_ts, open, updated_at "
+                               "FROM alert_state").fetchone()
+        finally:
+            conn.close()
+        assert bulk == [('id', 'INTEGER', 0), ('ts', 'TEXT', 1), ('outbound_tag', 'TEXT', 1),
+                        ('status', 'TEXT', 1), ('bytes', 'INTEGER', 1),
+                        ('duration_ms', 'INTEGER', 0), ('error_msg', 'TEXT', 0)]
+        assert reports == [('id', 'INTEGER', 0), ('ts', 'TEXT', 1), ('rows', 'INTEGER', 1)]
+        assert [c[0] for c in state] == ['key', 'last_fired_ts', 'acked_until_ts', 'open',
+                                         'notify', 'title', 'updated_at']
+        assert {'idx_outbound_bulk_tag_ts', 'idx_exit_reports_ts'} <= idx
+        assert tuple(row)[:3] == (0, 0, 0) and row[3]
+
     def test_xui_api_config_defaults(self, mock_bot_db):
         """Test xui_api_config has default values"""
         config = mock_bot_db.get_xui_api_config()

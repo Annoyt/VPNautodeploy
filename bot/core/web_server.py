@@ -888,6 +888,10 @@ class WebAppServer:
         await asyncio.to_thread(self._store_presence, payload or {})
 
         rows = await asyncio.to_thread(self._dpi_exit_rows, payload or {})
+        # The heartbeat (IMPROVEMENT_PLAN F, B2): one row per report, an
+        # empty one too — a quiet exit writes nothing to dpi_metrics, and
+        # the inbound-drop alert must tell "no report" from "no connections".
+        await asyncio.to_thread(self._store_exit_heartbeat, len(rows))
         if rows:
             try:
                 with self.db._connect() as conn:
@@ -904,6 +908,21 @@ class WebAppServer:
                 logger.warning(f"dpi_exit_report: insert failed: {e}")
                 return web.json_response({'ok': False}, status=500)
         return web.json_response({'ok': True, 'rows': len(rows)})
+
+    def _store_exit_heartbeat(self, rows: int) -> None:
+        """``exit_reports`` row for one received report. Never raises: a
+        failed heartbeat only makes the alert read that slot as "no
+        report", which keeps it quiet rather than wrong."""
+        from datetime import datetime
+        try:
+            with self.db._connect() as conn:
+                conn.execute(
+                    "INSERT INTO exit_reports (ts, rows) VALUES (?, ?)",
+                    (datetime.utcnow().isoformat(), int(rows)),
+                )
+                conn.commit()
+        except Exception as e:
+            logger.warning(f"dpi_exit_report: heartbeat insert failed: {e}")
 
     def _store_presence(self, payload: dict) -> int:
         """Upsert the exit report's per-user inbound tags.

@@ -75,6 +75,10 @@ logger = logging.getLogger(__name__)
 REPEAT_COOLDOWN_S = 2 * 60 * 60   # 2 h before re-alerting the same unacked key
 ACK_COOLDOWN_S = 6 * 60 * 60      # 6 h silence after admin acks
 DEFAULT_MIN_CYCLES = 3            # how many consecutive failures before we alert
+# An open alert counts as recovered after this many healthy ticks in a row
+# (IMPROVEMENT_PLAN F, B3). The probe and connection checks only change
+# every 15 min / every report, so five minutes of quiet is a real change.
+RECOVERY_TICKS = 5
 
 
 @dataclass
@@ -88,11 +92,19 @@ class Alert:
 
 @dataclass
 class _Tracker:
-    """Per-alert-key state held in memory only."""
+    """Per-alert-key state. ``last_fired_ts``, ``acked_until_ts`` and the
+    open/notify pair outlive a restart (``alert_state``, B3); the streak
+    counters do not — after a restart a check simply counts again."""
     consecutive_fails: int = 0
     last_fired_ts: float = 0.0
     acked_until_ts: float = 0.0
     last_payload: Optional[Alert] = None
+    # Fired and not yet recovered; ``notify`` — it went to the chat, so
+    # its recovery goes there too. ``healthy_ticks`` counts the quiet run.
+    open: bool = False
+    notify: bool = False
+    open_title: str = ''
+    healthy_ticks: int = 0
 
 
 # Alert keys with these prefixes are dashboard-only (no Telegram).
@@ -104,6 +116,12 @@ DASHBOARD_ONLY_PREFIXES = ('dpi_short:', 'dpi_hsfail:', 'dpi_rst:')
 # Alert families that get an agent follow-up (see module docstring).
 DPI_AGENT_PREFIXES = ('dpi_short:', 'dpi_hsfail:', 'dpi_rst:')
 PROTOCOL_AGENT_PREFIX = 'protocol_down:'
+# Users' connections on an exit inbound fell away (B2): the same diagnosis
+# turn as protocol_down, the same family for the one-turn-per-tick rule.
+INBOUND_DROP_PREFIX = 'inbound_drop:'
+PROTOCOL_FAMILY_PREFIXES = (PROTOCOL_AGENT_PREFIX, INBOUND_DROP_PREFIX)
+# Families whose recovery is announced where the alert went (B2/B3).
+RECOVERY_PREFIXES = PROTOCOL_FAMILY_PREFIXES
 
 # Agent budgets. Both families run on worker threads (see
 # _spawn_agent_worker), so a budget is "how long one Hermes turn may
@@ -129,6 +147,10 @@ PROTOCOL_AGENT_PREFIX = 'protocol_down:'
 DPI_AGENT_TIMEOUT_S = 600
 DPI_AGENT_MAX_CONCURRENT = 2
 PROTOCOL_AGENT_TIMEOUT_S = 300
+# protocol_down / inbound_drop: one turn per tick for everything the tick
+# fired, and at most two at once across ticks (a turn from an earlier tick
+# may still be running when a second protocol goes dark).
+PROTOCOL_AGENT_MAX_CONCURRENT = 2
 
 # The one command the agent must run for a protocol_down alert. It lives
 # on the entry HOST (rsync target /opt/vpn-bot), where Hermes runs as
@@ -160,6 +182,63 @@ class AlertManager:
         # Global bound on concurrent DPI turns (module docstring / budget
         # block). Protocol turns deliberately do NOT draw from this pool.
         self._dpi_agent_slots = threading.Semaphore(DPI_AGENT_MAX_CONCURRENT)
+        # The protocol family (protocol_down / inbound_drop) gets one turn
+        # per tick (B4, problem 12; _kick_protocol_batch) and at most
+        # PROTOCOL_AGENT_MAX_CONCURRENT turns at once across ticks.
+        self._protocol_agent_slots = threading.Semaphore(PROTOCOL_AGENT_MAX_CONCURRENT)
+        # Alerts of that family fired during the current run_once; kicked
+        # as one turn at the end of the tick. None outside run_once.
+        self._tick_agent_batch: Optional[list] = None
+        # Keys each single-Alert check has reported, so a check that comes
+        # back healthy (returns None) resets them (B4, problem 2).
+        self._check_keys: Dict[Callable, set] = {}
+        self._load_state()
+
+    # ----- persisted state (alert_state, B3) -----
+
+    def _load_state(self) -> None:
+        """Trackers from ``alert_state``: cooldowns, acks and open alerts
+        survive a restart, so a deploy during an outage neither re-pages
+        the same key nor starts another agent turn, and an ack still holds.
+        Never raises — no table (an old db), no state."""
+        if self.db is None:
+            return
+        try:
+            with self.db._connect() as conn:
+                rows = conn.execute(
+                    "SELECT key, last_fired_ts, acked_until_ts, open, notify, title "
+                    "FROM alert_state"
+                ).fetchall()
+        except Exception as e:
+            logger.warning(f"alert state load failed: {e}")
+            return
+        for key, fired, acked, is_open, notify, title in rows:
+            self._state[key] = _Tracker(
+                last_fired_ts=float(fired or 0), acked_until_ts=float(acked or 0),
+                open=bool(is_open), notify=bool(notify), open_title=title or '',
+            )
+
+    def _save_state(self, key: str, t: _Tracker) -> None:
+        """Upsert one key's lasting state. Never raises."""
+        if self.db is None:
+            return
+        try:
+            with self.db._connect() as conn:
+                conn.execute(
+                    "INSERT INTO alert_state "
+                    "(key, last_fired_ts, acked_until_ts, open, notify, title, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP) "
+                    "ON CONFLICT(key) DO UPDATE SET "
+                    "last_fired_ts=excluded.last_fired_ts, "
+                    "acked_until_ts=excluded.acked_until_ts, open=excluded.open, "
+                    "notify=excluded.notify, title=excluded.title, "
+                    "updated_at=CURRENT_TIMESTAMP",
+                    (key, t.last_fired_ts, t.acked_until_ts, int(t.open),
+                     int(t.notify), t.open_title),
+                )
+                conn.commit()
+        except Exception as e:
+            logger.warning(f"alert state save failed for {key}: {e}")
 
     # ----- registration -----
 
@@ -179,6 +258,7 @@ class AlertManager:
         if t:
             t.acked_until_ts = time.time() + ACK_COOLDOWN_S
             t.consecutive_fails = 0
+            self._save_state(key, t)
         if self.db is not None:
             try:
                 with self.db._connect() as conn:
@@ -199,6 +279,7 @@ class AlertManager:
         """Apply tracker bookkeeping for a single alert and fire if needed."""
         t = self._state.setdefault(alert.key, _Tracker())
         t.consecutive_fails += 1
+        t.healthy_ticks = 0
         t.last_payload = alert
         if t.consecutive_fails < alert.min_cycles:
             return
@@ -208,44 +289,85 @@ class AlertManager:
             return
         self._fire(alert, t)
         t.last_fired_ts = now
+        self._save_state(alert.key, t)
+
+    def _mark_healthy(self, key: str, t: _Tracker) -> None:
+        """A tick on which ``key`` was not reported. The streak breaks at
+        once; an OPEN alert closes after ``RECOVERY_TICKS`` quiet ticks in
+        a row — then its repeat cooldown is cleared (a new failure is a new
+        incident and pages at once) and, for the protocol family, the
+        recovery is posted where the alert went."""
+        t.consecutive_fails = 0
+        if not t.open:
+            return
+        t.healthy_ticks += 1
+        if t.healthy_ticks < RECOVERY_TICKS:
+            return
+        t.open = False
+        t.healthy_ticks = 0
+        t.last_fired_ts = 0.0
+        notify, title = t.notify, t.open_title
+        t.notify = False
+        self._save_state(key, t)
+        if notify and key.startswith(RECOVERY_PREFIXES):
+            self._deliver_to_admin(
+                f"✅ <b>Восстановилось:</b> {html.escape(title or key)}\n"
+                f"<code>{html.escape(key)}</code>",
+            )
+        logger.info(f"ALERT recovered: {key}")
 
     def run_once(self) -> None:
         """Run every registered check once. Called by the scheduler.
 
         A check may return:
-          - ``None`` — single check, healthy (single alert key, the one
-            the check tracks implicitly).
-          - ``Alert`` — single check, problem detected.
+          - ``None`` — single check, healthy: every key it reported
+            before has its streak broken (B4, problem 2 — the streak of a
+            single check used to survive healthy ticks, so two failures
+            hours apart made "two in a row").
+          - ``Alert`` — single check, problem detected; any OTHER key the
+            check reported before counts as healthy this tick.
           - ``(prefix, [Alert, ...])`` — multi-bucket check; ``prefix``
-            is the shared key prefix (e.g. ``"dpi_short:"``). The
-            manager will reset trackers whose key starts with that
-            prefix but does NOT appear in the returned list — they're
-            considered healed and shouldn't carry over consecutive_fails.
+            is the shared key prefix (e.g. ``"dpi_short:"``). Trackers
+            whose key starts with that prefix but does NOT appear in the
+            returned list count as healthy this tick.
+
+        A check that RAISES says nothing: no key of it changes. Agent
+        turns of the protocol family fired during the tick go out as ONE
+        turn at its end (``_kick_protocol_batch``).
         """
         now = time.time()
-        for check in self._checks:
-            try:
-                result = check()
-            except Exception as e:
-                logger.exception(f"alert check {check.__name__} crashed: {e}")
-                continue
-            if result is None:
-                continue
-            # Multi-bucket shape: (prefix, [Alert, ...])
-            if isinstance(result, tuple) and len(result) == 2 and isinstance(result[0], str):
-                prefix, alerts = result
-                live_keys = {a.key for a in alerts}
-                # Reset trackers under this prefix that weren't reported
-                # this cycle. They've healed (or the bucket disappeared).
-                for k, tr in list(self._state.items()):
-                    if k.startswith(prefix) and k not in live_keys:
-                        tr.consecutive_fails = 0
-                for alert in alerts:
-                    self._process_alert(alert, now)
-                continue
-            # Single-Alert shape (legacy)
-            if isinstance(result, Alert):
-                self._process_alert(result, now)
+        self._tick_agent_batch = []
+        try:
+            for check in self._checks:
+                try:
+                    result = check()
+                except Exception as e:
+                    logger.exception(f"alert check {check.__name__} crashed: {e}")
+                    continue
+                # Multi-bucket shape: (prefix, [Alert, ...])
+                if isinstance(result, tuple) and len(result) == 2 and isinstance(result[0], str):
+                    prefix, alerts = result
+                    live_keys = {a.key for a in alerts}
+                    for k, tr in list(self._state.items()):
+                        if k.startswith(prefix) and k not in live_keys:
+                            self._mark_healthy(k, tr)
+                    for alert in alerts:
+                        self._process_alert(alert, now)
+                    continue
+                # Single shape: an Alert or None.
+                reported = {result.key} if isinstance(result, Alert) else set()
+                known = self._check_keys.setdefault(check, set())
+                for k in known - reported:
+                    tr = self._state.get(k)
+                    if tr is not None:
+                        self._mark_healthy(k, tr)
+                known |= reported
+                if isinstance(result, Alert):
+                    self._process_alert(result, now)
+        finally:
+            batch, self._tick_agent_batch = self._tick_agent_batch, None
+        if batch:
+            self._kick_protocol_batch(batch)
 
     # ----- delivery -----
 
@@ -293,19 +415,26 @@ class AlertManager:
             f"{'(dashboard-only) ' if is_dashboard_only else ''}{alert.title}"
         )
 
+        tracker.open = True
+        tracker.notify = tracker.notify or not is_dashboard_only
+        tracker.open_title = alert.title
+        tracker.healthy_ticks = 0
+
         # Agent follow-ups. Both wrappers hand the turn to a worker thread
         # and return at once, and both swallow every failure — an agent
         # outage must never take the pager down with it, and the alert
         # row above is already persisted whatever happens here.
         if alert.key.startswith(DPI_AGENT_PREFIXES):
             self._kick_dpi_agent(alert, alert_db_id)
-        elif alert.key.startswith(PROTOCOL_AGENT_PREFIX):
+        elif alert.key.startswith(PROTOCOL_FAMILY_PREFIXES):
             # The diagnosis goes where the alert went: if the alert was
             # dashboard-only (below ALERT_TG_MIN_SEVERITY), the chat must
             # not receive a follow-up to a headline it never saw.
-            self._kick_protocol_agent(
-                alert, alert_db_id, post_to_topic=not is_dashboard_only,
-            )
+            item = (alert, alert_db_id, not is_dashboard_only)
+            if self._tick_agent_batch is not None:
+                self._tick_agent_batch.append(item)
+            else:
+                self._kick_protocol_batch([item])
 
     def _deliver_to_admin(self, text: str, *, reply_markup=None,
                           pm_fallback: bool = False) -> bool:
@@ -469,33 +598,52 @@ class AlertManager:
     def _kick_protocol_agent(self, alert: Alert, alert_db_id: Optional[int],
                              *, post_to_topic: bool = True
                              ) -> Optional[threading.Thread]:
-        """protocol_down follow-up: stored AND (``post_to_topic``) posted
-        to the alert's topic. The prompt pins the agent to
-        ``protocol_healthcheck.py`` — the only reader of the two signals
-        (probe rows, panel field audit) that actually saw the 2026-09-01
-        outage.
+        """One protocol-family alert's follow-up — a batch of one
+        (``_kick_protocol_batch``)."""
+        return self._kick_protocol_batch([(alert, alert_db_id, post_to_topic)])
 
-        Runs on a daemon thread. The alert tick is a single APScheduler
-        job (60 s, max_instances=1): a synchronous 300-s agent turn would
-        hold CPU/RAM/disk AND the other protocol_down checks hostage for
-        five minutes per dark protocol (two protocols dark = 10 min of
-        blind pager) — and a hung Hermes/proxy would do that on every
-        fire. The turn is bounded per key: while one is in flight for
-        ``alert.key`` a second fire of the same key is skipped (log-only)
-        rather than queued. No global slot pool on purpose: there are a
-        handful of protocol keys, each fire is a real pager event, and a
-        DPI storm holding every slot must not postpone the diagnosis of
-        a dead protocol. Returns the started thread, or None when
-        nothing was started (agent not configured / already in flight).
-        Never raises.
-        """
+    def _kick_protocol_batch(self, batch: list) -> Optional[threading.Thread]:
+        """The diagnosis turn for the protocol-family alerts (protocol_down,
+        inbound_drop) one tick fired: ``batch`` = ``[(alert, alert_db_id,
+        post_to_topic)]``. ONE turn for all of them (B4, problem 12): the
+        prompt pins the agent to ``protocol_healthcheck.py``, which reports
+        on every protocol at once — three dark protocols used to start three
+        parallel 300-s turns, each with its own ssh to exit, for the same
+        answer. The reply is stored against every alert row of the batch and
+        posted once, where the alerts went (``post_to_topic`` of any).
+
+        Runs on a daemon thread; ``_protocol_agent_slots`` lets at most two
+        such turns run at once (a turn from an earlier tick may still be
+        thinking when a protocol goes dark next). The alert tick is a single
+        APScheduler job (60 s, max_instances=1): a synchronous turn would
+        hold the other checks hostage for minutes. Returns the started
+        thread, or None. Never raises."""
+        items = [(a, i, p) for a, i, p in (batch or ()) if a is not None]
+        if not items:
+            return None
+        alerts = [a for a, _i, _p in items]
+        if len(alerts) == 1:
+            lead = alerts[0]
+        else:
+            # "protocol_down:hy2+stls" — what the prompt and the session
+            # key show; the alert rows keep their own keys.
+            tails = sorted({a.key.split(':', 1)[1] for a in alerts})
+            family = alerts[0].key.split(':', 1)[0]
+            lead = Alert(
+                key=f"{family}:{'+'.join(tails)}",
+                severity=('critical' if any(a.severity == 'critical' for a in alerts)
+                          else 'warn'),
+                title='; '.join(a.title for a in alerts),
+                detail='\n'.join(f"[{a.key}] {a.detail}" for a in alerts if a.detail),
+            )
+        ids = [i for _a, i, _p in items if i is not None]
         return self._spawn_agent_worker(
-            alert, alert_db_id,
-            prompt=_protocol_agent_prompt(alert),
+            lead, ids or None,
+            prompt=_protocol_agent_prompt(lead),
             session_prefix='proto-alert',
-            post_to_topic=post_to_topic,
+            post_to_topic=any(p for _a, _i, p in items),
             timeout=PROTOCOL_AGENT_TIMEOUT_S,
-            slots=None,
+            slots=self._protocol_agent_slots,
         )
 
     def _spawn_agent_worker(self, alert: Alert, alert_db_id: Optional[int], *,
@@ -606,10 +754,11 @@ class AlertManager:
         is what the dashboard's Alerts tab renders.
 
         ``post_to_topic`` additionally posts the reply to the topic the
-        alert itself went to. Failures (agent down, quota, timeout,
-        empty reply) are log-only — no chat notice, same as DPI: the
-        pager already fired, and ``/protocols`` is the deterministic
-        fallback the admin has regardless of the agent.
+        alert itself went to. A failure (quota, timeout, error, empty
+        reply) then posts one line there instead (B3,
+        ``_post_agent_silence``) pointing at ``/protocols``, the
+        deterministic view; without ``post_to_topic`` (DPI) it stays
+        log-only. ``alert_db_id`` may be a list (a batch).
 
         Blocking: runs on whatever thread calls it — in production that
         is always a ``_spawn_agent_worker`` daemon thread (both the DPI
@@ -643,28 +792,38 @@ class AlertManager:
                     f"{tag}: skipping {alert.key} — provider quota exhausted "
                     f"(will retry on next alert tick after refresh)"
                 )
+                why = 'кончилась квота модели'
             elif '504' in str(e) or 'timed out' in msg:
                 logger.info(
                     f"{tag}: skipping {alert.key} — agent timed out "
                     f"(consider a larger default_timeout)"
                 )
+                why = f'не уложился в {timeout} с'
             else:
                 logger.warning(f"{tag}: agent call failed for {alert.key}: {e}")
+                why = 'ошибка вызова'
+            if post_to_topic:
+                self._post_agent_silence(alert, why)
             return None
 
         if not reply:
             logger.info(f"{tag}: empty reply for {alert.key}")
+            if post_to_topic:
+                self._post_agent_silence(alert, 'пустой ответ')
             return None
 
-        # Persist against the alert row — dashboard reads from here.
-        if self.db is not None and alert_db_id is not None:
+        # Persist against the alert row(s) — dashboard reads from here. A
+        # batch (_kick_protocol_batch) carries several ids.
+        ids = (list(alert_db_id) if isinstance(alert_db_id, (list, tuple))
+               else [alert_db_id] if alert_db_id is not None else [])
+        if self.db is not None and ids:
             try:
                 with self.db._connect() as conn:
-                    conn.execute(
+                    conn.executemany(
                         "UPDATE alert_history "
                         "SET kimi_analysis = ?, kimi_at = CURRENT_TIMESTAMP "
                         "WHERE id = ?",
-                        (reply[:8000], alert_db_id),
+                        [(reply[:8000], i) for i in ids],
                     )
                     conn.commit()
             except Exception as e:
@@ -674,6 +833,20 @@ class AlertManager:
         if post_to_topic:
             self._post_agent_followup(alert, reply)
         return reply
+
+    def _post_agent_silence(self, alert: Alert, why: str) -> None:
+        """One line where the alert went when the agent gave no diagnosis
+        (B3): until 2026-11 a failed turn was log-only, and the topic could
+        not tell "the agent is still thinking" from "it never will". Points
+        at /protocols, the same view without the model. Never raises."""
+        try:
+            self._deliver_to_admin(
+                f"🤖 Агент не ответил по <code>{html.escape(alert.key)}</code>: "
+                f"{html.escape(why)}. Сводка без агента — /protocols.",
+                pm_fallback=False,
+            )
+        except Exception as e:
+            logger.warning(f"agent silence note failed for {alert.key}: {e}")
 
     def _post_agent_followup(self, alert: Alert, reply: str) -> None:
         """Post the agent's diagnosis to the same place the alert went.
@@ -966,18 +1139,14 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
     # blanked `flow` on inbound 1. The probe suite recorded it
     # immediately — reality went from 672/960 ok per day to 0/960 —
     # and the rows sat in outbound_health for FOUR DAYS because nothing
-    # read them. This check closes that loop.
-    PROBE_RUNS = 3              # consecutive probe runs that must be all-bad
-    try:
-        from bot.services.health_checker import HealthChecker as _HC
-        PROBE_DOMAINS = len(_HC.TARGET_DOMAINS)   # rows per protocol per run
-    except Exception:            # keep the alert alive even if that import breaks
-        PROBE_DOMAINS = 10
-    PROBE_MIN_SAMPLES = 15      # ignore thin windows (partial run, new deploy)
-    PROBE_WINDOW_H = 3          # only look at recent rows
-    PROBE_STALE_MIN = 45        # 3 missed runs at the 15-min cadence
-    PROBE_DEGRADED_OK_RATIO = 0.25   # below a quarter of the 7/10 norm…
-    PROBE_DEGRADED_MIN_SAMPLES = 25  # …sustained over ~3 runs, not one dip
+    # read them. This check closes that loop. The numbers and the verdict
+    # are bot/services/probe_rules.py (B5): the monitor, /protocols and
+    # the agent's script read the same ones.
+    from bot.services import probe_rules as _pr
+    PROBE_RUNS = _pr.PROBE_RUNS
+    PROBE_DOMAINS = _pr.PROBE_DOMAINS
+    PROBE_WINDOW_H = _pr.PROBE_WINDOW_H
+    PROBE_STALE_MIN = _pr.PROBE_STALE_MIN
 
     def _minutes_since(ts_str, now):
         """Minutes between an ISO timestamp string and ``now``."""
@@ -1005,18 +1174,24 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
 
         Liveness is "a latency came back", not ``status == 'ok'``. An
         error that travelled THROUGH the tunnel carries a latency and
-        proves the tunnel works (5306 of 19535 recent error rows are
-        like that — sites that block our exit IP); the 2026-09-01 rows
-        had none, because nothing ever connected.
+        proves the tunnel works; the 2026-09-01 rows had none, because
+        nothing ever connected.
 
         Two sibling failure modes are deliberately NOT reported as
         per-protocol outages:
-          * every protocol dark at once — that is the probe sidecar or
-            the exit link, ONE incident, not four;
+          * every cascade protocol dark at once — that is the probe
+            sidecar or the exit link, ONE incident, not four (the DE
+            reserve does not count: it is meant to outlive exit);
           * no fresh rows at all — the probe job itself died, which the
             first version of this check could not see (too few samples
             => stay quiet), leaving it blind exactly when blindness was
             total.
+
+        Protocols the operator switched off in the cascade are left alone
+        (B4, problem 7): Turbo is off while its instance and probe stay
+        up, and its dark probe would page critical every two hours. The
+        DE reserve, when dark, pages as the reserve (B6). Every alert
+        carries the line with all protocols' numbers (B3).
         """
         try:
             db_path = getattr(config, 'DB_PATH', None) or '/var/lib/vpn-bot/bot.db'
@@ -1043,6 +1218,9 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
                         "ORDER BY ts DESC LIMIT ?",
                         (tag, cutoff, limit),
                     ).fetchall()
+                order = conn.execute(
+                    "SELECT value FROM app_settings WHERE key = 'cascade_protocol_order'"
+                ).fetchone()
         except Exception as e:
             # A monitoring read failure is itself worth a line in the
             # log at a level someone will see — this check exists
@@ -1069,23 +1247,16 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
                 ),
             )])
 
-        def _alive(row):
-            """The tunnel carried something: either it succeeded, or it
-            failed AFTER a round trip (a latency means bytes came back).
-            Only "nothing ever connected" leaves both empty."""
-            status, latency = row
-            return latency is not None or status == 'ok'
+        disabled = _pr.operator_disabled(order[0] if order else None)
+        windows = {tag: _pr.judge_window(rows) for tag, rows in samples.items()}
+        live = {t: w for t, w in windows.items() if t not in disabled}
+        summary = _pr.summary_line(sorted(windows.items()), disabled)
+        cascade = {t: w for t, w in live.items() if t != _pr.RESERVE_TAG}
+        dark = {t for t, w in live.items() if w['verdict'] == _pr.VERDICT_DARK}
+        measured = [t for t, w in cascade.items() if w['verdict'] != _pr.VERDICT_THIN]
 
-        dark = {
-            tag: rows for tag, rows in samples.items()
-            if len(rows) >= PROBE_MIN_SAMPLES
-            and not any(_alive(r) for r in rows)
-        }
-        measured = [t for t, rows in samples.items()
-                    if len(rows) >= PROBE_MIN_SAMPLES]
-
-        # Everything dark at once = one upstream incident.
-        if measured and len(dark) == len(measured) and len(measured) >= 2:
+        # Every cascade protocol dark at once = one upstream incident.
+        if measured and len(measured) >= 2 and all(t in dark for t in measured):
             return ("protocol_down:", [Alert(
                 key='protocol_down:all',
                 severity='critical',
@@ -1095,7 +1266,8 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
                     "Ни один протокол не отвечает — это не отдельный "
                     "inbound, а общий канал: сайдкар «probe-proxy», линк "
                     "entry→exit или сам exit. Проверь контейнер "
-                    "«probe-proxy» и доступность exit-узла."
+                    "«probe-proxy» и доступность exit-узла.\n"
+                    f"Сейчас по пробам: {summary}."
                 ),
             )])
 
@@ -1116,52 +1288,66 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
                 return None
 
         alerts = []
-        for tag, rows in dark.items():
+        for tag in sorted(dark):
+            w = windows[tag]
             since = _last_alive(tag)
             how_long = (
                 _humanize_minutes(_minutes_since(since, now)) if since else '—'
             )
+            if tag == _pr.RESERVE_TAG:
+                alerts.append(Alert(
+                    key=f'protocol_down:{tag}',
+                    severity='critical',
+                    min_cycles=2,
+                    title=f'Резерв DE не отвечает (лежит {how_long})',
+                    detail=(
+                        f"За последние {PROBE_RUNS} прогона ({w['n']} попыток) "
+                        f"через резервный узел DE не вернулся ни один ответ. "
+                        f"Платным он нужен, когда лежит основной путь; "
+                        f"проверь x-ui и Reality на резервном узле.\n"
+                        f"Сейчас по пробам: {summary}."
+                    ),
+                ))
+                continue
             alerts.append(Alert(
                 key=f'protocol_down:{tag}',
                 severity='critical',
                 min_cycles=2,
                 title=f'Протокол {tag} мёртв (лежит {how_long})',
                 detail=(
-                    f"За последние {PROBE_RUNS} прогона ({len(rows)} попыток) "
+                    f"За последние {PROBE_RUNS} прогона ({w['n']} попыток) "
                     f"через {tag} не вернулся НИ ОДИН ответ — даже ошибочный, "
                     f"то есть туннель не устанавливается вовсе. Остальные "
                     f"протоколы при этом живы, значит дело в самом inbound'е. "
                     f"Частые причины: клиенты потеряли per-protocol поле "
                     f"(flow у Reality, password у Shadowsocks) после правки "
                     f"клиента или месячной джобы; сменился/протух SNI-dest; "
-                    f"разъехались hop-порты у hy2; xray отверг конфиг."
+                    f"разъехались hop-порты у hy2; xray отверг конфиг.\n"
+                    f"Сейчас по пробам: {summary}."
                 ),
             ))
 
         # Degraded: the tunnel comes up (rows carry a latency) but almost
         # nothing gets through. 2026-09-05: ws sat at 2/30 ok for an hour
         # — a CF-path slowdown — and nothing paged, because "dark" needs
-        # zero alive rows. Baseline is ~7/10; a quarter of that over
-        # three runs is not a blip. warn-level (dashboard by default),
-        # same key family so the agent hook and the reset logic apply.
-        for tag, rows in samples.items():
-            if tag in dark or len(rows) < PROBE_DEGRADED_MIN_SAMPLES:
-                continue
-            ok = sum(1 for s, _l in rows if s == 'ok')
-            if ok / len(rows) >= PROBE_DEGRADED_OK_RATIO:
+        # zero alive rows. warn-level (dashboard by default), same key
+        # family so the agent hook and the reset logic apply.
+        for tag, w in sorted(live.items()):
+            if w['verdict'] != _pr.VERDICT_DEGRADED:
                 continue
             alerts.append(Alert(
                 key=f'protocol_down:{tag}:degraded',
                 severity='warn',
                 min_cycles=3,
-                title=f'Протокол {tag} деградировал: ok {ok}/{len(rows)}',
+                title=f"Протокол {tag} деградировал: ok {w['ok']}/{w['n']}",
                 detail=(
                     f"Туннель через {tag} устанавливается, но за последние "
-                    f"{PROBE_RUNS} прогона прошло лишь {ok} из {len(rows)} проб "
-                    f"при норме ~7/10. Обычно это медленный путь (CF-PoP, "
-                    f"перегруженный exit, троттлинг UDP), а не мёртвый "
-                    f"inbound. Сравни с остальными протоколами и запусти "
-                    f"protocol_healthcheck.py."
+                    f"{PROBE_RUNS} прогона прошло лишь {w['ok']} из {w['n']} "
+                    f"проб ({_pr.degraded_threshold_text()}). Обычно это "
+                    f"медленный путь (CF-PoP, перегруженный exit, троттлинг "
+                    f"UDP), а не мёртвый inbound. Сравни с остальными "
+                    f"протоколами и запусти protocol_healthcheck.py.\n"
+                    f"Сейчас по пробам: {summary}."
                 ),
             ))
         return ("protocol_down:", alerts)
@@ -1323,6 +1509,180 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
             ),
         )])
 
+    # ---- users' connections on an exit inbound fell away (B2) ----
+    # 2026-10-29 .. 11-02: ws connections on exit went from 250-300 an hour
+    # to zero for 3.5 days while the probes, which leave from the entry
+    # datacenter, saw ws at ~89 % — users' networks are invisible to them.
+    # The exit's own count of accepted connections is not. Backtested on
+    # 30 days of prod dpi_metrics (2026-11-07): exactly one hit, that ws
+    # outage, no false ones on reality / ss2022 / hy2. Re-run on this very
+    # code (2026-11-10, 23 days past the 7-day warm-up): with three blocks
+    # (6 h) it also fired for one hour each on reality 29.10, ss2022 08.11
+    # and cf-ws 09.11; with four blocks (8 h) only the ws outage, caught at
+    # 22:00 on 29.10. Only an alert, never a DPIMonitor rule: a demotion
+    # moves users off the protocol, its connections fall, and the rule
+    # would hold itself.
+    INBOUND_DROP_BLOCK_H = 2         # one block = two hours
+    INBOUND_DROP_BLOCKS = 4          # four low blocks in a row = 8 h
+    INBOUND_DROP_BASELINE_DAYS = 7   # the same clock block on each of 7 days
+    INBOUND_DROP_MIN_MEDIAN = 50     # too quiet an inbound proves nothing
+    INBOUND_DROP_RATIO = 0.2         # below a fifth of its usual count
+    # A block counts only if the exit reported through most of it: the
+    # reporter posts every 5 min, 24 times a block. Fewer = "no report",
+    # never "no connections".
+    INBOUND_DROP_MIN_REPORTS = 12
+    INBOUND_DROP_REPORT_STALE_MIN = 30
+    INBOUND_DROP_RECOMPUTE_S = 600   # the data changes every 5 min
+    # dpi_metrics tag → protocol name. hy2-8400 is the bot's own rollup of
+    # hy2 auth allows (no exit report behind it): its blocks count only
+    # while the bot itself was running.
+    INBOUND_DROP_TAGS = {'reality': 'reality', 'cf-ws': 'ws', 'ss2022': 'stls',
+                         'xhttp': 'xhttp', 'hy2-8400': 'hy2'}
+    _BOT_TAGS = ('hy2-8400',)
+    # 'started': when this process began (the hy2 rollup has no heartbeat
+    # but the bot itself); a test seam like the rest of the cache.
+    _drop_cache = {'at': 0.0, 'result': None, 'last': {}, 'started': time.time()}
+
+    def _median(values):
+        vals = sorted(values)
+        if not vals:
+            return 0.0
+        mid = len(vals) // 2
+        return float(vals[mid]) if len(vals) % 2 else (vals[mid - 1] + vals[mid]) / 2.0
+
+    def check_inbound_drop():
+        """Per exit inbound: users' accepted connections over the last
+        8 h, in four 2-h blocks, each below a fifth of the median of the
+        same block on the previous 7 days (median ≥ 50). Critical, one
+        cycle (the 8 h are the hysteresis), kicks the protocol agent, and
+        its recovery is posted (AlertManager, RECOVERY_PREFIXES).
+
+        "The exit did not report" is told from "nobody connected": a block
+        with fewer than INBOUND_DROP_MIN_REPORTS reports (the exit_reports
+        heartbeat, or exit-tagged dpi_metrics snapshots before it existed)
+        gives no verdict, and an alert already open stays as it was. A
+        reporter silent for INBOUND_DROP_REPORT_STALE_MIN pages its own
+        warn, ``inbound_drop:no_reports``. Recomputed every 10 min."""
+        now_ts = time.time()
+        if (_drop_cache['result'] is not None
+                and now_ts - _drop_cache['at'] < INBOUND_DROP_RECOMPUTE_S):
+            return _drop_cache['result']
+        try:
+            db_path = getattr(config, 'DB_PATH', None) or '/var/lib/vpn-bot/bot.db'
+            import sqlite3
+            from datetime import datetime, timedelta
+            now = datetime.utcnow()
+            now_iso = now.isoformat()
+            per_day = 24 // INBOUND_DROP_BLOCK_H
+            span = INBOUND_DROP_BLOCKS + per_day * INBOUND_DROP_BASELINE_DAYS
+            since = (now - timedelta(hours=INBOUND_DROP_BLOCK_H * span)).isoformat()
+            slot = (f"CAST((julianday(?) - julianday({{col}})) * {per_day} AS INTEGER)")
+            tags = tuple(INBOUND_DROP_TAGS)
+            marks = ','.join('?' * len(tags))
+            with sqlite3.connect(db_path) as conn:
+                counts = conn.execute(
+                    f"SELECT inbound_tag, {slot.format(col='snapshot_at')} AS s, "
+                    f"SUM(conn_count) FROM dpi_metrics "
+                    f"WHERE snapshot_at >= ? AND inbound_tag IN ({marks}) "
+                    f"GROUP BY inbound_tag, s",
+                    (now_iso, since, *tags),
+                ).fetchall()
+                beats = dict(conn.execute(
+                    f"SELECT {slot.format(col='ts')} AS s, COUNT(*) FROM exit_reports "
+                    f"WHERE ts >= ? GROUP BY s",
+                    (now_iso, since),
+                ).fetchall())
+                snaps = dict(conn.execute(
+                    f"SELECT {slot.format(col='snapshot_at')} AS s, "
+                    f"COUNT(DISTINCT snapshot_at) FROM dpi_metrics "
+                    f"WHERE snapshot_at >= ? AND inbound_tag IN ({marks}) "
+                    f"AND inbound_tag NOT IN ({','.join('?' * len(_BOT_TAGS))}) "
+                    f"GROUP BY s",
+                    (now_iso, since, *tags, *_BOT_TAGS),
+                ).fetchall())
+                newest_beat = conn.execute(
+                    "SELECT MAX(ts) FROM exit_reports").fetchone()[0]
+                newest_snap = conn.execute(
+                    f"SELECT MAX(snapshot_at) FROM dpi_metrics WHERE inbound_tag IN ({marks}) "
+                    f"AND inbound_tag NOT IN ({','.join('?' * len(_BOT_TAGS))})",
+                    (*tags, *_BOT_TAGS),
+                ).fetchone()[0]
+        except Exception as e:
+            logger.warning(f"inbound-drop alert read failed: {e}")
+            return ("inbound_drop:", list(_drop_cache['last'].values()))
+
+        conns: dict = {}
+        for tag, s_idx, total in counts:
+            conns.setdefault(tag, {})[int(s_idx)] = int(total or 0)
+        per_day = 24 // INBOUND_DROP_BLOCK_H
+
+        def reported(tag, i) -> bool:
+            if tag in _BOT_TAGS:
+                block_start = now_ts - (i + 1) * INBOUND_DROP_BLOCK_H * 3600
+                return block_start >= _drop_cache['started']
+            return max(beats.get(i, 0), snaps.get(i, 0)) >= INBOUND_DROP_MIN_REPORTS
+
+        alerts = []
+        last = _drop_cache['last']
+        for tag, proto in INBOUND_DROP_TAGS.items():
+            key = f'inbound_drop:{proto}'
+            series = conns.get(tag, {})
+            if not all(reported(tag, i) for i in range(INBOUND_DROP_BLOCKS)):
+                if key in last:           # no verdict: an open alert stays
+                    alerts.append(last[key])
+                continue
+            blocks = []
+            for i in range(INBOUND_DROP_BLOCKS):
+                usual = _median([series.get(i + per_day * d, 0)
+                                 for d in range(1, INBOUND_DROP_BASELINE_DAYS + 1)])
+                blocks.append((series.get(i, 0), usual))
+            if not all(usual >= INBOUND_DROP_MIN_MEDIAN and got < INBOUND_DROP_RATIO * usual
+                       for got, usual in blocks):
+                last.pop(key, None)
+                continue
+            got_total = sum(g for g, _u in blocks)
+            usual_total = int(sum(u for _g, u in blocks))
+            per_block = ' / '.join(f"{g} из ~{int(u)}" for g, u in reversed(blocks))
+            alert = Alert(
+                key=key,
+                severity='critical',
+                min_cycles=1,
+                title=(f"Подключения {proto} на exit упали: {got_total} за "
+                       f"{INBOUND_DROP_BLOCK_H * INBOUND_DROP_BLOCKS} ч при обычных ~{usual_total}"),
+                detail=(
+                    f"Инбаунд {tag}: по 2 ч, от старых к новым — {per_block} "
+                    f"(обычное = медиана того же часа за {INBOUND_DROP_BASELINE_DAYS} дней). "
+                    f"Отчёты exit приходят, то есть это не обрыв отчёта, а пользователи "
+                    f"перестали доходить. Пробы из датацентра такое не видят: блокировка "
+                    f"у операторов, на участке «пользователь → entry/Cloudflare». "
+                    f"Сравни с /protocols и с подключениями других инбаундов."
+                ),
+            )
+            last[key] = alert
+            alerts.append(alert)
+
+        newest = max((t for t in (newest_beat, newest_snap) if t), default=None)
+        if not newest or _minutes_since(newest, now) > INBOUND_DROP_REPORT_STALE_MIN:
+            age = '—' if not newest else _humanize_minutes(_minutes_since(newest, now))
+            alerts.append(Alert(
+                key='inbound_drop:no_reports',
+                severity='warn',
+                min_cycles=2,
+                title=f'Отчёты exit не приходят ({age})',
+                detail=(
+                    "exit_dpi_reporter.py на exit не присылал отчёт дольше "
+                    f"{INBOUND_DROP_REPORT_STALE_MIN} мин. Пока так, алерт по "
+                    "подключениям на инбаундах слеп. Таймер exit-dpi-reporter "
+                    "на exit, токен DPI_REPORT_TOKEN, доступ exit → entry :8080."
+                ),
+            ))
+        result = ("inbound_drop:", alerts)
+        _drop_cache['at'] = now_ts
+        _drop_cache['result'] = result
+        return result
+
+    check_inbound_drop.cache = _drop_cache       # test seam
+
     def check_lockdown_active():
         """LOCKDOWN (IMPROVEMENT_PLAN B1, bot/services/lockdown.py) is
         a standing change to what every user receives — fronted-first
@@ -1369,7 +1729,7 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
     checks.extend([
         check_cpu, check_ram, check_disk,
         check_opencode, check_xray_reload_sidecar, check_xui_inbounds,
-        check_protocol_probe_down,
+        check_protocol_probe_down, check_inbound_drop,
         check_dpi_short_sessions, check_dpi_handshake_spike, check_dpi_rst_spike,
         check_lockdown_active,
     ])

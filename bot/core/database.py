@@ -124,6 +124,9 @@ class Database:
         self._init_user_failure_reports()
         self._init_sub_fetches()
         self._init_outbound_health()
+        self._init_outbound_bulk()
+        self._init_exit_reports()
+        self._init_alert_state()
         self._init_client_probe()
         self._init_client_apps()
 
@@ -874,6 +877,80 @@ class Database:
                 conn.commit()
         except sqlite3.Error as e:
             logger.error(f"_init_outbound_health failed: {e}")
+
+    def _init_outbound_bulk(self) -> None:
+        """One bulk download per protocol per probe run (IMPROVEMENT_PLAN F,
+        B1), written by HealthChecker next to its outbound_health rows but
+        never among them: the pager and the monitor count those rows ten a
+        run. ``status`` ok / partial (started, stopped short — the freeze
+        signature) / timeout / error / proxy_down; ``bytes`` received;
+        ``duration_ms`` NULL when nothing connected. Naive-UTC ISO ``ts``,
+        like outbound_health; pruned with it (30 days)."""
+        try:
+            with self._connect() as conn:
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS outbound_bulk ("
+                    "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                    "ts TEXT NOT NULL, "
+                    "outbound_tag TEXT NOT NULL, "
+                    "status TEXT NOT NULL, "
+                    "bytes INTEGER NOT NULL DEFAULT 0, "
+                    "duration_ms INTEGER, "
+                    "error_msg TEXT)"
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_outbound_bulk_tag_ts "
+                    "ON outbound_bulk(outbound_tag, ts)"
+                )
+                conn.commit()
+        except sqlite3.Error as e:
+            logger.error(f"_init_outbound_bulk failed: {e}")
+
+    def _init_exit_reports(self) -> None:
+        """One row per exit DPI report received (POST /api/dpi/exit_report),
+        empty reports included (IMPROVEMENT_PLAN F, B2): the heartbeat that
+        tells "the exit did not report" from "nobody connected" — dpi_metrics
+        alone cannot, a report with no connections writes no rows there.
+        Naive-UTC ISO ``ts``; pruned with dpi_metrics."""
+        try:
+            with self._connect() as conn:
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS exit_reports ("
+                    "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                    "ts TEXT NOT NULL, "
+                    "rows INTEGER NOT NULL DEFAULT 0)"
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_exit_reports_ts "
+                    "ON exit_reports(ts)"
+                )
+                conn.commit()
+        except sqlite3.Error as e:
+            logger.error(f"_init_exit_reports failed: {e}")
+
+    def _init_alert_state(self) -> None:
+        """AlertManager's per-key state that must outlive a restart
+        (IMPROVEMENT_PLAN F, B3): when the key last fired (the 2-h repeat
+        cooldown), until when an admin's ack silences it, and whether it is
+        open — fired and not yet recovered, so a recovery notice still
+        comes after a deploy (``notify`` = it was posted to the chat, so its
+        recovery is posted too). Times are unix seconds. Streak counters
+        are not kept: after a restart a check simply counts again."""
+        try:
+            with self._connect() as conn:
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS alert_state ("
+                    "key TEXT PRIMARY KEY, "
+                    "last_fired_ts REAL NOT NULL DEFAULT 0, "
+                    "acked_until_ts REAL NOT NULL DEFAULT 0, "
+                    "open INTEGER NOT NULL DEFAULT 0, "
+                    "notify INTEGER NOT NULL DEFAULT 0, "
+                    "title TEXT, "
+                    "updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+                )
+                conn.commit()
+        except sqlite3.Error as e:
+            logger.error(f"_init_alert_state failed: {e}")
 
     def _init_client_apps(self) -> None:
         """Which app fetched a user's profile, and when: one row per (user,

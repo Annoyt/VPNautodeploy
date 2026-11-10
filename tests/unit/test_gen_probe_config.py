@@ -181,3 +181,28 @@ class TestMain:
         self._wire(monkeypatch, SimpleNamespace(uuid='', email='probe_monitor@x'))
         assert gen.main() == 1
         assert capsys.readouterr().out == ''
+
+
+class TestReserveByConfig:
+    """IMPROVEMENT_PLAN F, B6: the DE reserve gets a probe inbound (:18086)
+    wherever it is handed out — the same outbound paid users get."""
+
+    DE = dict(FALLBACK_NODE_HOST='198.51.100.9', FALLBACK_NODE_PBK='de-pbk',
+              FALLBACK_NODE_SID='de01', FALLBACK_NODE_SNI='www.google.com',
+              FALLBACK_NODE_PORT='443')
+
+    def test_configured_reserve_is_probed_on_18086(self):
+        cfg = gen.build_config(make_config(**self.DE), PROBE_USER)
+        assert inbound_ports(cfg)['probe-in-de'] == 18086
+        ob = outbound(cfg, 'probe_monitor-de')
+        assert (ob['type'], ob['server'], ob['uuid']) == ('vless', '198.51.100.9', UUID)
+        assert ob['tls']['reality']['public_key'] == 'de-pbk'
+        assert 'flow' not in ob                     # the reserve has no Vision
+        assert {'inbound': ['probe-in-de'], 'outbound': 'probe_monitor-de'} in cfg['route']['rules']
+
+    @pytest.mark.parametrize('over', [dict(FALLBACK_NODE_HOST=''),
+                                      dict(FALLBACK_NODE_PBK='')])
+    def test_unconfigured_reserve_is_absent(self, over):
+        cfg = gen.build_config(make_config(**{**self.DE, **over}), PROBE_USER)
+        assert 'probe-in-de' not in inbound_ports(cfg)
+        assert not any(o.get('tag', '').endswith('-de') for o in cfg['outbounds'])

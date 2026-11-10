@@ -423,7 +423,9 @@ class TestWhatWorks:
     def test_probe_verdicts_match_protocols_card(self, bot, db, config, panel):
         add_user(db)
         seed_probes(db, 'ws', 7)
-        seed_probes(db, 'stls', 4)          # last run 4/10 → degraded
+        # 2/10 a run → 6/30, under the shared quarter (probe_rules, B5);
+        # until 2026-11 the card's "degraded" was "the last run below half"
+        seed_probes(db, 'stls', 2)
         seed_probes(db, 'reality', 0)       # 30 rows, none alive → down
         text = self._text(bot, db, config)
         assert '✅ Cloudflare (WS) — работает' in text

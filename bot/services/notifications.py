@@ -1978,6 +1978,14 @@ class NotificationService:
             id='hy2_auth_log_cleanup',
             replace_existing=True,
         )
+        # Daily: drop the one-shot agent sessions (alerts, /sos, the daily
+        # DPI summary) older than AI_SESSIONS_ONE_SHOT_DAYS — B4, problem 10.
+        self.scheduler.add_job(
+            self._cleanup_ai_sessions_sync,
+            IntervalTrigger(hours=24),
+            id='ai_sessions_cleanup',
+            replace_existing=True,
+        )
         # Every 15 minutes: health check all outbounds against popular domains.
         self.scheduler.add_job(
             self._health_check_sync,
@@ -2208,6 +2216,37 @@ class NotificationService:
             logger.warning(f"dpi_collect: hy2 rollup failed: {e}")
         return rows
 
+    # ai_sessions keeps the agent's session id per conversation. The admin's
+    # own chats (pm:<chat>, topic:<chat>:<thread>) are conversations and
+    # stay; every alert, /sos report and daily DPI summary opens a session
+    # of its own under a fresh key that is never read again (IMPROVEMENT_PLAN
+    # F, B4, problem 10: 684 rows on 2026-11-10, 592 of them dpi_hsfail
+    # turns). Those go after a week — the diagnosis itself is kept in
+    # alert_history.kimi_analysis.
+    AI_SESSIONS_ONE_SHOT_PREFIXES = ('proto-alert:', 'dpi-alert:', 'sos:', 'dpi-daily:')
+    AI_SESSIONS_ONE_SHOT_DAYS = 7
+
+    def _cleanup_ai_sessions_sync(self, now: Optional[float] = None) -> int:
+        """Daily: prune one-shot agent sessions older than a week. Returns
+        the number dropped; never raises (no table = nothing to do)."""
+        import time as _time
+        cutoff = int((now or _time.time()) - self.AI_SESSIONS_ONE_SHOT_DAYS * 86400)
+        clause = ' OR '.join('session_key LIKE ?' for _ in self.AI_SESSIONS_ONE_SHOT_PREFIXES)
+        try:
+            with self.db._connect() as conn:
+                cur = conn.execute(
+                    f"DELETE FROM ai_sessions WHERE updated_at < ? AND ({clause})",
+                    (cutoff, *(p + '%' for p in self.AI_SESSIONS_ONE_SHOT_PREFIXES)),
+                )
+                conn.commit()
+                dropped = cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+        except Exception as e:
+            logger.warning(f"ai_sessions cleanup failed: {e}")
+            return 0
+        if dropped:
+            logger.info(f"ai_sessions cleanup: dropped {dropped} one-shot sessions")
+        return dropped
+
     def _health_check_sync(self):
         """Every 15 min: probe popular domains through each outbound.
 
@@ -2433,6 +2472,14 @@ class NotificationService:
                         f"alert_history cleanup: dropped {cur.rowcount} "
                         f"rows older than {self.ALERT_HISTORY_RETENTION_DAYS}d"
                     )
+                # alert_state (B3): a closed key untouched for as long is
+                # history too — the DPI families leave one per ASN they
+                # ever fired for. Open keys stay, however old.
+                conn.execute(
+                    "DELETE FROM alert_state WHERE open = 0 AND updated_at < "
+                    "datetime('now', ?)",
+                    (f'-{self.ALERT_HISTORY_RETENTION_DAYS} days',),
+                )
         except Exception as e:
             logger.exception(f"alert_history cleanup failed: {e}")
 
@@ -2473,6 +2520,9 @@ class NotificationService:
                         f"dpi_metrics cleanup: dropped {cur.rowcount} rows "
                         f"older than {self.DPI_METRICS_RETENTION_DAYS}d"
                     )
+                # The exit report heartbeat (B2) lives as long as the
+                # rows it vouches for.
+                conn.execute("DELETE FROM exit_reports WHERE ts < ?", (cutoff,))
         except Exception as e:
             logger.exception(f"dpi_metrics cleanup failed: {e}")
 
@@ -2481,9 +2531,8 @@ class NotificationService:
     # and ~4.8k/day once hy2t is probed). Every live reader looks back
     # HOURS, not days: the protocol_down alert
     # (alert_manager.PROBE_WINDOW_H), /protocols (ops.PROTO_WINDOW_H) and
-    # scripts/protocol_healthcheck.py all use 3 h; HealthChecker's
-    # get_recent_health/get_health_summary default to 24 h and have no
-    # caller. The only unbounded queries are the "dark since …" anchors
+    # scripts/protocol_healthcheck.py all use 3 h (probe_rules). The only
+    # unbounded queries are the "dark since …" anchors
     # (MAX(ts) of the last row that showed life) — informational, and
     # they degrade to "—" rather than mis-report. 30 days matches
     # ALERT_HISTORY_RETENTION_DAYS, so any protocol_down alert still in
@@ -2556,6 +2605,13 @@ class NotificationService:
                 kept = conn.execute(
                     "SELECT COUNT(*) FROM outbound_health"
                 ).fetchone()[0]
+                # The bulk probe rows (B1): one per protocol a run, ~500 a
+                # day — one DELETE is enough.
+                try:
+                    conn.execute("DELETE FROM outbound_bulk WHERE ts < ?", (cutoff,))
+                    conn.commit()
+                except Exception as e:
+                    logger.warning(f"outbound_bulk cleanup failed: {e}")
             finally:
                 conn.close()
             logger.info(

@@ -272,13 +272,11 @@ def run_once() -> int:
     presence = parse_presence(access_lines)
     rejects = parse_rejects(error_lines)
 
-    if not access and not rejects and not presence:
-        # Nothing to say (or first-run baseline) — just persist offsets.
-        state.update({"access": access_off, "error": error_off})
-        _save_state(state)
-        logger.info("no new events")
-        return 0
-
+    # Posted even when there is nothing to say (a quiet window, the
+    # first-run baseline): the bot keeps one exit_reports row per report
+    # (IMPROVEMENT_PLAN F, B2), and its inbound-drop alert must tell "the
+    # exit did not report" from "nobody connected". An empty window used
+    # to send nothing, which read as a missing report.
     ok = post_report(
         {"access": access, "rejects": rejects, "presence": presence}
     )

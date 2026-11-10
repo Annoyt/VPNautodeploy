@@ -219,3 +219,35 @@ class TestReadNewLines:
         lines, off = reporter.read_new_lines(p, {'access': 5}, 'access')
         assert lines == []
         assert off == 5
+
+
+class TestHeartbeat:
+    """IMPROVEMENT_PLAN F, B2: an empty window is still reported — the bot's
+    exit_reports heartbeat tells "no report" from "no connections"."""
+
+    def test_an_empty_window_is_posted_and_advances_the_offsets(self, tmp_path, monkeypatch):
+        logs = tmp_path / 'logs'
+        logs.mkdir()
+        (logs / 'access.log').write_text('')
+        (logs / 'error.log').write_text('')
+        monkeypatch.setattr(reporter, 'LOG_DIR', str(logs))
+        monkeypatch.setattr(reporter, 'STATE_PATH', str(tmp_path / 'state.json'), raising=False)
+        monkeypatch.setattr(reporter, 'TOKEN', 'sekret')
+        sent = []
+        monkeypatch.setattr(reporter, 'post_report', lambda payload: sent.append(payload) or True)
+        assert reporter.run_once() == 0
+        assert sent == [{'access': [], 'rejects': [], 'presence': []}]
+
+    def test_a_failed_post_keeps_the_offsets(self, tmp_path, monkeypatch):
+        logs = tmp_path / 'logs'
+        logs.mkdir()
+        (logs / 'access.log').write_text('')
+        (logs / 'error.log').write_text('')
+        monkeypatch.setattr(reporter, 'LOG_DIR', str(logs))
+        monkeypatch.setattr(reporter, 'TOKEN', 'sekret')
+        saved = []
+        monkeypatch.setattr(reporter, '_save_state', lambda st: saved.append(st))
+        monkeypatch.setattr(reporter, '_load_state', lambda: {})
+        monkeypatch.setattr(reporter, 'post_report', lambda payload: False)
+        assert reporter.run_once() == 1
+        assert saved == []

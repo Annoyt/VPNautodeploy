@@ -177,8 +177,10 @@ class TestHealthyBaseline:
 
     def test_errors_that_carry_a_latency_count_as_alive(self):
         """LIVENESS RULE: an HTTP 418 through the tunnel proves the tunnel.
-        3/10 ok with 7 latency-bearing errors is DEGRADED, not DOWN."""
-        probes = {t: {'rows': rows(n_ok=3, n_err_latency=7), 'last_alive': NOW.isoformat()}
+        2/10 ok with 8 latency-bearing errors is DEGRADED, not DOWN (the
+        pager's quarter since 2026-11, probe_rules; 3/10 was degraded under
+        the script's own 35 % before)."""
+        probes = {t: {'rows': rows(n_ok=2, n_err_latency=8), 'last_alive': NOW.isoformat()}
                   for t in hc.PROBED}
         report = hc.assess(layers(a=layer_a(probes=probes)), now=NOW)
         assert all(s == 'DEGRADED' for t, s in states_of(report).items() if t in hc.PROBED)

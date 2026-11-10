@@ -40,9 +40,10 @@ LIVENESS RULE (same as bot/services/alert_manager.py)
 -----------------------------------------------------
 A probe row proves the tunnel works if ``latency_ms IS NOT NULL`` OR
 ``status = 'ok'``. An HTTP 418 that came back THROUGH the tunnel has a
-latency; vk/yandex/sberbank legitimately fail through the exit and still
-carry one. The 2026-09-01 rows had latency NULL: nothing ever connected.
-Normal is 7/10 ok per protocol per run.
+latency. The 2026-09-01 rows had latency NULL: nothing ever connected.
+Normal is 10/10 ok per protocol per run since 2026-11 (the two targets that
+never passed through the exit, vk.com and sberbank.ru, were replaced); the
+thresholds are bot/services/probe_rules.py, shared with the pager.
 
 HY2T (Hysteria Turbo) COVERAGE IS DYNAMIC
 -----------------------------------------
@@ -98,18 +99,43 @@ from typing import Dict, List, Optional, Tuple
 # Constants (mirror bot/services/alert_manager.py + health_checker.py)
 # ---------------------------------------------------------------------------
 
-PROBED = ['reality', 'hy2', 'ws', 'stls']      # what the probe sidecar ALWAYS speaks
-PROBED_OPTIONAL = ['hy2t']   # probed only where HY2T_PORT is set — decided per run by probed_tags()
-PROTOCOLS = ['reality', 'hy2', 'hy2t', 'ws', 'stls']   # what we report on
+def _load_probe_rules():
+    """bot/services/probe_rules.py, loaded by its path: this script runs on
+    the entry HOST, outside the container and without the bot's packages,
+    and that module is stdlib-only for exactly this reader. It is rsynced
+    with the rest of bot/ (scripts/deploy_to_entry.sh), so it is always
+    next to this file."""
+    import importlib.util
+    from pathlib import Path
+    path = Path(__file__).resolve().parent.parent / 'bot' / 'services' / 'probe_rules.py'
+    spec = importlib.util.spec_from_file_location('nekovpn_probe_rules', str(path))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
-PROBE_DOMAINS = 10           # rows per protocol per run (HealthChecker.TARGET_DOMAINS)
-PROBE_RUNS = 3               # "last 3 runs"
+
+probe_rules = _load_probe_rules()
+
+PROBED = ['reality', 'hy2', 'ws', 'stls']      # what the probe sidecar ALWAYS speaks
+# Probed only where the deployment has them — decided per run by
+# probed_tags(): hy2t with HY2T_PORT, the DE reserve with FALLBACK_NODE_*.
+PROBED_OPTIONAL = ['hy2t', probe_rules.RESERVE_TAG]
+PROTOCOLS = ['reality', 'hy2', 'hy2t', 'ws', 'stls']   # what we always report on
+# ...plus the DE reserve (B6) where it is probed: it joins the report only
+# with probe rows of its own, judged from them alone (no layer B/C facts).
+REPORT_ORDER = PROTOCOLS + [probe_rules.RESERVE_TAG]
+
+# One definition with the pager, the monitor and /protocols (probe_rules,
+# IMPROVEMENT_PLAN F, B5). Until 2026-11 this script called a window
+# DEGRADED below 35 % (half of a 7/10 norm) while the pager said 25 %.
+PROBE_DOMAINS = probe_rules.PROBE_DOMAINS
+PROBE_RUNS = probe_rules.PROBE_RUNS
 PROBE_LIMIT = PROBE_RUNS * PROBE_DOMAINS
-PROBE_WINDOW_H = 3
-PROBE_STALE_MIN = 45         # 3 missed runs at the 15-min cadence
+PROBE_WINDOW_H = probe_rules.PROBE_WINDOW_H
+PROBE_STALE_MIN = probe_rules.PROBE_STALE_MIN
 RUN_SPAN_MIN = 5             # rows within 5 min of the newest row = one run (a run writes 10 rows in ms)
-BASELINE_OK = 7 / PROBE_DOMAINS          # 7/10 is normal
-DEGRADED_BELOW = BASELINE_OK / 2         # < half of normal = DEGRADED
+DEGRADED_BELOW = probe_rules.PROBE_DEGRADED_OK_RATIO
+DEGRADED_MIN_SAMPLES = probe_rules.PROBE_DEGRADED_MIN_SAMPLES
 ALERT_WINDOW_H = 6
 AUDIT_LINES_MAX = 45         # BROKEN summary + up to 40 problem lines + "… and N more"
 
@@ -575,15 +601,17 @@ def _probe_verdict(tag: str, probes: dict, now: datetime) -> dict:
     run_line = f'последний прогон: ok {l_ok}/{len(latest)}, живых {l_alive}/{len(latest)}'
     rate = len(ok) / len(rows)
     ok_rate = f'{len(ok)}/{len(rows)}'
-    if rate < DEGRADED_BELOW:
+    if len(rows) >= DEGRADED_MIN_SAMPLES and rate < DEGRADED_BELOW:
         return {'state': 'DEGRADED', 'degraded_reason': 'probe_rate',
-                'evidence': [f'пробы: ok {ok_rate} ({rate:.0%}) при норме ~70% — '
+                'evidence': [f'пробы: ok {ok_rate} ({rate:.0%}; {probe_rules.degraded_threshold_text()}) — '
                              f'туннель жив ({len(alive)} с задержкой), но сайты не проходят; {run_line}; {sample}'],
                 'down_for': None, 'ok_rate': ok_rate}
     if len(latest) >= PROBE_DOMAINS and l_ok == 0:
-        # The 3-run average still looks fine, but the newest full run has
-        # not a single ok (normal is 7/10): an outage that started within
-        # the last 45 min looks exactly like this. Never "OK".
+        # The 3-run window still looks fine, but the newest full run has
+        # not a single ok (probe_rules.last_run_dark, the early sign
+        # /protocols shows as "последний прогон без единого ответа"): an
+        # outage that started within the last 45 min looks exactly like
+        # this. Never "OK".
         how = ('туннель не установился ни разу' if l_alive == 0
                else f'туннель жив ({l_alive} с задержкой), но ни один сайт не прошёл')
         return {'state': 'DEGRADED', 'degraded_reason': 'dark_run',
@@ -836,7 +864,7 @@ def assess(layers: dict, now: Optional[datetime] = None) -> dict:
                                                   'пробы слепы независимо от протокола')
 
     # --- suspects ---------------------------------------------------------------
-    states = {t: protocols[t]['state'] for t in PROTOCOLS if t in protocols}
+    states = {t: protocols[t]['state'] for t in REPORT_ORDER if t in protocols}
     probed_down = [t for t in probed if states.get(t) == 'DOWN']
     all_dark = len(probed_down) == len(probed)
 
@@ -1029,7 +1057,7 @@ def exit_code_for(states: Dict[str, str]) -> int:
     protocol to be OK; any UNKNOWN (layer A failed, stale pipeline, exit
     unreachable for hy2t) is 2, because "we could not look" must never
     read as a pass — that is precisely how four days went by."""
-    vals = [states.get(t) for t in PROTOCOLS if t in states]
+    vals = [states.get(t) for t in REPORT_ORDER if t in states]
     if any(v in ('DOWN', 'DEGRADED') for v in vals):
         return 1
     if vals and all(v == 'OK' for v in vals):
@@ -1043,11 +1071,12 @@ def _verdict_line(protocols, states, all_dark, pipeline_stale, a_ok, stale_min) 
     if pipeline_stale:
         return f'ИТОГ: пробы не пишутся {_humanize(stale_min)} — состояние протоколов НЕИЗВЕСТНО'
     if not a_ok:
-        bad = [f'{t} {states[t]}' for t in PROTOCOLS if states.get(t) in ('DOWN', 'DEGRADED')]
+        bad = [f'{t} {states[t]}' for t in REPORT_ORDER if states.get(t) in ('DOWN', 'DEGRADED')]
         return 'ИТОГ: слой A недоступен, вердикт по пробам невозможен' + (
             f'; по exit: {", ".join(bad)}' if bad else '')
+    present = [t for t in REPORT_ORDER if t in states]
     bad = []
-    for t in PROTOCOLS:
+    for t in present:
         st = states.get(t)
         if st in ('DOWN', 'DEGRADED'):
             df = protocols[t].get('down_for')
@@ -1057,13 +1086,13 @@ def _verdict_line(protocols, states, all_dark, pipeline_stale, a_ok, stale_min) 
     if not bad:
         # Rates for whatever was actually probed this run; anything judged
         # from layer C alone (hy2t without rows) is named as such.
-        rates = ', '.join(f'{t} {protocols[t].get("ok_rate")}' for t in PROTOCOLS
-                          if t in protocols and protocols[t].get('probe_coverage'))
-        unprobed = [t for t in PROTOCOLS if t in protocols and not protocols[t].get('probe_coverage')]
+        rates = ', '.join(f'{t} {protocols[t].get("ok_rate")}' for t in present
+                          if protocols[t].get('probe_coverage'))
+        unprobed = [t for t in present if not protocols[t].get('probe_coverage')]
         tail = f'; {", ".join(unprobed)} active, без проб' if unprobed else ''
         return f'ИТОГ: все протоколы OK ({rates}{tail})'
-    rest_ok = [t for t in PROTOCOLS if states.get(t) == 'OK']
-    tail = 'остальные OK' if len(rest_ok) == len(PROTOCOLS) - len(bad) and rest_ok else 'остальных OK нет'
+    rest_ok = [t for t in present if states.get(t) == 'OK']
+    tail = 'остальные OK' if len(rest_ok) == len(present) - len(bad) and rest_ok else 'остальных OK нет'
     return f'ИТОГ: {", ".join(bad)}, {tail}'
 
 
@@ -1079,7 +1108,7 @@ def render_human(report: dict) -> str:
                f" · бот {ctx.get('bot_version') or '?'}"
                + (f" · exit RAM {ctx['free_ram_mb']} MB свободно" if ctx.get('free_ram_mb') is not None else ''))
     out.append('')
-    for tag in PROTOCOLS:
+    for tag in REPORT_ORDER:
         p = (report.get('protocols') or {}).get(tag)
         if not p:
             continue
