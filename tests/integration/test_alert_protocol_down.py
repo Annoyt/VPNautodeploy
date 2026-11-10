@@ -79,7 +79,7 @@ def probe_check(config):
 
 
 def keys(result):
-    _prefix, alerts = result
+    _prefix, alerts = result[:2]
     return sorted(a.key for a in alerts)
 
 
@@ -92,7 +92,7 @@ class TestProtocolDownCheck:
         for p in ('hy2', 'ws', 'stls'):
             seed(db, p, runs=3, ok_per_run=7)
 
-        prefix, alerts = probe_check(config)()
+        prefix, alerts = probe_check(config)()[:2]
 
         assert prefix == 'protocol_down:'
         assert [a.key for a in alerts] == ['protocol_down:reality']

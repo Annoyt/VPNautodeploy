@@ -31,6 +31,7 @@ import pytest
 from bot.core.database import Database
 from bot.core.web_server import WebAppServer
 from bot.models.user import User
+from bot.services import hy2_auth_rows
 from bot.services.subscription import SubscriptionService
 
 pytestmark = pytest.mark.filterwarnings(
@@ -398,8 +399,8 @@ class TestHy2AuthWhenTheDbFails:
     async def test_an_expiry_passed_since_is_honoured(self, tmp_path):
         srv, _db = _hy2_server(tmp_path, expiry='2099-01-01T00:00:00')
         assert (await _auth(srv))['ok'] is True
-        stamp, row = srv._hy2_auth_rows[UUID]
-        srv._hy2_auth_rows[UUID] = (stamp, row[:3] + ('2000-01-01T00:00:00',))
+        stamp, row = hy2_auth_rows._rows[UUID]
+        hy2_auth_rows._rows[UUID] = (stamp, row[:3] + ('2000-01-01T00:00:00',))
         _break_db(srv)
         assert (await _auth(srv))['ok'] is False
         await _drain(srv)
@@ -408,8 +409,8 @@ class TestHy2AuthWhenTheDbFails:
     async def test_a_row_too_old_is_not_used(self, tmp_path):
         srv, _db = _hy2_server(tmp_path)
         assert (await _auth(srv))['ok'] is True
-        stamp, row = srv._hy2_auth_rows[UUID]
-        srv._hy2_auth_rows[UUID] = (time.monotonic() - srv.HY2_AUTH_ROW_MAX_S - 1, row)
+        stamp, row = hy2_auth_rows._rows[UUID]
+        hy2_auth_rows._rows[UUID] = (time.monotonic() - hy2_auth_rows.MAX_AGE_S - 1, row)
         _break_db(srv)
         assert (await _auth(srv))['ok'] is False
         await _drain(srv)
@@ -422,7 +423,7 @@ class TestHy2AuthWhenTheDbFails:
             conn.execute("UPDATE users SET uuid = NULL WHERE chat_id = '42'")
             conn.commit()
         assert (await _auth(srv))['ok'] is False
-        assert UUID not in srv._hy2_auth_rows
+        assert UUID not in hy2_auth_rows._rows
         _break_db(srv)
         assert (await _auth(srv))['ok'] is False
         await _drain(srv)
@@ -438,6 +439,36 @@ class TestHy2AuthWhenTheDbFails:
         _break_db(srv)
         assert (await _auth(srv))['ok'] is False          # remembered: banned
         await _drain(srv)
+
+    @pytest.mark.asyncio
+    async def test_a_ban_without_a_reconnect_is_not_let_in(self, tmp_path):
+        # the review's case: the key authenticates, is revoked through the
+        # one revoke path, does NOT reconnect, then the read fails
+        from bot.services.user_lifecycle import revoke_user_key
+        srv, db = _hy2_server(tmp_path)
+        assert (await _auth(srv))['ok'] is True
+        user = db.get_user('42')
+        _break_db(srv)
+        revoke_user_key(user, None, db)
+        assert (await _auth(srv))['ok'] is False
+        await _drain(srv)
+
+    @pytest.mark.asyncio
+    async def test_a_status_change_without_a_reconnect_is_read_again(self, tmp_path):
+        # paid -> demo through the state machine while the client stays
+        # connected: Turbo must not open from the remembered paid row
+        from bot.config.constants import UserState
+        from bot.core.state_machine import StateMachine
+        srv, db = _hy2_server(tmp_path)
+        assert (await _auth(srv, turbo=True))['ok'] is True
+        _break_db(srv)
+        StateMachine(db).set_state('42', UserState.DEMO)
+        assert (await _auth(srv, turbo=True))['ok'] is False
+        assert (await _auth(srv))['ok'] is False          # nothing remembered
+        await _drain(srv)
+
+    def test_the_memory_is_minutes_not_hours(self):
+        assert hy2_auth_rows.MAX_AGE_S <= 30 * 60
 
 
 class TestHy2AuthOffTheAnswerPath:
@@ -490,3 +521,43 @@ class TestHy2AuthOffTheAnswerPath:
         assert not task.done()
         assert (await task)['ok'] is True
         await _drain(srv)
+
+
+class TestHy2AuditWritesHaveTheirOwnThread:
+
+    @pytest.mark.asyncio
+    async def test_writes_never_use_the_default_pool(self, tmp_path, monkeypatch):
+        srv, db = _hy2_server(tmp_path)
+        names = []
+        real = srv._hy2_record
+
+        def spy(*a):
+            names.append(threading.current_thread().name)
+            real(*a)
+        srv._hy2_record = spy
+        assert (await _auth(srv))['ok'] is True
+        await _drain(srv)
+        assert names and all(n.startswith('hy2-record') for n in names)
+        assert _log(db) == [('42', 'allow')]
+        assert srv._hy2_record_pending == 0
+
+    @pytest.mark.asyncio
+    async def test_a_full_queue_drops_the_write_not_the_answer(self, tmp_path):
+        srv, db = _hy2_server(tmp_path)
+        srv._hy2_record_pending = srv.HY2_RECORD_MAX_PENDING
+        assert (await _auth(srv))['ok'] is True
+        await _drain(srv)
+        assert _log(db) == []
+        srv._hy2_record_pending = 0
+        assert (await _auth(srv))['ok'] is True
+        await _drain(srv)
+        assert _log(db) == [('42', 'allow')]
+
+
+def test_a_one_shot_demoted_iterator_demotes_in_every_group():
+    # build_clash_config reads ``demoted`` for Cascade and again for Calls
+    g, _ = _clash_groups(demoted=iter(['hy2']))
+    assert _names('hy2')[0] not in g['Cascade']['proxies']
+    assert g['Calls']['proxies'] == _names('reality', 'de', 'hy2')
+    calls, _ = _singbox_calls(demoted=iter(['hy2']))
+    assert calls['outbounds'] == _names('reality', 'de', 'hy2')

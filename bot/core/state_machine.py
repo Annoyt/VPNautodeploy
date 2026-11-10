@@ -69,7 +69,8 @@ class StateMachine:
         
         # Perform transition
         success = self.db.update_status(chat_id, new_state.value)
-        
+        _forget_hy2_rows(chat_id)
+
         if success:
             logger.info(
                 f"State transition: {current_state.value} -> {new_state.value} "
@@ -152,10 +153,21 @@ class StateMachine:
             True if update succeeded
         """
         success = self.db.update_status(chat_id, state.value)
-        
+        _forget_hy2_rows(chat_id)
+
         if success:
             logger.info(f"State set to {state.value} for user {chat_id}")
-        
+
         return success
+
+
+def _forget_hy2_rows(chat_id) -> None:
+    """A status change: hy2 auth must read the new status, never decide from
+    the row it remembered (bot/services/hy2_auth_rows.py). Never raises."""
+    try:
+        from bot.services import hy2_auth_rows
+        hy2_auth_rows.forget_chat(chat_id)
+    except Exception as e:
+        logger.warning(f"hy2 auth memory not cleared for {chat_id}: {e}")
 
 
