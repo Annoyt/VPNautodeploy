@@ -1049,24 +1049,36 @@ class AdminOpsMixin(AdminHandlerBase):
         if auto['global']:
             lines.append("глобальные авто (действуют и здесь): "
                          + html.escape(", ".join(sorted(auto['global']))))
+        lines.extend(self._manual_lines(now, asn=asn))
         return "\n".join(lines)
 
-    def _manual_lines(self, now: datetime) -> list:
-        """The operator's live /cascade demote entries (C6), if any."""
+    def _manual_lines(self, now: datetime, asn: Optional[str] = None) -> list:
+        """The operator's live /cascade demote entries (C6), if any —
+        every one, or with ``asn`` the global ones and that network's."""
         from bot.services import cascade_manual
         manual = cascade_manual.load(self.db, now)
         items = [(None, p, m) for p, m in sorted(manual['global'].items())]
-        items += [(asn, p, m) for asn, ps in sorted(manual['asn'].items())
+        items += [(a, p, m) for a, ps in sorted(manual['asn'].items())
+                  if asn is None or a == asn
                   for p, m in sorted(ps.items())]
         if not items:
             return []
         out = ["", f"<b>Ручные понижения</b> ({len(items)}):"]
-        for asn, p, m in items:
-            where = html.escape(asn) if asn else 'глобально'
+        for a, p, m in items:
+            where = html.escape(a) if a else 'глобально'
             until = str(m.get('until') or '')
             out.append(f"• {html.escape(p)} ({where}) до {html.escape(until[:16].replace('T', ' '))} UTC"
                        f" — {html.escape(str(m.get('by') or '?'))}")
         return out
+
+    @staticmethod
+    def _as_prefixed_asn(token) -> Optional[str]:
+        """``AS31133`` / ``as31133`` → ``AS31133``; a bare number is not
+        an ASN in /cascade demote|restore."""
+        from bot.services import cascade_manual
+        if not isinstance(token, str) or not token.strip().upper().startswith('AS'):
+            return None
+        return cascade_manual.normalize_asn(token)
 
     def _cascade_demote(self, rest: list) -> str:
         """``/cascade demote <proto> [ASN] [ttl]`` (C6)."""
@@ -1078,10 +1090,19 @@ class AdminOpsMixin(AdminHandlerBase):
         proto = rest[0].strip().lower()
         asn = ttl = None
         for token in rest[1:]:
-            asn = asn or cascade_manual.normalize_asn(token)
-            ttl = ttl or cascade_manual.parse_ttl(token)
-            if not (cascade_manual.normalize_asn(token) or cascade_manual.parse_ttl(token)):
-                return f"⚠️ не понял «{html.escape(token)}»: ASN (AS31133) или срок (30m, 6h, 2d)"
+            # An ASN needs its "AS" prefix here: a bare "30" was read as
+            # AS30, when the admin most likely meant 30 minutes.
+            tok_asn = self._as_prefixed_asn(token)
+            tok_ttl = cascade_manual.parse_ttl(token)
+            if tok_asn and not asn:
+                asn = tok_asn
+            elif tok_ttl and not ttl:
+                ttl = tok_ttl
+            elif tok_asn or tok_ttl:
+                return f"⚠️ «{html.escape(token)}» — второй раз: один ASN и один срок"
+            else:
+                return (f"⚠️ не понял «{html.escape(token)}»: ASN с префиксом (AS31133) "
+                        f"или срок с единицей (30m, 6h, 2d)")
         ttl = ttl or cascade_manual.DEFAULT_TTL
         admin_id = self._caller_admin_id()
         entry = cascade_manual.demote(self.db, proto, asn, ttl, by=f'admin:{admin_id}')
@@ -1103,9 +1124,11 @@ class AdminOpsMixin(AdminHandlerBase):
         if not rest or rest[0].strip().lower() not in MK.PROTOCOL_METHOD_MAP:
             return self.CASCADE_USAGE
         proto = rest[0].strip().lower()
-        asn = cascade_manual.normalize_asn(rest[1]) if len(rest) > 1 else None
+        if len(rest) > 2:
+            return f"⚠️ лишнее: «{html.escape(' '.join(rest[2:]))}» — /cascade restore <протокол> [AS…]"
+        asn = self._as_prefixed_asn(rest[1]) if len(rest) > 1 else None
         if len(rest) > 1 and not asn:
-            return f"⚠️ не понял «{html.escape(rest[1])}»: нужен ASN (AS31133)"
+            return f"⚠️ не понял «{html.escape(rest[1])}»: нужен ASN с префиксом (AS31133)"
         was, _after = cascade_manual.restore(self.db, proto, asn)
         admin_id = self._caller_admin_id()
         target = f"{'asn:' + asn if asn else 'global'}:{proto}"
