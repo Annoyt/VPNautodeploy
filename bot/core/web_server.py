@@ -181,6 +181,7 @@ class WebAppServer:
         self.app.router.add_post('/api/dpi/exit_report', self.handle_dpi_exit_report)
         self.app.router.add_post('/api/healthcheck/report', self.handle_healthcheck_report)
         self.app.router.add_get('/api/ssh/users', self.handle_ssh_users)
+        self.app.router.add_get('/api/xhr/users', self.handle_xhr_users)
         # Sing-box subscription endpoint. Public — the path token is
         # the auth (HMAC of the user's UUID with BOT_TOKEN as key).
         # Returns the user's full cascade as one config the client
@@ -992,6 +993,31 @@ class WebAppServer:
             # 503, never an empty list: the sync would delete every account
             return web.json_response({'ok': False}, status=503)
         return web.json_response({'ok': True, 'users': users},
+                                 headers={'Cache-Control': 'no-store'})
+
+    async def handle_xhr_users(self, request: web.Request) -> web.Response:
+        """GET /api/xhr/users — the user sync of the exit's own xray for
+        ``xhr`` (scripts/setup_xhr_exit.sh, bot/services/xhr_exit.py):
+        ``{"users": [{"uuid"}], "server": {sni, pbk, sid, path},
+        "in_cascade"}``. The exit report's token."""
+        if not self._dpi_token_ok(request):
+            return web.json_response({'ok': False}, status=403)
+        from bot.services import xhr_exit
+        try:
+            server = xhr_exit.profile_server(self.config)
+        except Exception as e:
+            logger.warning(f"xhr users: profile check failed: {e}")
+            return web.json_response({'ok': False}, status=503)
+        if server is None:
+            return web.json_response({'ok': False, 'error': 'xhr not configured'},
+                                     status=404)
+        try:
+            payload = await asyncio.to_thread(xhr_exit.users_payload, self.db)
+        except Exception as e:
+            logger.warning(f"xhr users: read failed: {e}")
+            # 503, never an empty list: the sync would drop every user
+            return web.json_response({'ok': False}, status=503)
+        return web.json_response({'ok': True, 'server': server, **payload},
                                  headers={'Cache-Control': 'no-store'})
 
     def _store_healthcheck(self, exit_code, verdict: str, payload: dict) -> bool:

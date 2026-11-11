@@ -289,7 +289,8 @@ class Settings:
         # panel inbound: the relational panel gives every VLESS inbound the
         # client's Vision flow, and xray rejects flow-less TLS-in-TLS on it
         # (the CDN inbound is VMess for that reason) — it needs an xray of
-        # its own on exit. Empty XHR_SNI = the protocol is off everywhere.
+        # its own on exit (scripts/setup_xhr_exit.sh, bot/services/xhr_exit.py).
+        # Empty XHR_SNI = the protocol is off everywhere.
         # SSH as the paid users' emergency path (IMPROVEMENT_PLAN F, E4;
         # bot/services/ssh_exit.py, scripts/setup_ssh_exit.sh on exit).
         self.SSH_EXIT_HOST: str = os.getenv('SSH_EXIT_HOST', '').strip()
