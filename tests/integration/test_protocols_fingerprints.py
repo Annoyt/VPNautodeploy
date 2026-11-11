@@ -285,6 +285,29 @@ class TestSshExit:
         off = WebAppServer(_config(DPI_REPORT_TOKEN='tok'), db, xui_service=Mock())
         assert (await off.handle_ssh_users(req)).status == 404
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize('raw,status', [
+        (b'tok', b'200'),                  # the raw request itself is fine
+        ('тук'.encode(), b'403'),          # non-ASCII UTF-8
+        (b'tok\xe9', b'403'),              # not UTF-8 at all: aiohttp hands a surrogate
+    ])
+    async def test_a_non_ascii_token_is_a_403(self, tmp_path, raw, status):
+        # Compared as str, a non-ASCII header made compare_digest raise:
+        # a 500, not a 403. Sent as raw bytes, through aiohttp's own parser.
+        import asyncio
+        from aiohttp.test_utils import TestServer
+        srv = WebAppServer(_config(**SSH, DPI_REPORT_TOKEN='tok'),
+                           Database(str(tmp_path / 'bot.db')), xui_service=Mock())
+        async with TestServer(srv.app) as server:
+            reader, writer = await asyncio.open_connection(server.host, server.port)
+            writer.write(b'GET /api/ssh/users HTTP/1.1\r\nHost: test\r\n'
+                         b'X-DPI-Token: ' + raw + b'\r\nConnection: close\r\n\r\n')
+            await writer.drain()
+            answer = await reader.read()
+            writer.close()
+        assert answer.split(b'\r\n', 1)[0].split()[:2] == [b'HTTP/1.1', status]
+        assert (b'"users"' in answer) is (status == b'200')
+
     def test_sshd_config_forwards_only(self):
         out = subprocess.run(['bash', os.path.join(os.path.dirname(__file__), '..', '..',
                                                    'scripts', 'setup_ssh_exit.sh'),
