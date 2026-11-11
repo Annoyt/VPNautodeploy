@@ -11,6 +11,8 @@ import json
 import os
 import types
 
+import pytest
+
 REPORTER_PATH = os.path.join(
     os.path.dirname(__file__), '..', '..', 'scripts', 'exit_dpi_reporter.py'
 )
@@ -519,3 +521,142 @@ class TestUsageBlock:
         assert got == [{'email': 'u1@x', 'tag': 'inbound-2053', 'conns': 1},
                        {'email': 'u1@x', 'tag': 'inbound-443', 'conns': 2}]
 
+
+
+# --------------------------------------------- the hop's TLS (AGENTS.md §53) --
+
+class _TlsBot:
+    """The bot's report endpoint over TLS with the hop's certificate: it
+    records the token it was sent and answers {"ok": true}."""
+
+    def __init__(self, cert_dir):
+        import http.server
+        import ssl
+        import threading
+        seen = self.seen = []
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                body = self.rfile.read(int(self.headers['Content-Length']))
+                seen.append((self.path, self.headers.get('X-DPI-Token'), json.loads(body)))
+                out = b'{"ok": true, "rows": 0}'
+                self.send_response(200)
+                self.send_header('Content-Length', str(len(out)))
+                self.end_headers()
+                self.wfile.write(out)
+
+            def log_message(self, *a):
+                pass
+
+        self.httpd = http.server.HTTPServer(('127.0.0.1', 0), Handler)
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_3
+        ctx.load_cert_chain(os.path.join(cert_dir, 'cert.pem'), os.path.join(cert_dir, 'key.pem'))
+        self.httpd.socket = ctx.wrap_socket(self.httpd.socket, server_side=True)
+        self.port = self.httpd.server_address[1]
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+
+    def close(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+
+class TestHopTls:
+    """BOT_URL / BOT_CA_FILE: the report (and the token it carries, which
+    also opens /api/xhr/users and /api/ssh/users) goes over the hop's TLS
+    listener, trusting the pinned certificate alone; never in clear."""
+
+    @pytest.fixture
+    def pins(self, tmp_path):
+        from bot.services import hop_tls
+        good, other = tmp_path / 'good', tmp_path / 'other'
+        hop_tls.generate(str(good), '127.0.0.1')
+        hop_tls.generate(str(other), '127.0.0.1')
+        return good, other
+
+    def test_defaults_are_the_hop(self, monkeypatch):
+        monkeypatch.delenv('BOT_URL', raising=False)
+        monkeypatch.delenv('BOT_CA_FILE', raising=False)
+        spec = importlib.util.spec_from_file_location('exit_dpi_reporter_fresh',
+                                                      os.path.abspath(REPORTER_PATH))
+        fresh = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(fresh)
+        assert fresh.BOT_URL == 'https://130.49.146.10:8448'
+        assert fresh.BOT_CA_FILE == '/etc/nekovpn-hop/entry-hop.pem'
+
+    @pytest.mark.parametrize('url', [
+        'http://130.49.146.10:8080', 'http://entry.example.com', 'http://127.evil.com:8080',
+        'http://127.0.0.1.evil.com', 'http://user@127.0.0.1@evil.com/', 'http://10.0.0.1',
+    ])
+    def test_plain_http_to_another_host_is_refused(self, url, monkeypatch):
+        monkeypatch.setattr(reporter, 'BOT_URL', url)
+        monkeypatch.setattr(reporter, 'TOKEN', 'sekret')
+        assert 'in clear' in reporter.bot_problem()
+
+        def no_wire(*a, **kw):
+            raise AssertionError('the token went out')
+        monkeypatch.setattr(reporter.urllib.request, 'urlopen', no_wire)
+        assert reporter.post_report({}) is False
+
+    @pytest.mark.parametrize('url', ['http://127.0.0.1:8080', 'http://localhost:8080',
+                                     'http://[::1]:8080'])
+    def test_plain_http_to_loopback_is_allowed(self, url):
+        assert reporter.bot_problem(url, '') is None
+
+    def test_other_schemes_and_a_missing_pin(self, tmp_path):
+        assert 'not an http(s) URL' in reporter.bot_problem('ftp://x', '')
+        assert 'not an http(s) URL' in reporter.bot_problem('https://', '')
+        assert 'not readable' in reporter.bot_problem('https://1.2.3.4:8448',
+                                                      str(tmp_path / 'missing.pem'))
+        assert reporter.bot_problem('https://sub.example.com', '') is None   # system CAs
+
+    def test_a_report_over_the_pinned_hop(self, pins, monkeypatch):
+        good, _other = pins
+        bot = _TlsBot(str(good))
+        try:
+            monkeypatch.setattr(reporter, 'BOT_URL', f'https://127.0.0.1:{bot.port}')
+            monkeypatch.setattr(reporter, 'BOT_CA_FILE', str(good / 'cert.pem'))
+            monkeypatch.setattr(reporter, 'TOKEN', 'sekret')
+            assert reporter.post_report({'access': []}) is True
+            assert bot.seen == [('/api/dpi/exit_report', 'sekret', {'access': []})]
+        finally:
+            bot.close()
+
+    def test_another_certificate_gets_nothing(self, pins, monkeypatch):
+        good, other = pins
+        bot = _TlsBot(str(good))
+        try:
+            monkeypatch.setattr(reporter, 'BOT_URL', f'https://127.0.0.1:{bot.port}')
+            monkeypatch.setattr(reporter, 'BOT_CA_FILE', str(other / 'cert.pem'))
+            monkeypatch.setattr(reporter, 'TOKEN', 'sekret')
+            assert reporter.post_report({'access': []}) is False
+            assert bot.seen == []                   # refused before a byte of HTTP
+        finally:
+            bot.close()
+
+    @pytest.mark.parametrize('url', ['https://127.0.0.1:{port}', 'HTTPS://127.0.0.1:{port}'])
+    def test_the_pin_is_the_only_trust_anchor(self, pins, monkeypatch, url):
+        # no system CA can stand in for the pin, whatever it issued for
+        # entry's address (Let's Encrypt issues IP certificates)
+        good, _other = pins
+        bot = _TlsBot(str(good))
+        try:
+            monkeypatch.setattr(reporter, 'BOT_URL', url.format(port=bot.port))
+            monkeypatch.setattr(reporter, 'BOT_CA_FILE', str(good / 'cert.pem'))
+            monkeypatch.setattr(reporter, 'TOKEN', 'sekret')
+
+            def system_cas(*a, **kw):
+                raise AssertionError('the system CAs were trusted')
+            monkeypatch.setattr(reporter.ssl, 'create_default_context', system_cas)
+            assert reporter.post_report({}) is True
+        finally:
+            bot.close()
+
+    def test_an_empty_pin_is_the_system_cas(self, monkeypatch):
+        monkeypatch.setattr(reporter, 'BOT_URL', 'https://sub.example.com:2096')
+        monkeypatch.setattr(reporter, 'BOT_CA_FILE', '')
+        sentinel = object()
+        monkeypatch.setattr(reporter.ssl, 'create_default_context', lambda: sentinel)
+        assert reporter._ssl_context() is sentinel
+        monkeypatch.setattr(reporter, 'BOT_URL', 'http://127.0.0.1:8080')
+        assert reporter._ssl_context() is None

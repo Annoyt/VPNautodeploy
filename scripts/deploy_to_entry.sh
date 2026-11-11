@@ -68,6 +68,34 @@ if [ "$deployed" != "$stamp" ]; then
     exit 1
 fi
 
+# The hop's HTTPS listener (AGENTS.md §53): once its certificate exists, exit's
+# Caddy, hysteria and DPI reporter reach the bot only through it, so a bot
+# that comes back without it cuts off every subscription refresh, new hy2
+# connections and the reports while /health on 8080 above looks fine. The
+# check dials it from inside the container with the pinned certificate as
+# the only trust anchor. No certificate yet = "off", nothing to check.
+echo "==> Smoke: the hop's HTTPS listener (8448)"
+hop=$(ssh entry "docker exec -w /app vpn-bot python3 scripts/hop_tls.py check" || true)
+hop_state=$(printf '%s' "$hop" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('state','?'))" 2>/dev/null || echo '?')
+case "$hop_state" in
+    off)
+        echo "    off: $(printf '%s' "$hop" | python3 -c "import json,sys; print(json.load(sys.stdin).get('reason',''))")"
+        ;;
+    ok)
+        hop_version=$(printf '%s' "$hop" | python3 -c "import json,sys; print(json.load(sys.stdin).get('version','?'))")
+        echo "    over TLS: $hop_version"
+        if [ "$hop_version" != "$stamp" ]; then
+            echo "ERROR: the HTTPS listener answers '$hop_version', expected '$stamp'." >&2
+            exit 1
+        fi
+        ;;
+    *)
+        echo "ERROR: the hop's HTTPS listener failed its check: $hop" >&2
+        echo "       Exit reaches the bot only through it (docs/runbooks/entry_hop_tls.md)." >&2
+        exit 1
+        ;;
+esac
+
 # Panel audit: every client on every enabled inbound must still carry the
 # fields its protocol needs. Cheap (one API read per inbound) and it is
 # the only check here that looks at the PANEL rather than at our own

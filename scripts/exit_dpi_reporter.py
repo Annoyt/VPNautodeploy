@@ -21,25 +21,36 @@ re-parsed and re-sent on the next tick, so nothing is lost and nothing
 is double-counted.
 
 Environment:
-    BOT_URL           Bot web server base (default http://130.49.146.10:8080)
+    BOT_URL           Bot web server base (default https://130.49.146.10:8448,
+                      the hop's HTTPS listener, AGENTS.md §53). Plain http is
+                      refused unless the host is loopback: the token must not
+                      cross the internet in clear.
+    BOT_CA_FILE       The certificate an https BOT_URL must present (default
+                      /etc/nekovpn-hop/entry-hop.pem, the hop's pinned
+                      certificate); it is the ONLY trust anchor. Empty = the
+                      system's CAs (a BOT_URL with a public certificate).
     DPI_REPORT_TOKEN  Shared secret for the report endpoint (required)
     XRAY_LOG_DIR      Log dir (default: the 3x-ui docker volume)
     STATE_PATH        Offset state file (default /var/lib/exit-dpi/state.json)
     MAX_CHUNK_BYTES   Per-run parse cap; larger backlogs skip to tail
 """
 
+import ipaddress
 import json
 import logging
 import os
 import re
+import ssl
 import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Optional
 
-BOT_URL = os.getenv("BOT_URL", "http://130.49.146.10:8080").rstrip("/")
+BOT_URL = os.getenv("BOT_URL", "https://130.49.146.10:8448").rstrip("/")
+BOT_CA_FILE = os.getenv("BOT_CA_FILE", "/etc/nekovpn-hop/entry-hop.pem").strip()
 TOKEN = os.getenv("DPI_REPORT_TOKEN", "")
 LOG_DIR = os.getenv(
     "XRAY_LOG_DIR",
@@ -407,7 +418,56 @@ def parse_rejects(lines) -> list:
     ]
 
 
+def _is_loopback(host: str) -> bool:
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def bot_problem(url: str = None, ca_file: str = None) -> Optional[str]:
+    """Why no report may go to the bot as configured, or None.
+
+    The token rides in every report and also opens the users' lists the
+    exit syncs pull (/api/xhr/users, /api/ssh/users), so it never crosses
+    the internet in clear: plain http only to loopback. An https BOT_URL
+    with a BOT_CA_FILE trusts that file alone (the hop's pinned
+    certificate, AGENTS.md §53), and the file must be there."""
+    url = BOT_URL if url is None else url
+    ca_file = BOT_CA_FILE if ca_file is None else ca_file
+    parts = urllib.parse.urlsplit(url)
+    if parts.scheme == "http":
+        if not _is_loopback(parts.hostname or ""):
+            return (f"BOT_URL {url} is plain http to another host: the token would "
+                    f"cross the internet in clear. Use the hop's https listener "
+                    f"(AGENTS.md §53).")
+        return None
+    if parts.scheme != "https" or not parts.hostname:
+        return f"BOT_URL {url!r} is not an http(s) URL"
+    if ca_file and not os.access(ca_file, os.R_OK):
+        return f"BOT_CA_FILE {ca_file} is not readable (empty = the system's CAs)"
+    return None
+
+
+def _ssl_context() -> Optional[ssl.SSLContext]:
+    if urllib.parse.urlsplit(BOT_URL).scheme != "https":
+        return None
+    if BOT_CA_FILE:
+        # The pinned certificate is the only trust anchor: no system CA
+        # can stand in for it, whatever it issued for the bot's address.
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctx.load_verify_locations(cafile=BOT_CA_FILE)
+        return ctx
+    return ssl.create_default_context()
+
+
 def post_report(payload: dict) -> bool:
+    problem = bot_problem()
+    if problem:
+        logger.error(f"report not sent: {problem}")
+        return False
     req = urllib.request.Request(
         f"{BOT_URL}/api/dpi/exit_report",
         data=json.dumps(payload).encode(),
@@ -415,7 +475,7 @@ def post_report(payload: dict) -> bool:
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=20) as resp:
+        with urllib.request.urlopen(req, timeout=20, context=_ssl_context()) as resp:
             body = json.loads(resp.read().decode() or "{}")
             return bool(body.get("ok"))
     except (urllib.error.URLError, OSError, ValueError) as e:

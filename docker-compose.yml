@@ -280,6 +280,14 @@ services:
     #  because exit's Caddy could no longer reach entry:8080.)
     ports:
       - "${WEB_BIND:-127.0.0.1}:8080:8080"
+      # The same app over HTTPS for the exit → entry hop (AGENTS.md §53):
+      # the bot listens on 8448 once scripts/hop_tls.py init made its
+      # certificate in the vpn-bot-data volume, and exit pins that
+      # certificate. Entry sets WEB_TLS_BIND=0.0.0.0 and lets only the exit
+      # IP in (DOCKER-USER, comment "entry-fw-8448"; a published port
+      # bypasses ufw). Once exit is on it, entry's WEB_BIND goes back to
+      # 127.0.0.1: 8080 then serves entry's own callers only.
+      - "${WEB_TLS_BIND:-127.0.0.1}:8448:8448"
 
   # Probe sidecar: one HTTP-proxy inbound per VPN protocol, each routed
   # through the REAL outbound (reality/hy2/ws/stls, + hy2t) using the dedicated

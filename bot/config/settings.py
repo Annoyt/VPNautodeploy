@@ -274,6 +274,16 @@ class Settings:
         # showed a button to a dead URL and nobody noticed. Now if it's
         # missing, handle_admin says so out loud.
         self.WEBAPP_URL: str = os.getenv('WEBAPP_URL', '')
+        # TLS on the exit → entry hop (AGENTS.md §53, bot/services/hop_tls.py):
+        # the same app over HTTPS for exit's Caddy, hysteria and DPI reporter.
+        # On once WEB_TLS_DIR holds cert.pem + key.pem (scripts/hop_tls.py
+        # init); WEB_TLS_PORT=0 turns it off.
+        try:
+            self.WEB_TLS_PORT: int = int(os.getenv('WEB_TLS_PORT', '8448') or '0')
+        except ValueError:
+            self.WEB_TLS_PORT = 0
+        self.WEB_TLS_DIR: str = (os.getenv('WEB_TLS_DIR', '').strip()
+                                 or '/var/lib/vpn-bot/hop-tls')
         # Mirrors of /sub on OTHER domains (IMPROVEMENT_PLAN E5), comma-
         # separated base URLs, e.g. "https://m1.example.net,https://m2.example.org".
         # Each becomes a proxy-provider of the FlClash profile that keeps
