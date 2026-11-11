@@ -52,6 +52,7 @@
         setupModal();
         setupPullToRefresh();
         setupPlansHandlers();
+        setupBotTokenHandlers();
         setupRemindersHandlers();
         setupDpiHeatmapHandlers();
         setupProtoStatsHandlers();
@@ -943,6 +944,7 @@
         fetchKtexts().catch(e => console.error('ktexts fetch:', e));
         fetchPlans().catch(e => console.error('plans fetch:', e));
         fetchReminders().catch(e => console.error('reminders fetch:', e));
+        fetchBotToken().catch(e => console.error('bot token fetch:', e));
     }
 
     // ==================== Cascade order editor ====================
@@ -1344,6 +1346,251 @@
         if (saveBtn) saveBtn.addEventListener('click', savePlans);
         const reloadBtn = document.getElementById('plans-reload');
         if (reloadBtn) reloadBtn.addEventListener('click', fetchPlans);
+    }
+
+    // ==================== Bot token ====================
+    // Settings → «Токен бота» (bot/services/bot_token.py). The new token is
+    // sealed here before it is posted: the hop from exit's Caddy to the bot
+    // is plain HTTP. The scheme is bot/utils/token_envelope.py's — keep the
+    // two in step (ffdhe2048 DH, HKDF-SHA256, HMAC-SHA256 stream and tag).
+    const BOT_TOKEN_RE = /^([0-9]{5,15}):[A-Za-z0-9_-]{30,64}$/;
+    const FFDHE2048_P = BigInt('0x' + [
+        'FFFFFFFFFFFFFFFFADF85458A2BB4A9AAFDC5620273D3CF1D8B9C583CE2D3695',
+        'A9E13641146433FBCC939DCE249B3EF97D2FE363630C75D8F681B202AEC4617A',
+        'D3DF1ED5D5FD65612433F51F5F066ED0856365553DED1AF3B557135E7F57C935',
+        '984F0C70E0E68B77E2A689DAF3EFE8721DF158A136ADE73530ACCA4F483A797A',
+        'BC0AB182B324FB61D108A94BB2C8E3FBB96ADAB760D7F4681D4F42A3DE394DF4',
+        'AE56EDE76372BB190B07A7C8EE0A6D709E02FCE1CDF7E2ECC03404CD28342F61',
+        '9172FE9CE98583FF8E4F1232EEF28183C3FE3B1B4C6FAD733BB5FCBC2EC22005',
+        'C58EF1837D1683B2C6F34A26C1B2EFFA886B423861285C97FFFFFFFFFFFFFFFF',
+    ].join(''));
+    const ENVELOPE_LABEL = 'nekovpn bot-token v1';
+    const BOT_TOKEN_WAIT_MS = 120000;
+    let botTokenBotId = null;
+
+    function inMiniAppOnly() {
+        return Boolean(state.initData) && !state.adminToken;
+    }
+
+    async function fetchBotToken() {
+        const box = document.getElementById('bottoken-status');
+        if (!box) return;
+        let d;
+        try {
+            d = await apiFetch('/api/admin/bot_token' + (inMiniAppOnly() ? '?link=1' : ''));
+        } catch (e) {
+            box.innerHTML = `<div class="placeholder-text">⚠️ ${esc(e.message)}</div>`;
+            return;
+        }
+        renderBotToken(d);
+    }
+
+    function renderBotToken(d) {
+        const box = document.getElementById('bottoken-status');
+        if (!box) return;
+        botTokenBotId = d.bot_id;
+        const who = d.username ? `@${esc(d.username)} (id ${esc(d.bot_id)})` : `id ${esc(d.bot_id ?? '—')}`;
+        const lines = [`<div class="bottoken-line">Бот: ${who}</div>`];
+        if (d.token_status === 'ok') {
+            lines.push('<div class="bottoken-line ok">✅ Telegram принимает текущий токен</div>');
+        } else if (d.token_status === 'rejected') {
+            lines.push(`<div class="bottoken-line err">❌ Telegram не принимает текущий токен (${esc(d.token_detail)}) — отозван? Вставь новый.</div>`);
+        } else {
+            lines.push(`<div class="bottoken-line warn">⚠️ Telegram сейчас не отвечает (${esc(d.token_detail)})</div>`);
+        }
+        if (d.source === 'dashboard') {
+            const when = String(d.changed_at || '').replace('T', ' ').replace(/:\d\dZ$/, ' UTC');
+            lines.push(`<div class="bottoken-line">Токен задан здесь ${esc(when)} (админ ${esc(d.changed_by || '?')}); в .env на entry — прежний</div>`);
+        } else {
+            lines.push('<div class="bottoken-line">Токен из .env</div>');
+        }
+        lines.push(d.sub_secret_pinned
+            ? '<div class="bottoken-line ok">🔒 Ссылки подписок от токена не зависят</div>'
+            : '<div class="bottoken-line err">⚠️ Секрет ссылок подписок не закреплён — замена заблокирована (смотри лог бота)</div>');
+        if (d.plain_hop) {
+            lines.push('<div class="bottoken-line warn">⚠️ От exit до бота запрос идёт по HTTP без TLS. Токен шифруется в этом окне: подслушать его там нельзя, подменить страницу — можно.</div>');
+        }
+        if (d.restarting) lines.push('<div class="bottoken-line">⏳ Бот перезапускается…</div>');
+        box.innerHTML = lines.join('');
+
+        const linkBox = document.getElementById('bottoken-link');
+        if (linkBox) {
+            if (d.link && inMiniAppOnly()) {
+                linkBox.innerHTML = 'Ты в Mini App: после Revoke заново он не откроется, пока токен не заменён. '
+                    + 'Не закрывай окно — или открой дашборд <a href="#" id="bottoken-open-link">по ссылке</a> (живёт час).';
+                linkBox.classList.remove('hidden');
+                document.getElementById('bottoken-open-link').addEventListener('click', ev => {
+                    ev.preventDefault();
+                    if (window.Telegram && Telegram.WebApp && Telegram.WebApp.openLink) {
+                        Telegram.WebApp.openLink(d.link);
+                    } else {
+                        window.open(d.link, '_blank', 'noopener');
+                    }
+                });
+            } else {
+                linkBox.classList.add('hidden');
+            }
+        }
+    }
+
+    function bytesToHex(bytes) {
+        return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
+    }
+
+    function bigToBytes(n, len) {
+        const hex = n.toString(16).padStart(len * 2, '0');
+        if (hex.length > len * 2) throw new Error('число длиннее группы');
+        const out = new Uint8Array(len);
+        for (let i = 0; i < len; i++) out[i] = parseInt(hex.substr(i * 2, 2), 16);
+        return out;
+    }
+
+    function modPow(base, exp, mod) {
+        let result = 1n;
+        base %= mod;
+        while (exp > 0n) {
+            if (exp & 1n) result = (result * base) % mod;
+            base = (base * base) % mod;
+            exp >>= 1n;
+        }
+        return result;
+    }
+
+    function concatBytes(...parts) {
+        const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+        let off = 0;
+        for (const p of parts) { out.set(p, off); off += p.length; }
+        return out;
+    }
+
+    function b64url(bytes) {
+        let s = '';
+        for (const b of bytes) s += String.fromCharCode(b);
+        return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    }
+
+    async function hmacSign(keyBytes, data) {
+        const key = await crypto.subtle.importKey(
+            'raw', keyBytes, {name: 'HMAC', hash: 'SHA-256'}, false, ['sign']);
+        return new Uint8Array(await crypto.subtle.sign('HMAC', key, data));
+    }
+
+    async function sealBotToken(challenge, token) {
+        if (!window.crypto || !crypto.subtle) {
+            throw new Error('в этом окне нет WebCrypto — открой дашборд по https');
+        }
+        if (challenge.group !== 'ffdhe2048') throw new Error('неизвестная группа ' + challenge.group);
+        const B = BigInt('0x' + challenge.B);
+        if (B <= 1n || B >= FFDHE2048_P - 1n) throw new Error('плохой ключ от бота');
+        let a = 0n;
+        while (a <= 1n) a = BigInt('0x' + bytesToHex(crypto.getRandomValues(new Uint8Array(32))));
+        const A = modPow(2n, a, FFDHE2048_P);
+        const shared = modPow(B, a, FFDHE2048_P);
+        const enc = new TextEncoder();
+        const label = enc.encode(ENVELOPE_LABEL);
+        const id = enc.encode(challenge.id);
+        const aBytes = bigToBytes(A, 256);
+        const ikm = await crypto.subtle.importKey('raw', bigToBytes(shared, 256), 'HKDF', false, ['deriveBits']);
+        const okm = new Uint8Array(await crypto.subtle.deriveBits({
+            name: 'HKDF', hash: 'SHA-256', salt: id,
+            info: concatBytes(label, aBytes, bigToBytes(B, 256)),
+        }, ikm, 512));
+        const plain = enc.encode(token);
+        let stream = new Uint8Array(0);
+        for (let i = 0; stream.length < plain.length; i++) {
+            const counter = new Uint8Array([(i >>> 24) & 255, (i >>> 16) & 255, (i >>> 8) & 255, i & 255]);
+            stream = concatBytes(stream, await hmacSign(okm.slice(0, 32), counter));
+        }
+        const ct = plain.map((b, i) => b ^ stream[i]);
+        const tag = await hmacSign(okm.slice(32), concatBytes(label, id, aBytes, ct));
+        return {id: challenge.id, A: A.toString(16), ct: b64url(ct), tag: b64url(tag)};
+    }
+
+    function setBotTokenResult(text, kind) {
+        const el = document.getElementById('bottoken-result');
+        if (!el) return;
+        el.textContent = text;
+        el.className = 'plans-status' + (kind ? ' ' + kind : '');
+    }
+
+    function applyBotToken() {
+        const input = document.getElementById('bottoken-input');
+        const token = (input.value || '').trim();
+        const m = BOT_TOKEN_RE.exec(token);
+        if (!m) {
+            setBotTokenResult('⚠️ Это не токен бота: он выглядит как 123456789:AAE…', 'err');
+            return;
+        }
+        if (botTokenBotId != null && String(botTokenBotId) !== m[1]) {
+            setBotTokenResult(`⚠️ Это токен другого бота (id ${m[1]}), а этот — id ${botTokenBotId}`, 'err');
+            return;
+        }
+        showModal('Заменить токен бота?',
+            '<p>Бот проверит токен в Telegram и перезапустится на нём (~15 с).</p>'
+            + '<p>Ссылки подписок и ключи юзеров не меняются.</p>',
+            () => submitBotToken(token));
+    }
+
+    async function submitBotToken(token) {
+        const input = document.getElementById('bottoken-input');
+        const btn = document.getElementById('bottoken-apply');
+        btn.disabled = true;
+        try {
+            setBotTokenResult('шифрую…');
+            const challenge = await apiPost('/api/admin/bot_token/challenge', {});
+            const envelope = await sealBotToken(challenge, token);
+            setBotTokenResult('проверяю токен в Telegram…');
+            const res = await fetch(apiUrl('/api/admin/bot_token/apply'), {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(envelope),
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok || !data.ok) {
+                setBotTokenResult('⚠️ ' + (data.message || data.error || `HTTP ${res.status}`), 'err');
+                return;
+            }
+            input.value = '';
+            // The new process checks links signed with the new token only.
+            state.adminToken = data.admin_token;
+            try {
+                const url = new URL(window.location.href);
+                url.searchParams.set('admin_token', data.admin_token);
+                history.replaceState(null, '', url.toString());
+            } catch (e) { /* the page still holds the token in state */ }
+            setBotTokenResult('✅ Токен принят, бот перезапускается…', 'ok');
+            await waitForBotTokenRestart();
+        } catch (e) {
+            setBotTokenResult('⚠️ ' + e.message, 'err');
+        } finally {
+            btn.disabled = false;
+        }
+    }
+
+    async function waitForBotTokenRestart() {
+        const deadline = Date.now() + BOT_TOKEN_WAIT_MS;
+        while (Date.now() < deadline) {
+            await new Promise(r => setTimeout(r, 2000));
+            let d;
+            try {
+                d = await apiFetch('/api/admin/bot_token');
+            } catch (e) {
+                continue;  // the old process says 401 to the new link, a restart says nothing
+            }
+            if (d.source === 'dashboard' && !d.restarting) {
+                renderBotToken(d);
+                setBotTokenResult('✅ Бот работает на новом токене', 'ok');
+                return;
+            }
+        }
+        setBotTokenResult('⚠️ Бот не ответил за 2 минуты — проверь /health и лог бота', 'err');
+    }
+
+    function setupBotTokenHandlers() {
+        const apply = document.getElementById('bottoken-apply');
+        if (apply) apply.addEventListener('click', applyBotToken);
+        const reload = document.getElementById('bottoken-reload');
+        if (reload) reload.addEventListener('click', fetchBotToken);
     }
 
     // ==================== Reminders (settings + manual send) ====================

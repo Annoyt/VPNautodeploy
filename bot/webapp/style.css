@@ -776,6 +776,11 @@ textarea.ktext-input { resize: vertical; min-height: 36px; }
     padding: 2px 8px;
     border-radius: 999px;
 }
+.bottoken-status { display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; }
+.bottoken-line { font-size: 12px; color: var(--text-secondary); line-height: 1.4; }
+.bottoken-line.ok { color: #6fc26f; }
+.bottoken-line.warn { color: #e0b252; }
+.bottoken-line.err { color: #ff6b6b; }
 .reminders-manual { display: flex; flex-direction: column; gap: 8px; }
 .manual-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .manual-row .status-filter, .manual-row .search-input { flex: 1; min-width: 0; }

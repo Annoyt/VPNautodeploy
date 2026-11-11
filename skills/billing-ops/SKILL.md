@@ -52,9 +52,9 @@ Show the user's current state (SELECT) and get an OK first. If a `subscriptions`
 Prefer the bot's REST action (updates bot DB **and** x-ui on exit, notifies the user):
 ```sh
 TOKEN=$($DC exec -T vpn-bot python3 -c "
-import os
+from bot.config import Settings
 from bot.utils.admin_token import make_admin_token
-print(make_admin_token(os.environ['BOT_TOKEN'], '<super-admin-id>'))
+print(make_admin_token(Settings().BOT_TOKEN, '<super-admin-id>'))
 ")
 curl -s -X POST "http://127.0.0.1:8080/api/admin/users/<id>/action?admin_token=$TOKEN" \
     -H 'Content-Type: application/json' -d '{"action":"grant_100gb"}'

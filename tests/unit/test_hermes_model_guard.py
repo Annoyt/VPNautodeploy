@@ -9,6 +9,7 @@ is missing" and screams.
 """
 
 import copy
+import hashlib
 import importlib.util
 import json
 import logging
@@ -507,6 +508,7 @@ class TestRedact:
 
     def test_build_io_registers_key_token_and_proxies(self, tmp_path, monkeypatch):
         monkeypatch.setattr(guard, '_SECRETS', [])
+        monkeypatch.setattr(guard, 'BOT_TOKEN_OVERRIDE', str(tmp_path / 'no-override.json'))
         (tmp_path / 'h.env').write_text(f'OPENROUTER_API_KEY={SECRET}\n'
                                         'HTTPS_PROXY=http://u:pw@px:1\n')
         (tmp_path / 'b.env').write_text(f'BOT_TOKEN={TOKEN}\nFORUM_GROUP_ID=-100\n'
@@ -1324,3 +1326,58 @@ class TestUsageMessageNamesTheSideTasks:
         plan = guard.decide(aux_config(), aux_index(), 0.0100, 0.0200)
         n = next(n for n in plan.notifications if n.key == 'usage_grew')
         assert 'НЕ закреплён' not in n.detail
+
+
+# ---------------------------------------------------------------------------
+# The token the bot's dashboard set (Settings → «Токен бота»)
+# ---------------------------------------------------------------------------
+
+class TestBotTokenOverride:
+    """The guard repeats bot/config/secret_store.py's rule (it must not
+    import the bot's code): both must pick the same token from the same file."""
+
+    OLD = '7012345678:AAE' + 'o' * 32
+    NEW = '7012345678:AAE' + 'n' * 32
+
+    def cases(self):
+        sha = lambda t: hashlib.sha256(t.encode()).hexdigest()  # noqa: E731
+        return {
+            'applies': json.dumps({'token': self.NEW, 'env_sha256': sha(self.OLD)}),
+            'env_edited_since': json.dumps({'token': self.NEW, 'env_sha256': sha('other')}),
+            'bad_token': json.dumps({'token': 'nope', 'env_sha256': sha(self.OLD)}),
+            'bad_sha': json.dumps({'token': self.NEW, 'env_sha256': 42}),
+            'not_json': '{broken',
+            'not_an_object': '[1, 2]',
+            'missing': None,
+        }
+
+    def test_guard_and_bot_pick_the_same_token(self, tmp_path):
+        from bot.config import secret_store
+        for name, content in self.cases().items():
+            data = tmp_path / name
+            (data / 'secrets').mkdir(parents=True)
+            path = data / 'secrets' / 'bot_token.json'
+            if content is not None:
+                path.write_text(content)
+            for env in (self.OLD, '', None):
+                bot = secret_store.effective_bot_token(env, str(data))[0] or None
+                assert (guard.effective_bot_token(env, str(path)) or None) == bot, (name, env)
+        applies = tmp_path / 'applies' / 'secrets' / 'bot_token.json'
+        assert guard.effective_bot_token(self.OLD, str(applies)) == self.NEW
+
+    def test_build_io_sends_with_the_dashboard_token(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(guard, '_SECRETS', [])
+        (tmp_path / 'h.env').write_text(f'OPENROUTER_API_KEY={SECRET}\n')
+        (tmp_path / 'b.env').write_text(f'BOT_TOKEN={self.OLD}\nFORUM_GROUP_ID=-100\nTOPIC_AI=7\n')
+        override = tmp_path / 'bot_token.json'
+        override.write_text(json.dumps({
+            'token': self.NEW, 'env_sha256': hashlib.sha256(self.OLD.encode()).hexdigest()}))
+        io = guard.build_io(str(tmp_path / 'h.env'), str(tmp_path / 'b.env'), str(override))
+        assert io.bot_token == self.NEW
+        assert self.NEW in guard._SECRETS and self.OLD in guard._SECRETS
+        assert guard.redact(f'https://api.telegram.org/bot{self.NEW}/sendMessage') == \
+            'https://api.telegram.org/bot***/sendMessage'
+
+    def test_default_path_is_the_bot_volume(self):
+        assert guard.BOT_TOKEN_OVERRIDE == (
+            '/var/lib/docker/volumes/vpn-bot_vpn-bot-data/_data/secrets/bot_token.json')

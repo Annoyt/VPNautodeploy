@@ -3,6 +3,8 @@
 import os
 from typing import Optional
 
+from bot.config.secret_store import data_dir_of, effective_bot_token, read_sub_secret
+
 
 class Settings:
     """Application settings loaded from environment"""
@@ -40,6 +42,18 @@ class Settings:
             
         # Database
         self.DB_PATH: str = os.getenv('DB_PATH', '/etc/cascade-vpn/bot.db')
+
+        # The token the bot runs on, and the key of the /sub links. The
+        # dashboard can replace .env's token (Settings → «Токен бота»); its
+        # token wins while .env still holds the value it replaced. The links
+        # are signed with a key pinned at the first start, not with the bot
+        # token (bot/config/secret_store.py).
+        data_dir = data_dir_of(self.DB_PATH)
+        self.BOT_TOKEN_ENV: str = self.BOT_TOKEN
+        self.BOT_TOKEN, self.BOT_TOKEN_SOURCE, _ = effective_bot_token(
+            self.BOT_TOKEN_ENV, data_dir)
+        self.SUB_TOKEN_SECRET: str = read_sub_secret(data_dir)[1] or ''
+
         # Auto-detect correct X-UI DB path: prefer Docker volume over stale bind mount
         default_xui_db = '/opt/3x-ui/db/x-ui.db'
         docker_volume_db = '/var/lib/docker/volumes/vpn-bot_3xui-data/_data/x-ui.db'

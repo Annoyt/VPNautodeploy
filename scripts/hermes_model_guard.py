@@ -62,8 +62,9 @@ This oneshot (systemd timer, every 30 min) closes that gap. In order:
      source.
 
 Notifications go to the forum topic TOPIC_AI in FORUM_GROUP_ID with
-BOT_TOKEN from /opt/vpn-bot/.env, through that file's HTTPS_PROXY
-(api.telegram.org is RKN-blocked from entry). Never to the admin's PM —
+BOT_TOKEN from /opt/vpn-bot/.env — or the token the bot's dashboard set,
+while .env still holds the one it replaced (BOT_TOKEN_OVERRIDE) — through
+that file's HTTPS_PROXY (api.telegram.org is RKN-blocked from entry). Never to the admin's PM —
 operator rule: while the group is alive, admins are told in topics.
 The same notification key is not repeated within 6 h (state.json).
 
@@ -104,6 +105,7 @@ import html
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -118,6 +120,9 @@ OPENROUTER_BASE = "https://openrouter.ai/api/v1"
 HERMES_ENV = "/root/.hermes/.env"
 HERMES_CONFIG = "/root/.hermes/config.yaml"
 BOT_ENV = "/opt/vpn-bot/.env"
+# The token the bot's dashboard set (Settings → «Токен бота»), on the bot's
+# data volume; see effective_bot_token.
+BOT_TOKEN_OVERRIDE = "/var/lib/docker/volumes/vpn-bot_vpn-bot-data/_data/secrets/bot_token.json"
 STATE_DIR = "/var/lib/hermes-guard"
 HERMES_UNIT = "hermes-api.service"
 
@@ -238,6 +243,37 @@ def parse_env_file(path: str, keys) -> Dict[str, str]:
             values[key] = value
     logger.debug("read %d/%d keys from %s", len(values), len(wanted), path)
     return values
+
+
+_BOT_TOKEN_RE = re.compile(r"^([0-9]{5,15}):[A-Za-z0-9_-]{30,64}$")
+
+
+def effective_bot_token(env_token: Optional[str],
+                        override_path: Optional[str] = None) -> Optional[str]:
+    """The token the bot runs on: the dashboard's while .env still holds
+    the value it replaced (the file records that value's sha256), else .env's.
+
+    MIRROR of bot/config/secret_store.py ``effective_bot_token``: this file
+    runs as root from /usr/local/bin and must not import the bot's code,
+    which the deploy account can change. Change one, change the other —
+    tests/unit/test_hermes_model_guard.py runs both on the same files.
+    """
+    try:
+        with open(override_path or BOT_TOKEN_OVERRIDE, encoding="utf-8") as fh:
+            rec = json.load(fh)
+    except FileNotFoundError:
+        return env_token
+    except (OSError, ValueError) as e:
+        logger.warning("bot token from the dashboard unreadable (%s) — using .env's",
+                       type(e).__name__)
+        return env_token
+    if not isinstance(rec, dict):
+        return env_token
+    token = rec.get("token")
+    env_sha = hashlib.sha256((env_token or "").encode("utf-8")).hexdigest()
+    if isinstance(token, str) and _BOT_TOKEN_RE.match(token) and rec.get("env_sha256") == env_sha:
+        return token
+    return env_token
 
 
 # --------------------------------------------------------------------------
@@ -1030,18 +1066,20 @@ def sanitize_models_index(index: Optional[Dict[str, dict]]) -> Optional[Dict[str
     return index
 
 
-def build_io(hermes_env: str, bot_env: str) -> GuardIO:
+def build_io(hermes_env: str, bot_env: str,
+             bot_token_override: Optional[str] = None) -> GuardIO:
     h = parse_env_file(hermes_env, ("OPENROUTER_API_KEY", "HTTPS_PROXY", "https_proxy"))
     api_key = h.get("OPENROUTER_API_KEY")
     if not api_key:
         raise GuardError(f"OPENROUTER_API_KEY missing in {hermes_env}")
     or_proxy = h.get("HTTPS_PROXY") or h.get("https_proxy") or None
     b = parse_env_file(bot_env, ("BOT_TOKEN", "FORUM_GROUP_ID", "TOPIC_AI", "HTTPS_PROXY"))
-    for v in (api_key, or_proxy, b.get("BOT_TOKEN"), b.get("HTTPS_PROXY")):
+    bot_token = effective_bot_token(b.get("BOT_TOKEN"), bot_token_override)
+    for v in (api_key, or_proxy, b.get("BOT_TOKEN"), bot_token, b.get("HTTPS_PROXY")):
         register_secret(v)
-    if not b.get("BOT_TOKEN") or not b.get("FORUM_GROUP_ID"):
+    if not bot_token or not b.get("FORUM_GROUP_ID"):
         logger.warning("BOT_TOKEN/FORUM_GROUP_ID missing in %s — notifications disabled", bot_env)
-    return GuardIO(api_key, or_proxy, b.get("BOT_TOKEN"), b.get("FORUM_GROUP_ID"),
+    return GuardIO(api_key, or_proxy, bot_token, b.get("FORUM_GROUP_ID"),
                    b.get("TOPIC_AI"), b.get("HTTPS_PROXY") or None)
 
 

@@ -12,7 +12,7 @@ live on **exit** (`ssh exit-node`, host `<exit-hostname>`, panel `:2026`, xray `
 → forwarded to exit `:443` → xray egresses. Keys issued OK but user can't connect ⇒ suspect entry
 ingress/routing or xray on exit.
 
-Never `cat` `/opt/vpn-bot/.env` or any SSH key — use them, don't print them.
+Never `cat` `/opt/vpn-bot/.env`, the bot's `/var/lib/vpn-bot/secrets/` or any SSH key — use them, don't print them.
 
 # Standard diagnostics
 

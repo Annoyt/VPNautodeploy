@@ -12,10 +12,13 @@ ECH toggle in Hiddify Config Options — the subscription closes that
 gap automatically for users who pasted the subscription URL but
 never touched the toggle.
 
-The token is a deterministic HMAC of the user's UUID with BOT_TOKEN
-as the key. Stable, unguessable without BOT_TOKEN, doesn't require a
-DB column. Lookup is a linear scan over users which is fine at our
-scale; a token-cache can be added later if traffic warrants.
+The token is a deterministic HMAC of the user's UUID. Its key is the
+subscription secret pinned at the first start (bot/config/secret_store.py),
+which is the BOT_TOKEN of that start: so the links are the same as they
+always were, and the bot token can change without changing them. Stable,
+unguessable without the key, doesn't require a DB column. Lookup is a
+linear scan over users which is fine at our scale; a token-cache can be
+added later if traffic warrants.
 """
 
 import base64
@@ -28,6 +31,7 @@ from types import SimpleNamespace
 from typing import Iterable, Optional, Tuple, List, Any
 
 from bot.config import Settings
+from bot.config.secret_store import sub_token_key
 from bot.services.fallback_node import (
     FALLBACK_ALLOWED_STATUSES,
     FallbackNodeService,
@@ -71,13 +75,15 @@ class SubscriptionService:
     # ---------- Token derivation / lookup ----------
 
     def derive_token(self, uuid: str) -> str:
-        """``HMAC-SHA256(BOT_TOKEN, uuid).hex()[:32]``.
+        """``HMAC-SHA256(key, uuid).hex()[:32]``.
 
         Deterministic so a user can be DM'd the same URL after a bot
-        restart without re-saving anything. The BOT_TOKEN secret is
-        already on the host, no extra config plumbing.
+        restart without re-saving anything. ``key`` is the pinned
+        subscription secret, or BOT_TOKEN where none is pinned
+        (``secret_store.sub_token_key``): never the bot token of the day,
+        which the dashboard can change.
         """
-        secret = (self.config.BOT_TOKEN or '').encode()
+        secret = sub_token_key(self.config).encode()
         return hmac.new(
             secret, uuid.encode(), hashlib.sha256,
         ).hexdigest()[: self.TOKEN_LEN]

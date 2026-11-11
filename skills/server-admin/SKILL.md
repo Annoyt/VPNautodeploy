@@ -12,7 +12,7 @@ You run on the **entry node** (`<entry-host>`), as root. Local: the `vpn-bot` co
 holds the 3x-ui panel `:2026` and xray `:443`. Shorthand used below:
 `DC="docker compose -f /opt/vpn-bot/docker-compose.yml -f /opt/vpn-bot/docker-compose.entry.yml"`.
 
-**Never print** `/opt/vpn-bot/.env`, `~/.hermes/.env`, or `/root/.ssh/*` private keys.
+**Never print** `/opt/vpn-bot/.env`, `~/.hermes/.env`, the bot's `/var/lib/vpn-bot/secrets/`, or `/root/.ssh/*` private keys.
 
 # Deploy reality — no git push from entry
 
