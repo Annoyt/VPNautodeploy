@@ -204,12 +204,15 @@ OK3 = {'a': 'ok', 'b': 'ok', 'c': 'ok'}
 NO_EXIT = {'a': 'ok', 'b': 'ok', 'c': 'FAILED: ssh: connect to host exit-node: timed out'}
 
 
-def _report(db, *, minutes_ago=1, exit_code=1, findings=(), layers=OK3):
+def _report(db, *, minutes_ago=1, exit_code=1, findings=(), layers=OK3, unjudged=None):
     ts = (datetime.utcnow() - timedelta(minutes=minutes_ago)).isoformat()
+    body = {'findings': list(findings), 'layers': layers}
+    if unjudged is not None:
+        body['unjudged'] = list(unjudged)
     with db._connect() as conn:
         conn.execute("INSERT INTO healthcheck_reports (ts, exit_code, verdict, report_json) "
                      "VALUES (?, ?, 'v', ?)",
-                     (ts, exit_code, json.dumps({'findings': list(findings), 'layers': layers})))
+                     (ts, exit_code, json.dumps(body)))
         conn.commit()
 
 
@@ -296,6 +299,27 @@ class TestHealthcheckAlerts:
         assert not any('Восстановилось' in t for t in _texts(mgr))
         assert mgr._state['healthcheck:reality_dest_cert'].open
         assert _judged(db, 'healthcheck:entry_dnat:hy2')           # layer B looked
+
+    def test_a_key_the_run_could_not_look_at_keeps_its_alert(self, db):
+        # the exit guard (AGENTS.md §52): exit looked, but the hysteria config
+        # could not be read this run — the open finding is not "fixed"
+        hy = {'key': 'hy2_acl:hysteria', 'severity': 'critical', 'layer': 'c',
+              'title': 'hysteria: нет ACL', 'next': 'acl'}
+        mgr = _manager(db)
+        _report(db, findings=[hy])
+        mgr.run_once()
+        _report(db, minutes_ago=0, findings=[], unjudged=['hy2_acl:hysteria'])
+        from bot.services.alert_manager import RECOVERY_TICKS
+        for _ in range(RECOVERY_TICKS + 1):
+            mgr.run_once()
+        assert not any('Восстановилось' in t for t in _texts(mgr))
+        assert mgr._state['healthcheck:hy2_acl:hysteria'].open
+        assert not _judged(db, 'healthcheck:hy2_acl:hysteria')
+        assert _judged(db, 'healthcheck:reality_dest_cert')          # the rest of layer C was seen
+        _report(db, minutes_ago=0, findings=[])                      # read again: nothing found
+        for _ in range(RECOVERY_TICKS):
+            mgr.run_once()
+        assert any('Восстановилось' in t and 'нет ACL' in t for t in _texts(mgr))
 
     def test_one_blind_run_is_not_a_pattern(self, db):
         for m, lay in ((31, OK3), (16, OK3), (1, NO_EXIT)):
