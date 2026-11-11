@@ -1049,10 +1049,11 @@ class MyKeyAnswerHandler(BaseCallbackHandler):
 
     @classmethod
     def get_auto_demotions(cls, db, asn: Optional[str] = None) -> set:
-        """Protocols DPIMonitor currently holds at the end of the cascade:
-        the union of the global set and this ASN's set from
-        ``app_settings.cascade_auto`` (``{"global": {"ws": {...}},
-        "asn": {"AS31133": {"reality": {...}}}}``).
+        """Protocols held at the end of the cascade: the union of the global
+        set and this ASN's set from DPIMonitor's ``app_settings.cascade_auto``
+        (``{"global": {"ws": {...}}, "asn": {"AS31133": {"reality": {...}}}}``)
+        and from the operator's live ``/cascade demote`` entries
+        (``cascade_manual``, IMPROVEMENT_PLAN F, C6).
 
         Tolerant by design — bad JSON, a hand-edited blob, an unknown
         protocol name or a Mock db all collapse to "nothing demoted":
@@ -1065,17 +1066,17 @@ class MyKeyAnswerHandler(BaseCallbackHandler):
             raw = db.get_setting(cls.AUTO_SETTING_KEY) if db else None
         except Exception as e:          # a db double whose get_setting raises
             logger.warning(f"cascade_auto read failed: {e}")
-            return set()
+            return cls._manual_demotions(db, asn)
         if not isinstance(raw, str) or not raw.strip():
-            return set()
+            return cls._manual_demotions(db, asn)
         try:
             import json
             parsed = json.loads(raw)
         except (ValueError, TypeError) as e:
             logger.warning(f"bad cascade_auto JSON: {e}")
-            return set()
+            return cls._manual_demotions(db, asn)
         if not isinstance(parsed, dict):
-            return set()
+            return cls._manual_demotions(db, asn)
         out = set()
         global_part = parsed.get('global')
         if isinstance(global_part, dict):
@@ -1088,7 +1089,20 @@ class MyKeyAnswerHandler(BaseCallbackHandler):
                 if isinstance(mine, dict):
                     out.update(p for p in mine
                                if isinstance(p, str) and p in cls.PROTOCOL_METHOD_MAP)
-        return out
+        return out | cls._manual_demotions(db, asn)
+
+    @classmethod
+    def _manual_demotions(cls, db, asn: Optional[str]) -> set:
+        """The operator's ``/cascade demote`` entries (``cascade_manual``,
+        IMPROVEMENT_PLAN F, C6) — stored apart from the monitor's so it does
+        not "restore" them, applied the same way. Tolerant like the above."""
+        try:
+            from bot.services import cascade_manual
+            return {p for p in cascade_manual.demoted_for(db, asn)
+                    if p in cls.PROTOCOL_METHOD_MAP}
+        except Exception as e:
+            logger.warning(f"cascade_manual read failed: {e}")
+            return set()
 
     @classmethod
     def get_cascade_order(

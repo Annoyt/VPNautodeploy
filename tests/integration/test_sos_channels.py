@@ -247,7 +247,10 @@ class TestEmergencySub:
         svc = SubscriptionService(config)
         if fmt == 'clash':
             return svc.build_clash_config(user, cascade, lockdown=lockdown)
-        return json.dumps(svc.build_singbox_config(user, cascade, lockdown=lockdown))
+        # _get sends a Hiddify User-Agent: its profile carries the §hide§
+        # marks (IMPROVEMENT_PLAN F, C2)
+        return json.dumps(svc.build_singbox_config(user, cascade, lockdown=lockdown,
+                                                   hiddify=True))
 
     def test_singbox_emergency_is_ws_first_with_dns_through_the_tunnel(self, server):
         cfg = json.loads(self._get(server, {'emergency': '1'}).text)

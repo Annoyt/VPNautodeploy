@@ -285,7 +285,8 @@ class TestOverview:
 
     def test_footer_points_at_the_subcommands(self, handler):
         text = text_of(handler)
-        assert '/cascade AS31133 · /cascade reset · /cascade off|on' in text
+        assert ('/cascade AS31133 · /cascade demote|restore · /cascade reset · '
+                '/cascade off|on') in text
 
 
 class TestAsnView:
@@ -374,7 +375,7 @@ class TestReset:
             text = text_of(handler, 'reset')
         assert json.loads(db.get_setting(CASCADE_AUTO_KEY)) == {}
         assert json.loads(db.get_setting(DPI_MONITOR_STATE_KEY)) == {}
-        assert '✅ <b>Авто-понижения сняты</b>' in text
+        assert '✅ <b>Понижения сняты</b>' in text
         assert 'снято: ws (глобально), AS31133: reality' in text
         (admin_id, action, target, details), = admin_actions(db)
         assert (admin_id, action, target) == ('1652899', 'cascade_auto_reset', None)

@@ -141,13 +141,13 @@ class TestSingboxCalls:
         calls, _ = _singbox_calls(demoted=demoted)
         assert calls['outbounds'] == _names('hy2', 'reality', 'de')
 
-    def test_cascade_groups_are_untouched_by_demotion(self):
-        # package C territory: here only the calls group reorders
+    def test_the_manual_pick_is_untouched_by_demotion(self):
+        # the proxy selector keeps every server; `auto` drops the demoted
+        # ones since package C (tests/integration/test_demotion_acts.py)
         _, plain = _singbox_calls()
         _, demoted = _singbox_calls(demoted=frozenset({'hy2'}))
         pick = lambda cfg, tag: next(o for o in cfg['outbounds'] if o['tag'] == tag)
-        for tag in ('proxy', 'auto'):
-            assert pick(plain, tag) == pick(demoted, tag)
+        assert pick(plain, 'proxy') == pick(demoted, 'proxy')
 
     def test_udp_still_routes_to_calls(self):
         _, cfg = _singbox_calls()
@@ -322,7 +322,10 @@ class TestKit:
         clash = json.loads(files[sos.KIT_YAML_NAME])
         calls = next(o for o in singbox['outbounds'] if o['tag'] == 'calls')
         group = next(g for g in clash['proxy-groups'] if g['name'] == 'Calls')
-        assert calls['outbounds'] == group['proxies'] == _names('reality', 'de', 'hy2')
+        # the .json is Hiddify's (package C): its demoted servers carry the marker
+        hide = f' {SubscriptionService.HIDE_MARKER}'
+        assert [t.replace(hide, '') for t in calls['outbounds']] == group['proxies'] \
+            == _names('reality', 'de', 'hy2')
 
 
 # ----------------------------------------------------------------- A4 --------
