@@ -148,22 +148,18 @@ RULE_TITLES_RU = {
     RULE_USER_REPORTS_ASN: 'жалобы «не работает» по ASN',
 }
 
-# ---- probe thresholds — MIRROR of alert_manager.build_default_checks -------
-# Those constants are locals of the check factory (not importable), so they
-# are copied here verbatim. Keep the two blocks in step: the pager and the
-# monitor must agree on what "dark" and "degraded" mean, or the operator
-# gets paged about a protocol the cascade still hands out (or vice versa).
-PROBE_RUNS = 3              # consecutive probe runs that must be all-bad
-try:
-    from bot.services.health_checker import HealthChecker as _HC
-    PROBE_DOMAINS = len(_HC.TARGET_DOMAINS)   # rows per protocol per run
-except Exception:            # the monitor must not die with the checker import
-    PROBE_DOMAINS = 10
-PROBE_MIN_SAMPLES = 15      # ignore thin windows (partial run, new deploy)
-PROBE_WINDOW_H = 3          # only look at recent rows
-PROBE_STALE_MIN = 45        # 3 missed runs at the 15-min cadence
-PROBE_DEGRADED_OK_RATIO = 0.25   # below a quarter of the 7/10 norm…
-PROBE_DEGRADED_MIN_SAMPLES = 25  # …sustained over ~3 runs, not one dip
+# ---- probe thresholds — bot/services/probe_rules.py (IMPROVEMENT_PLAN F, B5) -
+# Until 2026-11 this block was a hand-kept copy of the pager's numbers; the
+# pager, this monitor, /protocols and the agent's script now read one module,
+# so they cannot disagree about what "dark" and "degraded" mean.
+from bot.services import probe_rules as _pr
+PROBE_RUNS = _pr.PROBE_RUNS
+PROBE_DOMAINS = _pr.PROBE_DOMAINS
+PROBE_MIN_SAMPLES = _pr.PROBE_MIN_SAMPLES
+PROBE_WINDOW_H = _pr.PROBE_WINDOW_H
+PROBE_STALE_MIN = _pr.PROBE_STALE_MIN
+PROBE_DEGRADED_OK_RATIO = _pr.PROBE_DEGRADED_OK_RATIO
+PROBE_DEGRADED_MIN_SAMPLES = _pr.PROBE_DEGRADED_MIN_SAMPLES
 
 # ---- R6: a protocol dark at an operator, as the users' clients see it ------
 # IMPROVEMENT_PLAN E8. The FlClash profile health-checks every protocol it
@@ -694,7 +690,13 @@ class DPIMonitor:
             return out
         cutoff = (now - timedelta(hours=PROBE_WINDOW_H)).isoformat()
         limit = PROBE_RUNS * PROBE_DOMAINS
-        known = self._known_protocols()
+        # Cascade protocols only (the DE reserve is probed too but is not
+        # one), and only those the operator has switched on (B4, problem
+        # 7): a protocol nobody is handed out has nothing to demote.
+        order = conn.execute(
+            "SELECT value FROM app_settings WHERE key = 'cascade_protocol_order'"
+        ).fetchone()
+        known = self._known_protocols() - _pr.operator_disabled(order[0] if order else None)
         tags = [
             r[0] for r in conn.execute(
                 "SELECT DISTINCT outbound_tag FROM outbound_health WHERE ts >= ?",
@@ -708,22 +710,19 @@ class DPIMonitor:
                 "WHERE outbound_tag = ? AND ts >= ? ORDER BY ts DESC LIMIT ?",
                 (tag, cutoff, limit),
             ).fetchall()
-            n = len(rows)
-            if n < PROBE_MIN_SAMPLES:
+            w = _pr.judge_window(rows)
+            if w['verdict'] == _pr.VERDICT_THIN:
                 continue
             out['measured'].append(tag)
-            # Liveness = a round trip happened (same rule as the pager).
-            alive = sum(1 for st, lat in rows if lat is not None or st == 'ok')
-            ok = sum(1 for st, _lat in rows if st == 'ok')
-            if alive == 0:
+            if w['verdict'] == _pr.VERDICT_DARK:
                 out['dark'][tag] = (
-                    f"пробы {ok}/{n} за {PROBE_RUNS} прогона, ни одного живого "
+                    f"пробы {w['ok']}/{w['n']} за {PROBE_RUNS} прогона, ни одного живого "
                     f"ответа (DARK)"
                 )
-            elif n >= PROBE_DEGRADED_MIN_SAMPLES and ok / n < PROBE_DEGRADED_OK_RATIO:
+            elif w['verdict'] == _pr.VERDICT_DEGRADED:
                 out['degraded'][tag] = (
-                    f"пробы ok {ok}/{n} за {PROBE_RUNS} прогона при норме ~7/10 "
-                    f"(DEGRADED)"
+                    f"пробы ok {w['ok']}/{w['n']} за {PROBE_RUNS} прогона "
+                    f"({_pr.degraded_threshold_text()}, DEGRADED)"
                 )
         measured = out['measured']
         out['all_dark'] = (
@@ -945,12 +944,20 @@ class DPIMonitor:
                 continue
             firing.setdefault(target_key('asn', asn, head), (RULE_USER_REPORTS_ASN, ev))
 
-        def rule_active(rule: Optional[str], key: str) -> bool:
+        measured = set(probe.get('measured') or ())
+
+        def rule_active(rule: Optional[str], key: str) -> Optional[bool]:
             """Is the rule that demoted ``key`` still firing? Per-ASN rules
             are judged per ASN (R5 moves the head, so the demoted protocol
-            itself is no longer the head the rule points at)."""
+            itself is no longer the head the rule points at). None = no
+            verdict this run: a probe-demoted protocol without a judged
+            window (too few rows, no rows) is not "quiet" — until 2026-11
+            it counted as a good evaluation and came back within the hour
+            on no evidence at all (B4, problem 8)."""
             _scope, asn, proto = parse_target_key(key)
             if rule in PROBE_RULES:
+                if proto not in measured:
+                    return None
                 return proto in dark or proto in degraded
             if rule == RULE_CLIENT_DARK:
                 # Judged per (ASN, protocol): the clients name the protocol.
@@ -978,9 +985,13 @@ class DPIMonitor:
                 if rule in frozen_rules:
                     targets[key] = entry            # frozen: no data, no verdict
                     continue
+                active = rule_active(rule, key)
+                if active is None:
+                    targets[key] = entry            # no verdict: the good streak waits
+                    continue
                 entry['bad'] = 0
                 entry['rule'] = rule
-                entry['good'] = 0 if rule_active(rule, key) else int(entry.get('good') or 0) + 1
+                entry['good'] = 0 if active else int(entry.get('good') or 0) + 1
                 targets[key] = entry
                 if entry['good'] >= RESTORE_AFTER_GOOD and gap_ok(entry):
                     candidates.append((

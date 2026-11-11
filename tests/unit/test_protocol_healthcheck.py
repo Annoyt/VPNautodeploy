@@ -177,8 +177,10 @@ class TestHealthyBaseline:
 
     def test_errors_that_carry_a_latency_count_as_alive(self):
         """LIVENESS RULE: an HTTP 418 through the tunnel proves the tunnel.
-        3/10 ok with 7 latency-bearing errors is DEGRADED, not DOWN."""
-        probes = {t: {'rows': rows(n_ok=3, n_err_latency=7), 'last_alive': NOW.isoformat()}
+        2/10 ok with 8 latency-bearing errors is DEGRADED, not DOWN (the
+        pager's quarter since 2026-11, probe_rules; 3/10 was degraded under
+        the script's own 35 % before)."""
+        probes = {t: {'rows': rows(n_ok=2, n_err_latency=8), 'last_alive': NOW.isoformat()}
                   for t in hc.PROBED}
         report = hc.assess(layers(a=layer_a(probes=probes)), now=NOW)
         assert all(s == 'DEGRADED' for t, s in states_of(report).items() if t in hc.PROBED)
@@ -472,6 +474,18 @@ class TestHy2TurboProbed:
         assert report['protocols']['hy2t']['state'] == 'OK'
         assert not any('upstream' in t for t in titles(report))
         assert any(s['protocol'] == 'reality' for s in report['suspects'])
+
+    def test_exit_down_with_the_reserve_alive_is_still_one_upstream_suspect(self):
+        """The mirror of the pager's rule: the DE reserve is meant to outlive
+        exit, so it answering while every cascade protocol is dark is that
+        one upstream incident, not four inbounds (review of B, finding 5)."""
+        probes = {t: {'rows': dark_rows(), 'last_alive': NOW.isoformat()} for t in hc.PROBED}
+        probes['de'] = {'rows': rows(), 'last_alive': NOW.isoformat()}
+        report = hc.assess(layers(a=layer_a(probes=probes)), now=NOW)
+        assert report['protocols']['de']['state'] == 'OK'
+        assert len(report['suspects']) == 1
+        assert 'upstream' in report['suspects'][0]['title']
+        assert report['verdict'].startswith('ИТОГ: ВСЕ протоколы DOWN')
 
     def test_dead_probe_proxy_container_is_evidence_for_hy2t_too(self):
         report = hc.assess(layers(a=hy2t_probed_a(), b=layer_b(probe_proxy='exited')), now=NOW)

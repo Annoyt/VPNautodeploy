@@ -1,14 +1,20 @@
 """Active health checks for outbound protocols — through the REAL tunnels.
 
-Every 15 minutes the scheduler runs ``check_all_outbounds()`` which:
-1. Picks a set of representative domains (RU services, global platforms)
-2. Makes a lightweight HTTP HEAD request to each — routed through the
+Every 15 minutes the scheduler runs ``check_all_outbounds()`` which, per
+protocol:
+1. Makes a lightweight HTTP HEAD request to each of the ten targets of
+   ``probe_rules.PROBE_TARGETS``, all at once — routed through the
    probe-proxy sidecar's per-protocol HTTP proxy (sing-box with the
    actual reality/hy2/ws/stls outbounds, plus hy2t on deployments that
-   set HY2T_PORT; see scripts/gen_probe_config.py)
-3. Records latency + status in ``outbound_health`` table, one row per
+   set HY2T_PORT and the DE reserve where it is configured; see
+   scripts/gen_probe_config.py)
+2. Records latency + status in ``outbound_health`` table, one row per
    (outbound_tag, target_domain) — the tag IS the protocol short-name
-   ('hy2t' for Turbo), which is what the pager and /protocols key on.
+   ('hy2t' for Turbo, 'de' for the reserve), which is what the pager and
+   /protocols key on.
+3. Downloads ``BULK_BYTES`` through the same proxy and records it in
+   ``outbound_bulk`` (IMPROVEMENT_PLAN F, B1): a HEAD cannot show a path
+   that freezes after the first kilobytes.
 
 History note: until 2026-08-19 this probed DIRECTLY from the entry
 container and wrote one identical result under five protocol labels —
@@ -25,29 +31,20 @@ import aiohttp
 from typing import List, Dict, Optional
 from datetime import datetime
 
+from bot.services import probe_rules
+
 logger = logging.getLogger(__name__)
 
 
 class HealthChecker:
     """Active health checks for VPN outbounds."""
 
-    # Domains we probe daily. Chosen to represent categories users
-    # report issues with: RU domestic, global platforms, messaging.
-    TARGET_DOMAINS = [
-        # RU domestic (should work even when VPN is down, but we
-        # check from exit to detect RKN blocks at the border).
-        'vk.com',
-        'yandex.ru',
-        'sberbank.ru',
-        'rutube.ru',
-        # Global (confirm VPN itself is routing).
-        'youtube.com',
-        'google.com',
-        'facebook.com',
-        'telegram.org',
-        'github.com',
-        'anthropic.com',
-    ]
+    # The sites each protocol is probed against — owned by probe_rules
+    # (IMPROVEMENT_PLAN F, B5), which every reader of the rows also uses:
+    # ten targets per run is what the pager's and the monitor's sample
+    # counts are built on. Until 2026-11 vk.com and sberbank.ru sat here and
+    # never once passed through the foreign exit (418 / an untrusted CA).
+    TARGET_DOMAINS = list(probe_rules.PROBE_TARGETS)
 
     # Protocols the probe sidecar ALWAYS speaks. xhttp is deliberately
     # absent — sing-box has no XHTTP transport (see subscription.py),
@@ -75,9 +72,35 @@ class HealthChecker:
     HY2T_TAG = 'hy2t'
     HY2T_PROBE_PORT = 18085
 
-    # Request limits per check.
+    # The DE reserve node (IMPROVEMENT_PLAN F, B6): probed wherever paid
+    # users are given it (FALLBACK_NODE_HOST + FALLBACK_NODE_PBK, the same
+    # gate as FallbackNodeService.is_configured). Until 2026-11 nothing
+    # watched it, so it could be dead exactly when it was needed. The tag
+    # is probe_rules.RESERVE_TAG; the sidecar inbound comes with a
+    # regenerated probe config (gen_probe_config.py) — until then the
+    # port answers nothing and _check_protocol writes no rows for it.
+    RESERVE_TAG = probe_rules.RESERVE_TAG
+    RESERVE_PROBE_PORT = 18086
+
+    # Per-request time budget, seconds. Every request of a run starts at
+    # once (the pool holds one connection per target), so the budget is
+    # the request's own: until 2026-11 five connections served ten requests
+    # and the wait for a free one counted inside the 10 s — a path that
+    # answers in 6 s read as 2/10, i.e. "degraded" (measured locally).
     TIMEOUT_SEC = 10
-    MAX_CONCURRENT = 5
+    # https in production; a test's local forward proxy speaks plain http.
+    TARGET_SCHEME = 'https'
+
+    # Bulk probe (B1): one download per protocol per run, written to
+    # outbound_bulk, never to outbound_health (whose ten rows a run the
+    # thresholds count). A HEAD answer is a few hundred bytes; the freeze
+    # reported on Russian networks since 2025 cuts a TCP connection to
+    # foreign hosting / Cloudflare after ~16 KB, which only a body that
+    # large can show. Cloudflare's speed-test endpoint serves exactly the
+    # bytes asked for; the probe asks for twice the 64 KB the plan sets.
+    BULK_URL = 'https://speed.cloudflare.com/__down?bytes={bytes}'
+    BULK_BYTES = 128 * 1024
+    BULK_TIMEOUT_SEC = 20
 
     def __init__(self, db, config=None):
         """Initialize health checker.
@@ -108,14 +131,26 @@ class HealthChecker:
         except (TypeError, ValueError):
             return False
 
+    @staticmethod
+    def reserve_probe_enabled(config) -> bool:
+        """The DE reserve is probed where it is handed out: host and public
+        key set (FallbackNodeService.is_configured). Strings only — a Mock
+        attribute in tests is "not configured"."""
+        host = getattr(config, 'FALLBACK_NODE_HOST', '') or ''
+        pbk = getattr(config, 'FALLBACK_NODE_PBK', '') or ''
+        return isinstance(host, str) and isinstance(pbk, str) and bool(host.strip() and pbk.strip())
+
     @classmethod
     def probe_ports_for(cls, config) -> Dict[str, int]:
         """{tag: sidecar port} for THIS deployment — the four base
-        protocols plus hy2t when the config enables it. The single
-        source of truth for both the checker and gen_probe_config.py."""
+        protocols, plus hy2t when the config enables it, plus the DE
+        reserve where it is configured. The single source of truth for
+        both the checker and gen_probe_config.py."""
         ports = dict(cls.PROBE_PORTS)
         if cls.hy2t_probe_enabled(config):
             ports[cls.HY2T_TAG] = cls.HY2T_PROBE_PORT
+        if cls.reserve_probe_enabled(config):
+            ports[cls.RESERVE_TAG] = cls.RESERVE_PROBE_PORT
         return ports
 
     @classmethod
@@ -142,41 +177,98 @@ class HealthChecker:
 
         Returns a dict like:
         {
-            'reality': {'vk.com': 'ok', 'yandex.ru': 'timeout', ...},
+            'reality': {'yandex.ru': {...}, 'google.com': {...}, ...},
             'hy2': {...},
             ...
         }
         """
         results = {}
-
-        async with aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=self.TIMEOUT_SEC),
-            connector=aiohttp.TCPConnector(limit=self.MAX_CONCURRENT),
-        ) as session:
-            # Config-driven, not the class constant: hy2t is probed only
-            # where HY2T_PORT enables it (see probe_tags_for).
-            for protocol in self.protocol_tags:
-                proxy = self._proxy_url(protocol)
-                protocol_results = {}
-                tasks = [
-                    self._check_one(session, domain, proxy)
-                    for domain in self.TARGET_DOMAINS
-                ]
-                domain_statuses = await asyncio.gather(*tasks, return_exceptions=True)
-                for domain, status_obj in zip(self.TARGET_DOMAINS, domain_statuses):
-                    if isinstance(status_obj, Exception):
-                        protocol_results[domain] = {
-                            'status': 'error',
-                            'latency_ms': None,
-                            'error': str(status_obj)[:200],
-                        }
-                    else:
-                        protocol_results[domain] = status_obj
-                    # Write to DB immediately so partial failures are visible.
-                    self._write_result(protocol, domain, protocol_results[domain])
+        # Config-driven, not the class constant: hy2t is probed only where
+        # HY2T_PORT enables it, the DE reserve only where it is configured.
+        for protocol in self.protocol_tags:
+            protocol_results = await self._check_protocol(protocol)
+            if protocol_results is not None:
                 results[protocol] = protocol_results
-
         return results
+
+    async def _check_protocol(self, protocol: str) -> Optional[Dict[str, Dict]]:
+        """One run for one protocol: the HEAD probes to every target at
+        once, then the bulk download. Rows go to the db as they finish.
+
+        A connection pool of one connection per target: no request waits
+        for another to finish, so ``TIMEOUT_SEC`` is each request's own
+        budget (B1). None (and nothing written) for the DE reserve when the
+        sidecar has no inbound for it yet: every probe ``proxy_down`` means
+        the probe config predates B6 — rows saying "dark" would page about
+        a reserve that may be fine."""
+        proxy = self._proxy_url(protocol)
+        connector = aiohttp.TCPConnector(limit=len(self.TARGET_DOMAINS))
+        async with aiohttp.ClientSession(connector=connector) as session:
+            statuses = await asyncio.gather(
+                *(self._check_one(session, domain, proxy) for domain in self.TARGET_DOMAINS),
+                return_exceptions=True,
+            )
+            protocol_results = {}
+            for domain, status_obj in zip(self.TARGET_DOMAINS, statuses):
+                if isinstance(status_obj, Exception):
+                    status_obj = {
+                        'status': 'error',
+                        'latency_ms': None,
+                        'error': str(status_obj)[:200],
+                    }
+                protocol_results[domain] = status_obj
+            if (protocol == self.RESERVE_TAG
+                    and all(r['status'] == 'proxy_down' for r in protocol_results.values())):
+                logger.warning(
+                    "health_checker: the probe sidecar has no inbound for the DE "
+                    "reserve yet — regenerate it (scripts/gen_probe_config.py); "
+                    "no rows written"
+                )
+                return None
+            for domain, result in protocol_results.items():
+                self._write_result(protocol, domain, result)
+            bulk = await self._check_bulk(session, proxy)
+            self._write_bulk(protocol, bulk)
+        return protocol_results
+
+    async def _check_bulk(self, session: aiohttp.ClientSession,
+                          proxy: Optional[str]) -> Dict:
+        """Download ``BULK_BYTES`` through the protocol and count what came.
+
+        ``ok`` — every byte; ``partial`` — the transfer started and stopped
+        short (the freeze signature: the first kilobytes pass, then
+        nothing); ``timeout`` / ``error`` / ``proxy_down`` — as for HEAD."""
+        url = self.BULK_URL.format(bytes=self.BULK_BYTES)
+        start = time.time()
+        got = 0
+        try:
+            async with session.get(
+                url, proxy=proxy,
+                timeout=aiohttp.ClientTimeout(total=self.BULK_TIMEOUT_SEC),
+            ) as resp:
+                if resp.status >= 400:
+                    return {'status': 'error', 'bytes': 0,
+                            'duration_ms': int((time.time() - start) * 1000),
+                            'error': f'HTTP {resp.status}'}
+                async for chunk in resp.content.iter_chunked(16384):
+                    got += len(chunk)
+                    if got >= self.BULK_BYTES:
+                        break
+        except aiohttp.ClientProxyConnectionError as e:
+            return {'status': 'proxy_down', 'bytes': got, 'duration_ms': None,
+                    'error': str(e)[:100]}
+        except asyncio.TimeoutError:
+            return {'status': 'partial' if got else 'timeout', 'bytes': got,
+                    'duration_ms': int((time.time() - start) * 1000), 'error': 'timeout'}
+        except Exception as e:
+            return {'status': 'partial' if got else 'error', 'bytes': got,
+                    'duration_ms': int((time.time() - start) * 1000),
+                    'error': str(e)[:100]}
+        duration = int((time.time() - start) * 1000)
+        if got >= self.BULK_BYTES:
+            return {'status': 'ok', 'bytes': got, 'duration_ms': duration, 'error': None}
+        return {'status': 'partial', 'bytes': got, 'duration_ms': duration,
+                'error': 'short body'}
 
     async def _check_one(self, session: aiohttp.ClientSession, domain: str,
                          proxy: Optional[str] = None) -> Dict:
@@ -185,14 +277,16 @@ class HealthChecker:
         ``proxy_down`` means the SIDECAR was unreachable — a monitoring
         outage, not a verdict about the tunnel or the target.
         """
-        url = f'https://{domain}'
+        url = f'{self.TARGET_SCHEME}://{domain}'
         start = time.time()
         try:
             # HEAD is lighter than GET; most services support it. DNS
             # resolution happens on the far side of the tunnel (CONNECT
             # goes to the proxy), so entry-node DNS can't skew results.
-            async with session.head(url, allow_redirects=True,
-                                    proxy=proxy) as resp:
+            async with session.head(
+                url, allow_redirects=True, proxy=proxy,
+                timeout=aiohttp.ClientTimeout(total=self.TIMEOUT_SEC),
+            ) as resp:
                 latency_ms = int((time.time() - start) * 1000)
                 if resp.status < 400:
                     return {'status': 'ok', 'latency_ms': latency_ms, 'error': None}
@@ -232,39 +326,23 @@ class HealthChecker:
         except Exception as e:
             logger.error(f"health_checker: failed to write result for {protocol}/{domain}: {e}")
 
-    def get_recent_health(self, hours: int = 24) -> List[Dict]:
-        """Read recent health checks for the dashboard."""
+    def _write_bulk(self, protocol: str, result: Dict) -> None:
+        """Persist one bulk probe to outbound_bulk. Never raises."""
         try:
             with self.db._connect() as conn:
-                rows = conn.execute(
-                    """SELECT * FROM outbound_health
-                       WHERE ts > datetime('now', '-' || ? || ' hours')
-                       ORDER BY ts DESC""",
-                    (hours,),
+                conn.execute(
+                    "INSERT INTO outbound_bulk "
+                    "(ts, outbound_tag, status, bytes, duration_ms, error_msg) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        datetime.utcnow().isoformat(),
+                        protocol,
+                        result['status'],
+                        int(result.get('bytes') or 0),
+                        result.get('duration_ms'),
+                        result.get('error'),
+                    ),
                 )
-                return [dict(row) for row in rows]
+                conn.commit()
         except Exception as e:
-            logger.error(f"health_checker: failed to read recent health: {e}")
-            return []
-
-    def get_health_summary(self, hours: int = 24) -> Dict:
-        """Aggregate health by (outbound_tag, status) for the dashboard widget."""
-        try:
-            with self.db._connect() as conn:
-                rows = conn.execute(
-                    """SELECT outbound_tag, status, COUNT(*) as cnt
-                       FROM outbound_health
-                       WHERE ts > datetime('now', '-' || ? || ' hours')
-                       GROUP BY outbound_tag, status""",
-                    (hours,),
-                )
-                summary = {}
-                for row in rows:
-                    tag = row['outbound_tag']
-                    if tag not in summary:
-                        summary[tag] = {}
-                    summary[tag][row['status']] = row['cnt']
-                return summary
-        except Exception as e:
-            logger.error(f"health_checker: failed to get summary: {e}")
-            return {}
+            logger.error(f"health_checker: failed to write the bulk probe for {protocol}: {e}")

@@ -20,7 +20,10 @@ Run inside the vpn-bot container, redirect to the mounted config:
                                           # пересоздаст (спека не менялась), sing-box
                                           # читает файл только на старте
 
-Regenerate whenever protocol env (SNI/ports/keys, HY2T_PORT) changes.
+Regenerate whenever protocol env (SNI/ports/keys, HY2T_PORT, FALLBACK_NODE_*)
+changes. Since 2026-11 (IMPROVEMENT_PLAN F, B6) the sidecar also carries the
+DE reserve (:18086) wherever it is configured; this script provisions the
+probe user on the reserve's panel first.
 
 PORT TABLE = HealthChecker.probe_ports_for(config) — imported, not
 copied. Until 2026-09-05 the ports lived in two hand-synced dicts with a
@@ -42,6 +45,7 @@ sys.path.insert(0, '/app')
 
 from bot.config import Settings                      # noqa: E402
 from bot.core.database import Database               # noqa: E402
+from bot.services.fallback_node import FallbackNodeService  # noqa: E402
 from bot.services.health_checker import HealthChecker  # noqa: E402
 from bot.services.subscription import SubscriptionService  # noqa: E402
 
@@ -56,7 +60,12 @@ def build_config(config, user, svc=None, *, log=None) -> dict:
     log = log or (lambda msg: None)
     inbounds, outbounds, rules = [], [], []
     for proto, port in HealthChecker.probe_ports_for(config).items():
-        ob = svc._build_outbound(proto, user)
+        if proto == HealthChecker.RESERVE_TAG:
+            # The DE reserve (IMPROVEMENT_PLAN F, B6) is no cascade builder:
+            # its outbound is the one paid users get, for the probe user.
+            ob = FallbackNodeService(config).build_outbound(user)
+        else:
+            ob = svc._build_outbound(proto, user)
         if ob is None:
             log(f"skip {proto}: not configured")
             continue
@@ -94,6 +103,19 @@ def main() -> int:
         print(f"probe user {PROBE_CHAT_ID} not found in bot.db",
               file=sys.stderr)
         return 1
+
+    if HealthChecker.reserve_probe_enabled(config):
+        # The probe user must exist on the reserve's panel, or the DE probe
+        # reads dark for a reserve that works (paid users are provisioned
+        # lazily on /sub; the probe user never fetches one).
+        try:
+            ok = FallbackNodeService(config).ensure_client(user)
+        except Exception as e:
+            ok = False
+            print(f"de: provisioning on the reserve failed: {e}", file=sys.stderr)
+        if not ok:
+            print("de: probe user NOT on the reserve panel — the de probe will read "
+                  "dark until it is (re-run this script)", file=sys.stderr)
 
     cfg = build_config(config, user,
                        log=lambda msg: print(msg, file=sys.stderr))

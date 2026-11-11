@@ -158,7 +158,7 @@ def _pager_alerts(config):
     from bot.services.alert_manager import build_default_checks
     check = next(c for c in build_default_checks(config, Mock())
                  if c.__name__ == 'check_protocol_probe_down')
-    _prefix, alerts = check()
+    _prefix, alerts = check()[:2]
     return alerts
 
 
@@ -329,9 +329,13 @@ class TestAgentFailureIsContained:
         rows = history(db)
         assert [(r['key'], r['severity']) for r in rows] == [('protocol_down:reality', 'critical')]
         assert rows[0]['kimi_analysis'] is None
-        # The pager message went out; no follow-up, no failure notice.
-        bot.send_message.assert_called_once()
-        assert 'reality' in bot.send_message.call_args.kwargs['text']
+        # The pager message went out, then one line saying the agent gave
+        # no diagnosis (IMPROVEMENT_PLAN F, B3) — never a diagnosis.
+        assert bot.send_message.call_count == 2
+        first, second = (c.kwargs['text'] for c in bot.send_message.call_args_list)
+        assert 'reality' in first
+        assert 'Агент не ответил' in second and 'ошибка вызова' in second
+        assert '/protocols' in second
 
     def test_quota_and_timeout_are_logged_at_info(self, db, config, agent, caplog):
         """Transient provider conditions are not bugs; they must not
@@ -356,7 +360,8 @@ class TestAgentFailureIsContained:
                    side_effect=ImportError('no hermes client')):
             fire(AlertManager(bot, config, db=db), proto_alert())
         assert len(history(db)) == 1
-        bot.send_message.assert_called_once()
+        assert bot.send_message.call_count == 2
+        assert 'Агент не ответил' in bot.send_message.call_args_list[1].kwargs['text']
 
     def test_agent_not_configured_is_skipped_quietly(self, db, config, agent):
         client, factory = agent
@@ -369,13 +374,14 @@ class TestAgentFailureIsContained:
         bot.send_message.assert_called_once()
         assert len(history(db)) == 1
 
-    def test_empty_reply_stores_and_posts_nothing(self, db, config, agent):
+    def test_empty_reply_stores_nothing_and_says_so(self, db, config, agent):
         client, _ = agent
         client.ask.return_value = ('', 10)
         bot = Mock()
         fire(AlertManager(bot, config, db=db), proto_alert())
 
-        bot.send_message.assert_called_once()
+        assert bot.send_message.call_count == 2
+        assert 'пустой ответ' in bot.send_message.call_args_list[1].kwargs['text']
         assert history(db)[0]['kimi_analysis'] is None
 
     def test_no_db_still_posts_the_follow_up(self, config, agent):
