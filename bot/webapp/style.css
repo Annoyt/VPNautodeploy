@@ -948,6 +948,9 @@ textarea.ktext-input { resize: vertical; min-height: 36px; }
     color: var(--text-primary);
 }
 .alert-kimi-head { font-weight: 700; margin-bottom: 4px; color: var(--text-secondary); }
+/* The agent's plain-text (or inline-only) reply keeps its line breaks:
+   app.js agentReplyHtml. */
+.agent-reply.agent-text { white-space: pre-wrap; }
 .alert-actions { display: flex; gap: 6px; margin-top: 6px; }
 .alert-actions .btn-ack {
     background: var(--bg-glass);
