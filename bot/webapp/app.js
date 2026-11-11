@@ -359,23 +359,27 @@
         return `${API_BASE}${path}${sep}${parts.join('&')}`;
     }
 
-    async function apiFetch(path) {
-        const res = await fetch(apiUrl(path));
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        return res.json();
-    }
-
-    async function apiPost(path, body) {
-        const res = await fetch(apiUrl(path), {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(body),
-        });
+    // `options` go to fetch() as given; without them the request is a GET.
+    // An error answer throws the server's own {"error": ...} text when it
+    // sent one, else "HTTP <status>". Until 2026-11-11 this took the path
+    // alone: callers passing {method: 'POST', ...} silently sent a GET, so
+    // the plans and reminders saves stored nothing while the page said
+    // «✅ сохранено», and the manual reminder sends and the alert ack got 405.
+    async function apiFetch(path, options) {
+        const res = await fetch(apiUrl(path), options);
         if (!res.ok) {
             const err = await res.json().catch(() => ({}));
             throw new Error(err.error || `HTTP ${res.status}`);
         }
         return res.json();
+    }
+
+    async function apiPost(path, body) {
+        return apiFetch(path, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
     }
 
     // ==================== Health Tab ====================
@@ -1988,7 +1992,7 @@
         box.innerHTML = alerts.map(a => {
             const acked = !!a.acked_at;
             const kimiHtml = a.kimi_analysis
-                ? `<div class="alert-kimi"><div class="alert-kimi-head">🤖 Kimi</div>${a.kimi_analysis}</div>`
+                ? `<div class="alert-kimi"><div class="alert-kimi-head">🤖 Kimi</div>${agentReplyHtml(a.kimi_analysis)}</div>`
                 : '';
             const actionsHtml = !acked
                 ? `<div class="alert-actions"><button class="btn-ack" data-id="${a.id}">✅ Подтвердить</button></div>`
@@ -2043,7 +2047,7 @@
         box.innerHTML = reports.map((r, idx) => {
             const t = r.totals || {};
             const kimiHtml = r.kimi_analysis
-                ? `<div class="alert-kimi"><div class="alert-kimi-head">🤖 Kimi</div>${r.kimi_analysis}</div>`
+                ? `<div class="alert-kimi"><div class="alert-kimi-head">🤖 Kimi</div>${agentReplyHtml(r.kimi_analysis)}</div>`
                 : '';
             return `<div class="report-row" data-idx="${idx}">
                 <div class="report-head">
@@ -2907,6 +2911,82 @@
         const div = document.createElement('div');
         div.textContent = String(str);
         return div.innerHTML;
+    }
+
+    // ==================== Agent replies ====================
+    // alert_history / dpi_reports .kimi_analysis hold the agent's free reply:
+    // plain text from the protocol prompt, HTML from the DPI prompts. Until
+    // 2026-11-11 it went into innerHTML as it came, while this page's URL
+    // carries the admin token: an <img onerror> the model echoed from a log
+    // line or a user's text ran in the admin's session.
+    //
+    // A reply without a single formatting tag is plain text, shown as written
+    // (escaped, line breaks kept). Otherwise every allowed tag is rebuilt
+    // bare: no attribute survives (no on*, style, id, class), a link keeps an
+    // http(s) href and sends no Referer. Any other element gives way to its
+    // text; the AGENT_DROP ones go with their content.
+    const AGENT_TAGS = new Set([
+        'b', 'strong', 'i', 'em', 'u', 'ins', 's', 'del', 'strike', 'code',
+        'pre', 'kbd', 'sub', 'sup', 'mark', 'small', 'span', 'br', 'hr', 'p',
+        'div', 'blockquote', 'ul', 'ol', 'li', 'h1', 'h2', 'h3', 'h4', 'h5',
+        'h6', 'table', 'thead', 'tbody', 'tfoot', 'tr', 'th', 'td', 'a',
+    ]);
+    const AGENT_DROP = new Set([
+        'script', 'style', 'template', 'noscript', 'iframe', 'object',
+        'embed', 'svg', 'math', 'title',
+    ]);
+    // A reply that lays itself out with these keeps the page's whitespace
+    // rules; one without (plain text, Telegram-style inline HTML) keeps its
+    // line breaks.
+    const AGENT_BLOCKS =
+        'p, div, br, hr, pre, blockquote, ul, ol, li, h1, h2, h3, h4, h5, h6, table';
+
+    function httpUrl(raw) {
+        try {
+            const url = new URL(String(raw ?? '').trim());
+            return url.protocol === 'http:' || url.protocol === 'https:' ? url.href : null;
+        } catch (_e) {
+            return null;     // relative, or not a URL at all
+        }
+    }
+
+    function agentReplyHtml(raw) {
+        const text = String(raw ?? '');
+        // A DOMParser document is inert: nothing in it loads or runs.
+        const body = new DOMParser().parseFromString(text, 'text/html').body;
+        const formatted = [...body.querySelectorAll('*')]
+            .some(n => AGENT_TAGS.has(n.localName));
+        if (!formatted) {
+            return `<div class="agent-reply agent-text">${esc(text)}</div>`;
+        }
+        const copy = (from, to) => {
+            for (const node of from.childNodes) {
+                if (node.nodeType === Node.TEXT_NODE) {
+                    to.append(node.data);
+                    continue;
+                }
+                if (node.nodeType !== Node.ELEMENT_NODE) continue;
+                const tag = node.localName;
+                if (AGENT_DROP.has(tag)) continue;
+                const href = tag === 'a' ? httpUrl(node.getAttribute('href')) : null;
+                if (!AGENT_TAGS.has(tag) || (tag === 'a' && !href)) {
+                    copy(node, to);
+                    continue;
+                }
+                const el = document.createElement(tag);
+                if (href) {
+                    el.href = href;
+                    el.target = '_blank';
+                    el.rel = 'noopener noreferrer';
+                }
+                copy(node, el);
+                to.append(el);
+            }
+        };
+        const out = document.createElement('div');
+        copy(body, out);
+        const cls = out.querySelector(AGENT_BLOCKS) ? 'agent-reply' : 'agent-reply agent-text';
+        return `<div class="${cls}">${out.innerHTML}</div>`;
     }
 
 })();

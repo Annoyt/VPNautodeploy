@@ -20,6 +20,7 @@ broken runner, and seven skips must not read as a green E2E stage.
 import json
 import os
 from datetime import datetime, timedelta, timezone
+from unittest.mock import Mock
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -359,6 +360,389 @@ class TestSignalsClientHealth:
         heads = page.locator('#signals-clients thead th').all_inner_texts()
         assert 'EMERGENCY' not in heads and 'REALITY' in heads
         page.close()
+
+
+# ------------------------------- Settings saves, reminder sends, alert ack ----
+#
+# Until 2026-11-11 all five went through apiFetch(path), which took the path
+# alone and always sent a GET: the {method: 'POST', ...} its callers passed
+# was dropped. The plans and reminders saves read the current values back and
+# printed «✅ сохранено» with nothing stored; the manual reminder sends and the
+# alert ack got 405. Each test drives the button and reads the database.
+
+def _open_tab(page_factory, tab, ready):
+    page = page_factory(users_tab=False)
+    page.click(f'[data-tab="{tab}"]')
+    page.wait_for_selector(ready)
+    return page
+
+
+def _record_requests(page, path):
+    """Every request the page makes to ``path`` from now on, as (method, JSON
+    body or None), in order. The query string (the auth) is ignored."""
+    seen = []
+
+    def on_request(request):
+        if urlparse(request.url).path == path:
+            body = request.post_data
+            seen.append((request.method, json.loads(body) if body else None))
+
+    page.on('request', on_request)
+    return seen
+
+
+def _wait_until(page, js, arg=None):
+    page.wait_for_function(js, arg=arg, timeout=5000)
+
+
+def _editor_reloaded(page, editor):
+    """Wait until ``editor`` has no edited row left: the page re-reads the
+    server once a save has answered, and the re-render drops the marks.
+    A failed save keeps them, so this times out on one."""
+    _wait_until(page, 'sel => !document.querySelector(sel)', f'{editor} .dirty')
+
+
+def _settled_status(page, selector):
+    """(text, class) of a status line once its request has answered: ✅ is
+    the page's success, ⚠ an error it caught; «отправляю…» is neither."""
+    _wait_until(page, """sel => {
+        const t = document.querySelector(sel).textContent;
+        return t.startsWith('✅') || t.startsWith('⚠');
+    }""", selector)
+    status = page.locator(selector)
+    return status.text_content(), status.get_attribute('class')
+
+
+def _clear_settings(db, keys):
+    with db._connect() as conn:
+        conn.executemany("DELETE FROM app_settings WHERE key = ?",
+                         [(k,) for k in keys])
+        conn.commit()
+
+
+def _plan_keys():
+    from bot.handlers.payments import PLAN_DEFINITIONS, _setting_key
+    return {months: _setting_key(months) for months, _, _ in PLAN_DEFINITIONS}
+
+
+def _stored_plan_prices(db):
+    """{months: the stored price or None}: what /buy reads before env and
+    the factory price."""
+    return {m: db.get_setting(key) for m, key in _plan_keys().items()}
+
+
+def _store_plan_prices(db, prices):
+    """Exactly ``prices`` ({months: stars}) stored, every other plan unset."""
+    _clear_settings(db, _plan_keys().values())
+    for months, stars in prices.items():
+        db.set_setting(_plan_keys()[months], str(stars))
+
+
+def _plan_row(page, months):
+    return page.locator(f'#plans-editor .plan-row[data-months="{months}"]')
+
+
+def _reminder_row(page, key):
+    return page.locator(f'#reminders-editor .reminder-row[data-key="{key}"]')
+
+
+def _notification_log(db, chat_id):
+    with db._connect() as conn:
+        return [r[0] for r in conn.execute(
+            "SELECT notification_type FROM notification_log "
+            "WHERE chat_id = ? ORDER BY id", (chat_id,))]
+
+
+def _admin_actions(db, action):
+    """(admin_id, target_id, details) of every ``action`` row, oldest first."""
+    with db._connect() as conn:
+        return [tuple(r) for r in conn.execute(
+            "SELECT admin_id, target_id, details FROM admin_actions "
+            "WHERE action = ? ORDER BY id", (action,))]
+
+
+@pytest.fixture
+def notifications(e2e_stack):
+    """A real NotificationService on the stack's sqlite for one test, with
+    Telegram faked by a Mock bot: its send_message calls are the sends. The
+    stack's own service is a bare Mock, which GET /api/admin/reminders cannot
+    serialize (500); it is put back afterwards."""
+    from bot.services.notifications import NotificationService
+    server = e2e_stack.server
+    saved = server.notification_service
+    service = NotificationService(Mock(), e2e_stack.db, server.config)
+    server.notification_service = service
+    yield service
+    server.notification_service = saved
+
+
+def _sent_to(service):
+    return [c.kwargs['chat_id'] for c in service.bot.send_message.call_args_list]
+
+
+class TestPlansSave:
+
+    def test_stores_the_edited_price_and_nothing_else(self, page_factory, e2e_stack):
+        db = e2e_stack.db
+        _store_plan_prices(db, {12: 999})                    # an earlier edit
+        page = _open_tab(page_factory, 'settings', '#plans-editor .plan-row')
+        sent = _record_requests(page, '/api/admin/plans')
+        _plan_row(page, 3).locator('.plan-input').fill('333')
+        page.click('#plans-save')
+        _editor_reloaded(page, '#plans-editor')
+        # The server's shape, with the edited row only: a save never wipes
+        # (or rewrites) the plans nobody touched.
+        assert sent == [('POST', {'prices': {'3': 333}}), ('GET', None)]
+        assert _stored_plan_prices(db) == {1: None, 3: '333', 6: None, 12: '999'}
+        assert _plan_row(page, 3).get_attribute('data-original') == '333'
+        assert _plan_row(page, 12).get_attribute('data-original') == '999'
+        page.close()
+
+    def test_reset_drops_the_stored_price(self, page_factory, e2e_stack):
+        from bot.handlers.payments import PLAN_DEFINITIONS
+        factory = {months: stars for months, _, stars in PLAN_DEFINITIONS}
+        db = e2e_stack.db
+        _store_plan_prices(db, {6: 555, 12: 999})
+        page = _open_tab(page_factory, 'settings', '#plans-editor .plan-row')
+        sent = _record_requests(page, '/api/admin/plans')
+        _plan_row(page, 6).locator('.plan-reset').click()
+        page.click('#plans-save')
+        _editor_reloaded(page, '#plans-editor')
+        assert sent == [('POST', {'prices': {'6': None}}), ('GET', None)]
+        assert _stored_plan_prices(db) == {1: None, 3: None, 6: None, 12: '999'}
+        assert _plan_row(page, 6).get_attribute('data-original') == str(factory[6])
+        page.close()
+
+
+class TestReminders:
+
+    def test_save_stores_the_edited_settings(self, page_factory, e2e_stack,
+                                             notifications):
+        db = e2e_stack.db
+        keys = list(notifications.REMINDER_DEFAULTS)
+        _clear_settings(db, keys)
+        page = _open_tab(page_factory, 'settings', '#reminders-editor .reminder-row')
+        sent = _record_requests(page, '/api/admin/reminders')
+        _reminder_row(page, 'reminder_max_per_user').locator('input').fill('5')
+        _reminder_row(page, 'reminder_text_new_ru').locator('textarea').fill(
+            'Привет из e2e')
+        page.click('#reminders-save')
+        _editor_reloaded(page, '#reminders-editor')
+        edits = {'reminder_max_per_user': 5, 'reminder_text_new_ru': 'Привет из e2e'}
+        assert sent == [('POST', edits), ('GET', None)]
+        assert {k: db.get_setting(k) for k in keys} == {
+            **{k: None for k in keys},
+            'reminder_max_per_user': '5', 'reminder_text_new_ru': 'Привет из e2e'}
+        # what the reminder job reads, and what the editor shows now
+        assert notifications.get_reminder_setting('reminder_max_per_user') == 5
+        assert _reminder_row(page, 'reminder_max_per_user').get_attribute(
+            'data-original') == '5'
+        assert _reminder_row(page, 'reminder_text_new_ru').locator(
+            'textarea').input_value() == 'Привет из e2e'
+        _clear_settings(db, keys)
+        page.close()
+
+    def test_cohort_send_reminds_every_stuck_user(self, page_factory, e2e_stack,
+                                                  notifications):
+        db = e2e_stack.db
+        cid = e2e_stack.seed_user('platform_select')
+        with db._connect() as conn:
+            cohort = {r[0] for r in conn.execute(
+                "SELECT chat_id FROM users WHERE status = 'platform_select' "
+                "AND username IS NOT NULL AND username != ''")}
+        page = _open_tab(page_factory, 'settings', '#reminders-editor .reminder-row')
+        page.select_option('#manual-cohort', 'platform_select')
+        page.once('dialog', lambda dialog: dialog.accept())   # «Отправить …?»
+        page.click('#manual-cohort-send')
+        assert _settled_status(page, '#manual-status') == (
+            f'✅ отправлено: {len(cohort)}', 'plans-status ok')
+        assert sorted(_sent_to(notifications)) == sorted(cohort)
+        assert _notification_log(db, cid) == ['reminder_platform_select']
+        assert _admin_actions(db, 'reminders_manual_cohort')[-1] == (
+            e2e_stack.admin_id, None,
+            f'cohort=platform_select, force=True, sent={len(cohort)}')
+        page.close()
+
+    def test_user_send_reminds_that_user(self, page_factory, e2e_stack,
+                                         notifications):
+        db = e2e_stack.db
+        cid = e2e_stack.seed_user('new')
+        page = _open_tab(page_factory, 'settings', '#reminders-editor .reminder-row')
+        page.fill('#manual-chat-id', cid)
+        page.click('#manual-user-send')
+        assert _settled_status(page, '#manual-status') == (
+            '✅ отправлено', 'plans-status ok')
+        assert _sent_to(notifications) == [cid]
+        assert _notification_log(db, cid) == ['reminder_new']
+        assert _admin_actions(db, 'reminders_manual_user')[-1] == (
+            e2e_stack.admin_id, cid, 'force=True, ok=True')
+        page.close()
+
+    def test_user_send_shows_the_servers_refusal(self, page_factory, e2e_stack,
+                                                 notifications):
+        """A user who is not stuck in NEW / PLATFORM_SELECT gets nothing, and
+        the page prints the server's reason (its 400's {"error": ...}), not
+        «HTTP 400»."""
+        db = e2e_stack.db
+        cid = e2e_stack.seed_user('demo')
+        page = _open_tab(page_factory, 'settings', '#reminders-editor .reminder-row')
+        page.fill('#manual-chat-id', cid)
+        page.click('#manual-user-send')
+        assert _settled_status(page, '#manual-status') == (
+            '⚠️ user not stuck in NEW/PLATFORM_SELECT or send failed',
+            'plans-status err')
+        assert _sent_to(notifications) == []
+        assert _notification_log(db, cid) == []
+        assert _admin_actions(db, 'reminders_manual_user')[-1] == (
+            e2e_stack.admin_id, cid, 'force=True, ok=False')
+        page.close()
+
+
+class TestAlertAck:
+
+    def test_ack_button_acks_the_alert(self, page_factory, e2e_stack):
+        db = e2e_stack.db
+        with db._connect() as conn:
+            aid = conn.execute(
+                "INSERT INTO alert_history (key, severity, title, detail) "
+                "VALUES ('e2e:ack', 'critical', 'E2E: ack me', 'detail')",
+            ).lastrowid
+            conn.commit()
+        button = f'#alerts-list .btn-ack[data-id="{aid}"]'
+        page = _open_tab(page_factory, 'alerts', button)
+        sent = _record_requests(page, f'/api/admin/alerts/{aid}/ack')
+        page.click(button)
+        # The list re-reads the server once the ack has answered and drops
+        # the row; a failed ack leaves its error on the button instead.
+        _wait_until(page, """sel => {
+            const b = document.querySelector(sel);
+            return !b || b.textContent.startsWith('⚠');
+        }""", button)
+        assert page.locator(button).count() == 0, page.locator(button).text_content()
+        assert sent == [('POST', None)]
+        with db._connect() as conn:
+            acked_at, acked_by = conn.execute(
+                "SELECT acked_at, acked_by FROM alert_history WHERE id = ?",
+                (aid,)).fetchone()
+        assert acked_at is not None
+        assert acked_by == e2e_stack.admin_id
+        page.close()
+
+
+# ---------------------------------------------------- the agent's replies ----
+#
+# alert_history.kimi_analysis and dpi_reports.kimi_analysis hold the agent's
+# free reply: plain text from the protocol prompt, HTML from the DPI prompts.
+# Until 2026-11-11 the Alerts tab put it into innerHTML as it came, and the
+# dashboard URL carries the admin token: markup the model echoed from a log
+# line or a user's text ran in the admin's session.
+
+# What the old render ran: the image fails to load and its onerror fires.
+XSS_IMG = '<img src="e2e-missing.png" onerror="window.__xss = \'img\'">'
+
+
+def _seed_alert_reply(db, title, reply):
+    with db._connect() as conn:
+        conn.execute(
+            "INSERT INTO alert_history (key, severity, title, detail, kimi_analysis) "
+            "VALUES ('e2e:agent', 'warn', ?, 'detail', ?)", (title, reply))
+        conn.commit()
+
+
+def _alert_reply(page, title):
+    """The «🤖» block under the alert titled ``title``."""
+    row = page.locator('#alerts-list .alert-row',
+                       has=page.locator('.alert-title', has_text=title))
+    return row.locator('.alert-kimi')
+
+
+def _reply_attributes(box):
+    """Sorted «tag[attribute]» of every element inside a reply block, the
+    page's own wrappers (the «🤖» head, the reply div) left out."""
+    return sorted(set(box.evaluate("""el => [...el.querySelectorAll('*')]
+        .filter(n => !n.matches('.alert-kimi-head, .agent-reply'))
+        .flatMap(n => [...n.attributes].map(a => `${n.localName}[${a.name}]`))""")))
+
+
+def _nothing_ran(page):
+    """No payload ran: none set window.__xss, and no <style> got in."""
+    page.wait_for_timeout(500)      # a failed image load has fired by now
+    assert page.evaluate('window.__xss') is None
+    assert page.evaluate(
+        "getComputedStyle(document.body).getPropertyValue('--e2e-styled')") == ''
+
+
+class TestAgentReplies:
+
+    def test_html_reply_keeps_its_formatting_and_runs_nothing(
+            self, page_factory, e2e_stack):
+        reply = (
+            '<b>ИТОГ</b>: ws лежит 40 мин, остальные живы\n'
+            '<ul><li>reality ok</li><li>hy2 ok</li></ul>'
+            '<p onclick="window.__xss = \'click\'">Подробнее: '
+            '<a href="https://example.com/runbook">runbook</a> · '
+            '<a href="javascript:window.__xss = \'href\'">локально</a></p>'
+            '<code>systemctl status hysteria</code>'
+            + XSS_IMG +
+            '<script>window.__xss = "script"</script>'
+            '<style>body { --e2e-styled: 1 }</style>'
+        )
+        _seed_alert_reply(e2e_stack.db, 'E2E: agent html', reply)
+        page = _open_tab(page_factory, 'alerts', '#alerts-list .alert-kimi')
+        _nothing_ran(page)
+        box = _alert_reply(page, 'E2E: agent html')
+        assert box.locator('b').inner_text() == 'ИТОГ'
+        assert box.locator('li').all_inner_texts() == ['reality ok', 'hy2 ok']
+        # block markup lays itself out: the source's line break adds no gap
+        assert 'остальные живы\nreality ok\nhy2 ok' in box.inner_text()
+        assert box.locator('code').inner_text() == 'systemctl status hysteria'
+        # an http(s) link stays a link, one that leaks no Referer (the page
+        # URL carries the token); a javascript: one is its text
+        assert box.locator('a').evaluate_all(
+            'as => as.map(a => [a.getAttribute("href"), a.rel, a.target])'
+        ) == [['https://example.com/runbook', 'noopener noreferrer', '_blank']]
+        assert 'локально' in box.inner_text()
+        assert box.locator('img, script, style').count() == 0
+        assert 'window.__xss' not in box.inner_text()   # dropped code is not shown
+        assert _reply_attributes(box) == ['a[href]', 'a[rel]', 'a[target]']
+        box.locator('p').click()
+        assert page.evaluate('window.__xss') is None
+        page.close()
+
+    def test_plain_text_reply_is_shown_as_written(self, page_factory, e2e_stack):
+        """The protocol prompt asks for plain text, and Telegram gets it
+        escaped: the page shows it the same way, angle brackets and line
+        breaks included."""
+        reply = ('ИТОГ: reality жив, ws лежит <40 мин>\n'
+                 'СЛЕДУЮЩАЯ КОМАНДА: journalctl -u xray --since <time> | tail\n'
+                 + XSS_IMG)
+        _seed_alert_reply(e2e_stack.db, 'E2E: agent text', reply)
+        page = _open_tab(page_factory, 'alerts', '#alerts-list .alert-kimi')
+        _nothing_ran(page)
+        box = _alert_reply(page, 'E2E: agent text')
+        assert reply in box.inner_text()
+        assert box.locator('img').count() == 0
+        page.close()
+
+    def test_dpi_report_reply_is_cleaned_too(self, page_factory, e2e_stack):
+        reply = ('<b>AS31133</b>: handshake-fail ×12 к базе\n'
+                 '<b>AS12389</b>: в норме' + XSS_IMG
+                 + '<style>body { --e2e-styled: 1 }</style>')
+        with e2e_stack.db._connect() as conn:
+            conn.execute(
+                "INSERT INTO dpi_reports (kind, period_start, period_end, "
+                "snapshot_json, kimi_analysis) VALUES ('daily', "
+                "'2026-11-09T00:00:00', '2026-11-10T00:00:00', '{}', ?)", (reply,))
+            conn.commit()
+        page = _open_tab(page_factory, 'alerts', '#reports-list .report-row')
+        _nothing_ran(page)          # a collapsed report's markup is live too
+        report = page.locator('#reports-list .report-row', has_text='2026-11-09')
+        report.locator('.report-head').click()               # expand it
+        box = report.locator('.alert-kimi')
+        assert box.locator('b').all_inner_texts() == ['AS31133', 'AS12389']
+        # Telegram-style inline HTML: its line breaks are the layout
+        assert 'к базе\nAS12389: в норме' in box.inner_text()
+        assert box.locator('img, style').count() == 0
 
 
 # ---------------------------------------------------------------------------

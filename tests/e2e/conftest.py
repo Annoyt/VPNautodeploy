@@ -30,10 +30,16 @@ def _free_port() -> int:
 
 
 class E2EStack:
-    def __init__(self, db, base_url, token):
+    admin_id = E2E_ADMIN_ID     # whom the token signs in; audit rows carry it
+
+    def __init__(self, db, base_url, token, server):
         self.db = db
         self.base_url = base_url
         self.token = token
+        # The running WebAppServer: a test may swap one of its services
+        # for the length of the test (see test_dashboard_playwright.py,
+        # the `notifications` fixture).
+        self.server = server
         self._seq = 0
 
     def dashboard_url(self) -> str:
@@ -78,7 +84,7 @@ def e2e_stack(tmp_path_factory):
     server.notification_service = Mock()
     base = serve_in_thread(server)
     token = make_admin_token(E2E_BOT_TOKEN, E2E_ADMIN_ID)
-    return E2EStack(db, base, token)
+    return E2EStack(db, base, token, server)
 
 
 def serve_in_thread(server, name='e2e-webapp') -> str:
