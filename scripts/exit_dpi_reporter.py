@@ -234,10 +234,16 @@ HY_EVENT_RE = re.compile(r"client (connected|disconnected)\s+(\{.*\})")
 HY_OPEN_MAX = 20                 # open connects remembered per client
 HY_OPEN_MAX_AGE_S = 24 * 3600    # a connect never closed is forgotten after a day
 HY_SESSIONS_MAX = 1000           # per report
-# The stored cursor is trusted for this long. Older (the reporter was down)
-# = start over 10 min back and forget the open connects: the backlog of a
-# long outage is not read (it could run past the timeout or the unit's
-# MemoryMax and take the whole report with it), and its disconnects are gone.
+# The stored cursor is trusted while the journal was last read less than this
+# long ago. Longer (the reporter was down, or the bot refused its reports) =
+# start over 10 min back and forget the open connects: the backlog of a long
+# outage is not read (it could run past the timeout or the unit's MemoryMax
+# and take the whole report with it), and its disconnects are gone. A quiet
+# journal is no outage: the cursor's own entry may be hours old while the
+# reporter ran every 5 min, and a session open across the quiet stretch keeps
+# its connect. Until 2026-11-11 the age was the cursor entry's, and 30 quiet
+# minutes forgot every open connect: 8 of the 33 sessions over 30 min in a
+# week of exit's journal.
 JOURNAL_CURSOR_MAX_AGE_S = 30 * 60
 JOURNAL_TIMEOUT_S = 30
 
@@ -265,15 +271,19 @@ def _journal_restart(state: dict, why: str) -> None:
 
 def read_hysteria_events(state: dict, now: Optional[float] = None) -> list:
     """``[(unit, epoch_s, kind, id, error, process, addr)]`` since the stored
-    journal cursor (the first run, and a cursor older than
-    JOURNAL_CURSOR_MAX_AGE_S, start 10 minutes back); the new cursor and the
-    time of its entry go into ``state``. journalctl missing, failing or too
-    slow = no events and a fresh start next run. Never raises."""
+    journal cursor (the first run, and a journal last read over
+    JOURNAL_CURSOR_MAX_AGE_S ago, start 10 minutes back); the new cursor, the
+    time of its entry and the time of this read go into ``state``.
+    journalctl missing, failing or too slow = no events and a fresh start
+    next run. Never raises."""
     now = time.time() if now is None else now
     cursor = state.get("journal_cursor")
     cursor_ts = float(state.get("journal_cursor_ts") or 0)
-    if cursor and now - cursor_ts > JOURNAL_CURSOR_MAX_AGE_S:
-        _journal_restart(state, "cursor too old")
+    # A state written before journal_read_ts existed: the cursor's own entry
+    # stands in, as it used to.
+    read_ts = float(state.get("journal_read_ts") or cursor_ts)
+    if cursor and now - read_ts > JOURNAL_CURSOR_MAX_AGE_S:
+        _journal_restart(state, f"not read for {int(now - read_ts) // 60} min")
         cursor = None
     cmd = ["journalctl", "-o", "json", "--no-pager"]
     for unit in HYSTERIA_UNITS:
@@ -287,6 +297,7 @@ def read_hysteria_events(state: dict, now: Optional[float] = None) -> list:
     if proc.returncode != 0:
         _journal_restart(state, f"journalctl rc={proc.returncode}: {(proc.stderr or '')[:200]}")
         return []
+    state["journal_read_ts"] = now
     events = []
     for line in proc.stdout.splitlines():
         try:
@@ -312,8 +323,6 @@ def read_hysteria_events(state: dict, now: Optional[float] = None) -> list:
         process = f"{entry.get('_BOOT_ID') or '-'}:{entry.get('_PID') or '-'}"
         events.append((unit, epoch, m.group(1), str(fields.get("id") or ""),
                        str(fields.get("error") or ""), process, str(fields.get("addr") or "")))
-    if not cursor and "journal_cursor" not in state:
-        state["journal_cursor_ts"] = now
     return events
 
 
@@ -454,6 +463,7 @@ def run_once() -> int:
     state.update({"access": access_off, "error": error_off,
                   "journal_cursor": pending.get("journal_cursor"),
                   "journal_cursor_ts": pending.get("journal_cursor_ts"),
+                  "journal_read_ts": pending.get("journal_read_ts"),
                   "hy2_open": pending.get("hy2_open", {})})
     _save_state(state)
     logger.info(

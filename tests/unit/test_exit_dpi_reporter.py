@@ -7,7 +7,9 @@ early warning that the DPI feed silently went dark.
 """
 
 import importlib.util
+import json
 import os
+import types
 
 REPORTER_PATH = os.path.join(
     os.path.dirname(__file__), '..', '..', 'scripts', 'exit_dpi_reporter.py'
@@ -346,6 +348,9 @@ def _entry(cursor, epoch_s, message, pid='77'):
 
 CONNECT = ('2026-11-11T01:17:40+05:00\tINFO\tclient connected\t'
            '{"addr": "1.2.3.4:36389", "id": "u1@x", "tx": 0}')
+DISCONNECT = ('2026-11-11T02:01:40+05:00\tINFO\tclient disconnected\t'
+              '{"addr": "1.2.3.4:36389", "id": "u1@x", '
+              '"error": "timeout: no recent network activity"}')
 
 
 class TestJournalRead:
@@ -403,15 +408,76 @@ class TestJournalRead:
         assert reporter.read_hysteria_events(state, now=1000.0) == []
         assert 'journal_cursor' not in state
 
-    def test_an_old_cursor_is_not_replayed(self, monkeypatch):
+    def test_a_quiet_journal_keeps_its_cursor_and_open_connects(self, monkeypatch):
+        # the cursor's entry is two hours old, the last read 29 min: hysteria
+        # was quiet, the reporter was not down
         calls = []
         monkeypatch.setattr(reporter.subprocess, 'run',
                             lambda cmd, **kw: calls.append(cmd) or _Run(''))
-        state = {'journal_cursor': 'c', 'journal_cursor_ts': 1000.0,
-                 'hy2_open': {'hysteria|b:1|u1@x': [[900.0, 'a']]}}
-        reporter.read_hysteria_events(state, now=1000.0 + 31 * 60)
+        state = {'journal_cursor': 'c', 'journal_cursor_ts': 10000.0 - 2 * 3600,
+                 'journal_read_ts': 10000.0 - 29 * 60,
+                 'hy2_open': {'hysteria|b:1|u1@x': [[2000.0, 'a']]}}
+        assert reporter.read_hysteria_events(state, now=10000.0) == []
+        assert calls[0][-2:] == ['--after-cursor', 'c']
+        assert state['hy2_open'] == {'hysteria|b:1|u1@x': [[2000.0, 'a']]}
+        assert state['journal_read_ts'] == 10000.0
+
+    def test_a_reporter_that_was_down_starts_over(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(reporter.subprocess, 'run',
+                            lambda cmd, **kw: calls.append(cmd) or _Run(''))
+        state = {'journal_cursor': 'c', 'journal_cursor_ts': 10000.0 - 40 * 60,
+                 'journal_read_ts': 10000.0 - 31 * 60,
+                 'hy2_open': {'hysteria|b:1|u1@x': [[2000.0, 'a']]}}
+        reporter.read_hysteria_events(state, now=10000.0)
         assert calls[0][-2:] == ['--since', '-10min']
         assert state['hy2_open'] == {}
+
+    def test_a_state_from_before_the_read_time_falls_back_to_the_cursor(self, monkeypatch):
+        # what exit's reporter wrote until 2026-11-11: no journal_read_ts
+        calls = []
+        monkeypatch.setattr(reporter.subprocess, 'run',
+                            lambda cmd, **kw: calls.append(cmd) or _Run(''))
+        fresh = {'journal_cursor': 'c', 'journal_cursor_ts': 1000.0,
+                 'hy2_open': {'hysteria|b:1|u1@x': [[900.0, 'a']]}}
+        old = json.loads(json.dumps(fresh))
+        reporter.read_hysteria_events(fresh, now=1000.0 + 5 * 60)
+        reporter.read_hysteria_events(old, now=1000.0 + 31 * 60)
+        assert [c[-2:] for c in calls] == [['--after-cursor', 'c'], ['--since', '-10min']]
+        assert fresh['hy2_open'] and old['hy2_open'] == {}
+
+    def test_a_session_open_across_a_quiet_journal_is_reported(self, tmp_path, monkeypatch):
+        # exit, 2026-11-11: hysteria logged nothing for 35 min while the
+        # reporter ran every 5; judged by the age of the cursor's entry, the
+        # reporter forgot the open connects and such sessions never came
+        logs = tmp_path / 'logs'
+        logs.mkdir()
+        (logs / 'access.log').write_text('')
+        (logs / 'error.log').write_text('')
+        monkeypatch.setattr(reporter, 'LOG_DIR', str(logs))
+        monkeypatch.setattr(reporter, 'STATE_PATH', str(tmp_path / 'state.json'), raising=False)
+        monkeypatch.setattr(reporter, 'TOKEN', 'sekret')
+        t0 = 1762800000.0
+        clock = [t0]
+        monkeypatch.setattr(reporter, 'time', types.SimpleNamespace(time=lambda: clock[0]))
+        journal = iter([_entry('c1', t0, CONNECT), '',
+                        _entry('c2', t0 + 44 * 60, DISCONNECT)])
+        calls = []
+        monkeypatch.setattr(reporter.subprocess, 'run',
+                            lambda cmd, **kw: calls.append(cmd) or _Run(next(journal)))
+        sent = []
+        monkeypatch.setattr(reporter, 'post_report', lambda payload: sent.append(payload) or True)
+        # the last run reads 20 min after the one before it, 45 min after
+        # the cursor's entry
+        for at in (t0 + 60, t0 + 25 * 60, t0 + 45 * 60):
+            clock[0] = at
+            assert reporter.run_once() == 0
+        assert [c[-2:] for c in calls] == [['--since', '-10min'], ['--after-cursor', 'c1'],
+                                           ['--after-cursor', 'c1']]
+        assert sent[-1]['hy2_sessions'] == [{'id': 'u1@x', 'unit': 'hysteria',
+                                             'duration_s': 44 * 60,
+                                             'error': 'timeout: no recent network activity',
+                                             'ended_at': t0 + 44 * 60}]
 
     def test_entries_from_before_the_cursor_are_skipped(self, monkeypatch):
         # a vacuumed cursor: journalctl starts from the head with rc 0
