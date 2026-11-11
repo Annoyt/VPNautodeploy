@@ -534,6 +534,34 @@
                 <span id="manual-status" class="plans-status"></span>
             </div>
         </div>
+
+        <!-- Bot token: bot/services/bot_token.py. The page seals the token
+             before posting it (bot/utils/token_envelope.py). -->
+        <div class="section-title" style="margin-top:14px">
+            Токен бота
+            <span class="title-controls">
+                <button id="bottoken-reload" class="btn-chip" title="Обновить">⟳</button>
+            </span>
+        </div>
+        <div id="bottoken-status" class="bottoken-status">
+            <div class="placeholder-text">Загрузка…</div>
+        </div>
+        <div class="cascade-hint">
+            Меняется токен этого же бота — после Revoke в @BotFather.<br>
+            1. Открой этот раздел заранее: после Revoke бот замолчит и новую ссылку /admin не пришлёт.<br>
+            2. @BotFather → /mybots → бот → API Token → Revoke current token → скопируй новый токен.<br>
+            3. Вставь его сюда → «Заменить токен». Бот перезапустится за ~15 с; подписки и ключи юзеров не меняются.
+        </div>
+        <div id="bottoken-link" class="cascade-hint hidden"></div>
+        <div class="manual-row">
+            <input id="bottoken-input" type="password" class="search-input"
+                   autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false"
+                   placeholder="123456789:AAE…">
+            <button id="bottoken-apply" class="btn btn-primary">Заменить токен</button>
+        </div>
+        <div class="plans-actions">
+            <span id="bottoken-result" class="plans-status"></span>
+        </div>
     </section>
 
     <!-- User detail modal (separate from confirm modal) -->

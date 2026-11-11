@@ -51,7 +51,7 @@ def page_factory(e2e_stack):
             raise
         pytest.skip(f'chromium unavailable: {e}')
 
-    def _new_page(users_tab=True):
+    def _new_page(users_tab=True, url=None):
         page = browser.new_page()
         page.route(
             '**/*',
@@ -59,7 +59,7 @@ def page_factory(e2e_stack):
             if any(h in route.request.url for h in BLOCKED)
             else route.continue_(),
         )
-        page.goto(e2e_stack.dashboard_url())
+        page.goto(url or e2e_stack.dashboard_url())
         if users_tab:
             # Users tab; cards render after the API fetch.
             page.click('[data-tab="users"]')
@@ -743,4 +743,129 @@ class TestAgentReplies:
         # Telegram-style inline HTML: its line breaks are the layout
         assert 'к базе\nAS12389: в норме' in box.inner_text()
         assert box.locator('img, style').count() == 0
+
+
+# ---------------------------------------------------------------------------
+# Settings → «Токен бота»: the page seals the token in a real browser and the
+# bot opens it (bot/utils/token_envelope.py ↔ app.js sealBotToken).
+# ---------------------------------------------------------------------------
+
+TB_ID = 7012345678
+TB_OLD = f'{TB_ID}:AAE' + 'o' * 32
+TB_NEW = f'{TB_ID}:AAE' + 'n' * 32
+
+
+class TokenStack:
+    """Its own server: a well-formed token, a data dir, faked getMe and a
+    restart that does what the new process would (read the saved token)."""
+
+    def __init__(self, tmp_path):
+        import threading
+        from unittest.mock import Mock
+
+        from bot.config import secret_store
+        from bot.core.database import Database
+        from bot.core.web_server import WebAppServer
+        from bot.services import bot_token as bt
+        from .conftest import E2E_ADMIN_ID, serve_in_thread
+
+        self.bt, self.secret_store, self.threading = bt, secret_store, threading
+        self.admin = E2E_ADMIN_ID
+        self.data = str(tmp_path)
+        self.db = Database(str(tmp_path / 'bot.db'))
+        secret_store.write_sub_secret(self.data, TB_OLD)   # what on_startup pins
+        config = Mock()
+        config.BOT_TOKEN = config.BOT_TOKEN_ENV = config.SUB_TOKEN_SECRET = TB_OLD
+        config.BOT_TOKEN_SOURCE = 'env'
+        config.WEBAPP_URL = ''
+        config.PAID_TRAFFIC_GB = 100
+        config.is_admin = lambda uid: str(uid) == E2E_ADMIN_ID
+        self.config = config
+        self.calls, self.answers = [], {}
+        self.server = WebAppServer(config, self.db, xui_service=Mock())
+        self.server.notification_service = Mock()
+        self.server.bot_token = self._changer()
+        self.base = serve_in_thread(self.server, name='e2e-bot-token')
+
+    def _check(self, token):
+        self.calls.append(token)
+        if token in self.answers:
+            return self.answers[token]
+        return self.bt.TokenCheck('ok', {'id': TB_ID, 'username': 'nekotest_bot'})
+
+    def _changer(self):
+        return self.bt.BotTokenChanger(self.config, self.db, check=self._check,
+                                       restart=self._restart)
+
+    def _restart(self, delay):
+        def new_process():
+            rec = self.secret_store.read_bot_token_record(self.data)
+            self.config.BOT_TOKEN = rec['token']
+            self.config.BOT_TOKEN_SOURCE = 'dashboard'
+            self.server.bot_token = self._changer()
+        timer = self.threading.Timer(1.0, new_process)
+        timer.daemon = True
+        timer.start()
+
+    def url(self):
+        from bot.utils.admin_token import make_admin_token
+        return f'{self.base}/?admin_token={make_admin_token(TB_OLD, self.admin)}'
+
+    def saved_token(self):
+        rec = self.secret_store.read_bot_token_record(self.data)
+        return rec and rec['token']
+
+
+@pytest.fixture
+def token_stack(tmp_path):
+    return TokenStack(tmp_path)
+
+
+def _open_token_section(page_factory, stack):
+    page = page_factory(users_tab=False, url=stack.url())
+    page.click('[data-tab="settings"]')
+    page.wait_for_selector('#bottoken-status .bottoken-line')
+    return page
+
+
+class TestBotTokenSettings:
+
+    def test_the_browser_seals_and_the_bot_switches(self, page_factory, token_stack):
+        page = _open_token_section(page_factory, token_stack)
+        assert '@nekotest_bot' in page.inner_text('#bottoken-status')
+        page.fill('#bottoken-input', TB_NEW)
+        page.click('#bottoken-apply')
+        page.click('#modal-confirm')
+        page.wait_for_function(
+            "document.getElementById('bottoken-result').textContent.includes('новом токене')",
+            timeout=20000)
+        # the bot opened what Chromium sealed: getMe saw exactly the new token
+        assert token_stack.calls[-1] == TB_NEW and token_stack.saved_token() == TB_NEW
+        assert page.input_value('#bottoken-input') == ''
+        link = parse_qs(urlparse(page.url).query)['admin_token'][0]
+        from bot.utils.admin_token import verify_admin_token
+        assert verify_admin_token(TB_NEW, link) == token_stack.admin
+        assert 'Токен задан здесь' in page.inner_text('#bottoken-status')
+        page.close()
+
+    def test_another_bots_token_never_leaves_the_page(self, page_factory, token_stack):
+        page = _open_token_section(page_factory, token_stack)
+        page.fill('#bottoken-input', '7099999999:AAE' + 'x' * 32)
+        page.click('#bottoken-apply')
+        assert 'другого бота' in page.inner_text('#bottoken-result')
+        assert page.is_hidden('#modal-overlay')
+        assert token_stack.calls == [TB_OLD] and token_stack.saved_token() is None
+        page.close()
+
+    def test_a_refusal_from_telegram_is_shown(self, page_factory, token_stack):
+        token_stack.answers[TB_NEW] = token_stack.bt.TokenCheck('rejected', detail='Unauthorized')
+        page = _open_token_section(page_factory, token_stack)
+        page.fill('#bottoken-input', TB_NEW)
+        page.click('#bottoken-apply')
+        page.click('#modal-confirm')
+        page.wait_for_function(
+            "document.getElementById('bottoken-result').textContent.includes('Telegram не принял')",
+            timeout=20000)
+        assert token_stack.saved_token() is None
+        assert page.input_value('#bottoken-input') == TB_NEW   # left to fix a typo
         page.close()

@@ -82,7 +82,13 @@ def e2e_stack(tmp_path_factory):
 
     server = WebAppServer(config, db, xui_service=Mock())
     server.notification_service = Mock()
+    base = serve_in_thread(server)
+    token = make_admin_token(E2E_BOT_TOKEN, E2E_ADMIN_ID)
+    return E2EStack(db, base, token, server)
 
+
+def serve_in_thread(server, name='e2e-webapp') -> str:
+    """Run ``server.app`` on 127.0.0.1 in a daemon thread; its base URL."""
     port = _free_port()
 
     def _run():
@@ -95,7 +101,7 @@ def e2e_stack(tmp_path_factory):
         loop.run_until_complete(site.start())
         loop.run_forever()
 
-    threading.Thread(target=_run, daemon=True, name='e2e-webapp').start()
+    threading.Thread(target=_run, daemon=True, name=name).start()
 
     # Wait for the server to accept connections.
     import urllib.request
@@ -108,6 +114,4 @@ def e2e_stack(tmp_path_factory):
             time.sleep(0.1)
     else:
         raise RuntimeError('e2e web server did not start')
-
-    token = make_admin_token(E2E_BOT_TOKEN, E2E_ADMIN_ID)
-    return E2EStack(db, base, token, server)
+    return base

@@ -90,9 +90,9 @@ If the incident lasts >5 min, broadcast. From CLI (bot is local on entry):
 
 ```sh
 TOKEN=$($DC exec -T vpn-bot python3 -c "
-import os
+from bot.config import Settings
 from bot.utils.admin_token import make_admin_token
-print(make_admin_token(os.environ['BOT_TOKEN'], '<super-admin-id>'))
+print(make_admin_token(Settings().BOT_TOKEN, '<super-admin-id>'))
 ")
 # Preview first (confirm=false)
 curl -s -X POST "http://127.0.0.1:8080/api/admin/broadcast?admin_token=$TOKEN" \

@@ -19,6 +19,7 @@ from bot.handlers import (
     ForumHandler
 )
 from bot.core.web_server import WebAppServer
+from bot.services import bot_token
 
 # Phase 1+ imports
 from bot.services.xui_service import XUIService
@@ -247,7 +248,14 @@ def main() -> int:
     
     logger.info(f"Mode: {config.MODE}")
     logger.info(f"Forum enabled: {config.FORUM_ENABLED}")
-    
+
+    # Before anything signs a /sub link: pin the links' key, move aside a
+    # dashboard token .env has outgrown (bot/services/bot_token.py).
+    try:
+        bot_token.on_startup(config)
+    except Exception as e:
+        logger.exception(f"bot token startup check failed: {e}")
+
     # Create bot
     try:
         bot = Bot(config.BOT_TOKEN, config)
@@ -282,7 +290,13 @@ def main() -> int:
                 logger.info(f"Forum topic bootstrap: {created}")
         except Exception as e:
             logger.warning(f"Forum topic bootstrap failed (non-fatal): {e}")
-    
+
+    # First start on a token the dashboard set: say so in the admin topic.
+    try:
+        bot_token.announce_if_pending(bot, config)
+    except Exception as e:
+        logger.warning(f"bot token announcement failed (non-fatal): {e}")
+
     # Setup signal handlers
     def signal_handler(signum, frame):
         """Handle shutdown signals."""
@@ -321,6 +335,8 @@ def main() -> int:
         bot.stop()
     
     logger.info("Bot stopped")
+    # A token change from the dashboard: start over in this process.
+    bot_token.reexec_if_requested()
     return 0
 
 

@@ -24,6 +24,7 @@ from bot.services.user_lifecycle import revoke_user_key
 from bot.services.xui_service import XUIService
 from bot.services.system_stats import SystemStatsService
 from bot.services.subscription import SubscriptionService
+from bot.services.bot_token import BotTokenChanger
 from bot.utils.admin_token import verify_admin_token
 from bot.utils.rate_limit import check_admin_rate_limit, get_admin_rate_limit_remaining
 from bot.utils.prometheus import metrics, set_gauge_users, set_system_gauge
@@ -125,6 +126,8 @@ class WebAppServer:
         self.bot = bot_instance
         self.state_machine = StateMachine(db)
         self.subscription = SubscriptionService(config)
+        # Settings → «Токен бота»: status, the one-time shares, the change.
+        self.bot_token = BotTokenChanger(config, db)
         # Connected admin WebSocket clients. handle_user_action /
         # broadcast / other writes publish a dict here so every
         # client repaints instantly instead of waiting for the next
@@ -183,7 +186,8 @@ class WebAppServer:
         self.app.router.add_get('/api/ssh/users', self.handle_ssh_users)
         self.app.router.add_get('/api/xhr/users', self.handle_xhr_users)
         # Sing-box subscription endpoint. Public — the path token is
-        # the auth (HMAC of the user's UUID with BOT_TOKEN as key).
+        # the auth (HMAC of the user's UUID with the pinned subscription
+        # secret as key, SubscriptionService.derive_token).
         # Returns the user's full cascade as one config the client
         # refreshes on a schedule; rotates IPs/paths without user
         # action.
@@ -256,6 +260,14 @@ class WebAppServer:
         )
         self.app.router.add_post(
             '/api/admin/reminders/send', self.handle_admin_reminders_send,
+        )
+        # Settings → «Токен бота»
+        self.app.router.add_get('/api/admin/bot_token', self.handle_admin_bot_token_get)
+        self.app.router.add_post(
+            '/api/admin/bot_token/challenge', self.handle_admin_bot_token_challenge,
+        )
+        self.app.router.add_post(
+            '/api/admin/bot_token/apply', self.handle_admin_bot_token_apply,
         )
         # Failure-report / ASN-heatmap endpoints — back the new Signals
         # dashboard tab where the operator triages user complaints and
@@ -1453,7 +1465,8 @@ class WebAppServer:
     async def handle_subscription(self, request: web.Request) -> web.Response:
         """Serve a sing-box JSON subscription for a single user.
 
-        The path token is HMAC(BOT_TOKEN, user.uuid) — looking it up is
+        The path token is HMAC(subscription secret, user.uuid)
+        (SubscriptionService.derive_token) — looking it up is
         a linear scan over users WHERE uuid IS NOT NULL. Cache later if
         request rate makes it visible in profiles; at our scale it's
         well under 50ms even with thousands of rows.
@@ -3428,6 +3441,63 @@ class WebAppServer:
             # kick in cleanly.
             self.db.set_setting(NotificationService.TEXT_OVERRIDES_KEY, '')
         return web.json_response({'ok': True, 'overrides': cleaned})
+
+    # ---- Settings → «Токен бота» (bot/services/bot_token.py) ----
+
+    BOT_TOKEN_MAX_BODY = 4096
+    _NO_STORE = {'Cache-Control': 'no-store'}
+
+    @staticmethod
+    def _plain_hop(request: web.Request) -> bool:
+        """The request reached the bot over plain HTTP from another host.
+        On entry that is exit's Caddy, over the public internet."""
+        if request.secure:
+            return False
+        try:
+            return not ipaddress.ip_address(request.remote or '').is_loopback
+        except ValueError:
+            return True
+
+    async def handle_admin_bot_token_get(self, request: web.Request) -> web.Response:
+        """GET /api/admin/bot_token — which bot, where its token came from,
+        whether Telegram takes it. Never the token. ``?link=1`` adds an
+        admin link that keeps working after the revoke."""
+        tg_user = self._validate_admin(request)
+        if not tg_user:
+            return web.json_response({'error': 'Unauthorized'}, status=401)
+        data = await asyncio.to_thread(
+            self.bot_token.status, admin_id=str(tg_user.get('id')),
+            plain_hop=self._plain_hop(request),
+            link=request.query.get('link') == '1',
+        )
+        return web.json_response(data, headers=self._NO_STORE)
+
+    async def handle_admin_bot_token_challenge(self, request: web.Request) -> web.Response:
+        """POST /api/admin/bot_token/challenge — a one-time share to seal
+        the new token against (bot/utils/token_envelope.py)."""
+        tg_user, error = self._validate_admin_with_rate_limit(request)
+        if error is not None:
+            return error
+        return web.json_response(self.bot_token.challenge(), headers=self._NO_STORE)
+
+    async def handle_admin_bot_token_apply(self, request: web.Request) -> web.Response:
+        """POST /api/admin/bot_token/apply ``{id, A, ct, tag}`` — the sealed
+        new token. Checks it, saves it and restarts the bot in place."""
+        tg_user, error = self._validate_admin_with_rate_limit(request)
+        if error is not None:
+            return error
+        if (request.content_length or 0) > self.BOT_TOKEN_MAX_BODY:
+            return web.json_response({'ok': False, 'error': 'too_large'}, status=413)
+        raw = await request.read()
+        if len(raw) > self.BOT_TOKEN_MAX_BODY:
+            return web.json_response({'ok': False, 'error': 'too_large'}, status=413)
+        try:
+            body = json.loads(raw.decode('utf-8'))
+        except (UnicodeDecodeError, ValueError):
+            return web.json_response({'ok': False, 'error': 'invalid json'}, status=400)
+        status, payload = await asyncio.to_thread(
+            self.bot_token.apply, str(tg_user.get('id')), body)
+        return web.json_response(payload, status=status, headers=self._NO_STORE)
 
     async def handle_admin_plans_get(self, request: web.Request) -> web.Response:
         """Return the active Stars pricing ladder for the buy menu.

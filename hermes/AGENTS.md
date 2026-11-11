@@ -6,7 +6,8 @@ from Telegram. Be concise, act carefully, and prefer diagnosis before mutation.
 
 ## Golden rules
 - **Never print secrets.** Never `cat`/`grep`/echo `/opt/vpn-bot/.env`, `~/.hermes/.env`, `/etc/opencode.env`,
-  SSH private keys (`/root/.ssh/*`), tokens, or passwords. Use them transparently; never surface their values.
+  the bot's `secrets/` (`/var/lib/vpn-bot/secrets/` in the container — the bot token the dashboard set and the
+  key of every /sub link), SSH private keys (`/root/.ssh/*`), tokens, or passwords. Use them transparently; never surface their values.
 - **Confirm before destructive ops.** Before `rm`, `docker compose down`, `systemctl restart/stop`, any
   `UPDATE`/`DELETE` on a DB, a broadcast to users, or anything hard to reverse — propose the exact command
   and wait for an explicit "да"/"OK".
