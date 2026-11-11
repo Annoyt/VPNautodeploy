@@ -18,8 +18,9 @@ container when the list changed.
 
 * **Who:** the users whose profile carries ``xhr`` (switched on in the
   cascade — it is opt-in, ``OPT_IN_PROTOCOLS`` — and the user's tier gets
-  it, ``PROTOCOL_TIER``), narrowed to the rule every unmetered path asks:
-  ``ru_exit.is_eligible`` — paid and not lapsed, or a payer's open ticket.
+  it, ``PROTOCOL_TIER``), narrowed to the rule the RU-zone and SSH exits
+  ask too: ``ru_exit.is_eligible`` — paid and not lapsed, or a payer's open
+  ticket. The sync on exit then leaves out whom the panel has switched off.
   The profile also carries xhr for a lapsed payer (still status ``paid``)
   and for a demo user with an open ticket (``PAID_USER_STATUSES``); their
   xhr entry fails like a lapsed key does everywhere, and the cascade moves
@@ -36,10 +37,11 @@ container when the list changed.
 A read error raises: the endpoint answers 503, never an empty list (the
 sync would drop every user).
 
-Not done: traffic. This xray never touches the panel, so xhr bytes do not
-count against the quota, and a payer whose quota is spent on the other
-protocols keeps xhr. The RU-zone and SSH exits have the same gap, which is
-why all three are paid-only.
+Traffic: the sync on exit reads xray's per-user counters and adds them to
+the user's ``client_traffics`` row in the panel's x-ui.db, the quota every
+panel protocol shares, and keeps out of the config whom the panel has
+switched off (AGENTS.md §51). The RU-zone and SSH exits are still
+unmetered, which is why they stay paid-only.
 """
 
 import logging
