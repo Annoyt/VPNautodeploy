@@ -153,7 +153,7 @@ Files with this mark: `test_database.py`, `test_security.py`, `test_state_machin
 ./scripts/deploy_to_entry.sh                 # full bot/ sync
 ./scripts/deploy_to_entry.sh bot/core/web_server.py   # or a subset
 ```
-It stamps the git sha into `bot/version.txt`, rsyncs ONLY `bot/` + `scripts/`
+It stamps the git sha into `bot/version.txt`, rsyncs ONLY `bot/` + `scripts/` + `systemd/` (unit files for host installers, installed by nobody on the way)
 (never compose/.env — entry keeps hand-tuned copies), runs the remote
 `deploy_entry_bot.sh` (hardcoded `--no-deps` so 3x-ui is never recreated —
 see the 2026-07-19 incident), then FAILS unless `/health` reports that
