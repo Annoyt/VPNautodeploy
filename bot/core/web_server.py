@@ -978,9 +978,7 @@ class WebAppServer:
         """GET /api/ssh/users — the exit's sshd sync (scripts/setup_ssh_exit.sh,
         IMPROVEMENT_PLAN F, E4): ``{"users": [{"user", "hash"}]}`` for the
         paid users, SHA-512 crypt hashes only. The exit report's token."""
-        expected = (getattr(self.config, 'DPI_REPORT_TOKEN', '') or '').strip()
-        got = request.headers.get('X-DPI-Token', '')
-        if not expected or not hmac.compare_digest(got, expected):
+        if not self._dpi_token_ok(request):
             return web.json_response({'ok': False}, status=403)
         from bot.services import ssh_exit
         if not ssh_exit.enabled(self.config):

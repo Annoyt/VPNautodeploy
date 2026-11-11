@@ -71,7 +71,9 @@ def verify_admin_token(bot_token: str, token: str) -> Optional[str]:
         payload.encode(),
         hashlib.sha256,
     ).hexdigest()
-    if not hmac.compare_digest(expected_mac, signed_mac):
+    # As bytes: a token can decode to non-ASCII text, and compare_digest
+    # raises on such a str (a 500 on the dashboard instead of a 401).
+    if not hmac.compare_digest(expected_mac.encode(), signed_mac.encode()):
         return None
 
     return admin_id
