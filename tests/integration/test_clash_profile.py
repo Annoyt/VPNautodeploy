@@ -118,8 +118,10 @@ class TestGroups:
         assert g['VPN']['type'] == 'select'
         assert g['VPN']['proxies'] == ['Cascade', 'Auto'] + names
         assert g['Auto']['type'] == 'url-test' and g['Auto']['proxies'] == names
-        # Hy2 present → it alone carries calls (as in the sing-box profile)
-        assert [n[-4:] for n in g['Calls']['proxies']] == ['-hy2']
+        # Calls (IMPROVEMENT_PLAN F, A1): a fallback group, hy2 first, then
+        # Reality (UDP inside its TCP stream); never ws or ShadowTLS.
+        assert g['Calls']['type'] == 'fallback'
+        assert g['Calls']['proxies'] == ['u1-hy2', 'u1-reality']
 
     def test_calls_fall_back_to_reality(self):
         assert self._groups(('reality', 'ws'))['Calls']['proxies'] == ['u1-reality']

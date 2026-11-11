@@ -401,6 +401,16 @@ class SubscriptionService:
 
     # ---------- Sing-box JSON ----------
 
+    # Tolerance of the sing-box 'calls' urltest, ms. sing-box 1.11 switches
+    # to another server only when ``current delay > its delay + tolerance``
+    # (protocol/group/urltest.go), so a tolerance above any delay it can
+    # measure keeps the first live server in list order — hy2 while it
+    # works — and moves on only when that server fails its check. The sum
+    # is uint16 arithmetic there: delays stop at the 15-s test timeout,
+    # and 15 000 + 30 000 stays clear of the 65 535 wrap, past which the
+    # comparison would flip and the group would chase the fastest again.
+    _CALLS_URLTEST_TOLERANCE_MS = 30000
+
     def _collect_outbounds(
         self, user, enabled_protocols, *, protocols: Optional[dict] = None,
     ) -> tuple:
@@ -416,12 +426,17 @@ class SubscriptionService:
         """
         outbounds: List[dict] = []
         proxy_tags: List[str] = []
-        # Reality (xudp) and Hy2 (native UDP) carry Telegram call media
-        # well; the CDN transports (ws/xhttp) can't do real UDP. Collect
-        # the UDP-native tags for a dedicated 'calls' selector so voice/
-        # video isn't stranded on a CDN outbound that the auto-selector
-        # happened to pick by its TCP latency probe.
-        udp_call_tags: List[str] = []
+        # Servers for the dedicated 'calls' group, so Telegram call media
+        # never lands on a server the auto-selector picked by its TCP
+        # latency (ShadowTLS carries no UDP at all, the CDN path is the
+        # one Cloudflare freezes after 16 KB). In priority order
+        # (IMPROVEMENT_PLAN F, A1): hy2 first — native QUIC, the best call
+        # path while the network lets UDP through; then the servers that
+        # carry UDP inside their TCP stream (xudp), Reality and the
+        # reserve DE node, for networks that throttle UDP; Turbo last —
+        # it keeps long sessions five times worse than hy2 (off since
+        # 2026-09-21, AGENTS.md hy2t note).
+        call_tags: dict = {'hy2': [], 'reality': [], 'de': [], 'hy2t': []}
 
         for proto in enabled_protocols:
             ob = self._build_outbound(proto, user)
@@ -439,8 +454,8 @@ class SubscriptionService:
             proxy_tags.append(tag)
             if protocols is not None:
                 protocols[tag] = proto
-            if proto in ('reality', 'hy2', 'hy2t'):
-                udp_call_tags.append(tag)
+            if proto in call_tags:
+                call_tags[proto].append(tag)
 
         # Reserve fallback node (DE) — paid-tier only. The /sub handler
         # provisions the client lazily, in the background; here we just
@@ -456,24 +471,50 @@ class SubscriptionService:
             if fb is not None:
                 outbounds.append(fb)
                 proxy_tags.append(fb['tag'])
-                # Reality carries UDP — usable for calls too.
-                udp_call_tags.append(fb['tag'])
+                # VLESS-Reality: UDP over xudp, usable for calls too.
+                call_tags['de'].append(fb['tag'])
 
         if not proxy_tags:
             # Empty cascade — return a no-op config rather than a
             # broken one. Client will just show no servers.
             proxy_tags = []
 
-        # A bare Reality outbound can pass the 'calls' urltest probe via its
-        # TLS masquerade even when the user isn't provisioned as a client on
-        # the Reality inbound (false-healthy) — the selector then picks it
-        # and silently swallows call media. Hy2 only probes healthy when the
-        # tunnel really carries data, so when Hy2 is present make it the sole
-        # call transport; only fall back to Reality if there's no Hy2.
-        hy2_call_tags = [t for t in udp_call_tags if t.endswith(('-hy2', '-hy2t'))]
-        if hy2_call_tags:
-            udp_call_tags = hy2_call_tags
+        # Until 2026-11 hy2 alone carried calls whenever the profile had it:
+        # a Reality client NOT attached to the inbound was feared to pass
+        # the group's url test through the TLS masquerade and swallow call
+        # media. It does not — checked on a stand with the exit's xray
+        # 26.6.22, sing-box 1.11.15 and mihomo 1.19.x: a uuid the inbound
+        # does not know fails the url test (AGENTS.md §47) — and every key
+        # sits on the Reality inbound anyway (88 of 88 on 2026-11-10). With
+        # hy2 alone, a network that throttles UDP left the user's calls
+        # nowhere to go.
+        udp_call_tags = (call_tags['hy2'] + call_tags['reality']
+                         + call_tags['de'] + call_tags['hy2t'])
         return outbounds, proxy_tags, udp_call_tags
+
+    @staticmethod
+    def _demoted_set(demoted) -> frozenset:
+        """``demoted`` as a frozenset of protocol names, read once: a one-shot
+        iterator must not demote in one group and not in the next. Anything
+        unusable demotes nothing."""
+        try:
+            return frozenset(p for p in (demoted or ()) if isinstance(p, str))
+        except TypeError:
+            return frozenset()
+
+    @staticmethod
+    def _calls_order(tags: List[str], protocol_of: dict, demoted) -> List[str]:
+        """The calls group in priority order, with the protocols DPIMonitor
+        demotes for this network moved to the end (IMPROVEMENT_PLAN F, A2):
+        hy2 demoted on a network → Reality leads that network's calls.
+        Stable; the reserve node has no protocol name and never moves.
+        Anything unusable as a protocol set moves nothing."""
+        try:
+            demoted = {p for p in (demoted or ()) if isinstance(p, str)}
+        except TypeError:
+            return list(tags)
+        return ([t for t in tags if protocol_of.get(t) not in demoted]
+                + [t for t in tags if protocol_of.get(t) in demoted])
 
     def build_singbox_config(
         self,
@@ -481,12 +522,18 @@ class SubscriptionService:
         enabled_protocols: Tuple[str, ...],
         *,
         lockdown: bool = False,
+        demoted: Iterable[str] = frozenset(),
     ) -> dict:
         """Build a complete sing-box JSON config.
 
         ``enabled_protocols`` is the tier-filtered cascade order from
         ``MyKeyAnswerHandler.get_cascade_order(db, user)`` — same set
         the user gets via /mykey rotation, but all bundled at once.
+
+        ``demoted`` — the protocols DPIMonitor demotes for the user's
+        network (``get_auto_demotions``): they go to the end of the
+        ``calls`` group (``_calls_order``). The cascade order itself
+        already carries them at its tail.
 
         For ``lang='en'`` users, adds a RU-exit outbound so they can
         access RU-geo-blocked content (VK/Yandex/etc) from abroad.
@@ -499,9 +546,14 @@ class SubscriptionService:
         ``get_cascade_order``. This service has no db; the flag is read
         once per request by the /sub handler.
         """
+        # Read more than once below: a one-shot iterator must not demote in
+        # one group and not in the next.
+        demoted = self._demoted_set(demoted)
+        protocol_of: dict = {}
         outbounds, proxy_tags, udp_call_tags = self._collect_outbounds(
-            user, enabled_protocols,
+            user, enabled_protocols, protocols=protocol_of,
         )
+        udp_call_tags = self._calls_order(udp_call_tags, protocol_of, demoted)
         lang = (getattr(user, 'lang', None) or 'ru') if user else 'ru'
 
         # urltest auto-selector at the top so Hiddify's default mode
@@ -523,11 +575,13 @@ class SubscriptionService:
             'default': 'auto' if proxy_tags else 'direct',
         })
 
-        # UDP-native selector for Telegram call media (see udp_call_tags).
-        # Ranks only Reality/Hy2, so a call never lands on a CDN transport
-        # that can't carry UDP. The route rules send Telegram + RU-domestic
-        # UDP here; if no UDP-native outbound exists on this deployment the
-        # rules fall back to 'proxy'.
+        # The group for Telegram call media (see _collect_outbounds): every
+        # UDP the route rules do not send direct lands here; with no such
+        # server on this deployment the rules fall back to 'proxy'. sing-box
+        # has no fallback group, so a urltest whose tolerance exceeds any
+        # delay it can measure plays one: it keeps the FIRST live server in
+        # list order instead of the fastest, and leaves it only when it
+        # fails its check (_CALLS_URLTEST_TOLERANCE_MS).
         calls_tag: Optional[str] = None
         if udp_call_tags:
             calls_tag = 'calls'
@@ -537,7 +591,7 @@ class SubscriptionService:
                 'outbounds': udp_call_tags,
                 'url': 'https://www.gstatic.com/generate_204',
                 'interval': '3m',
-                'tolerance': 50,
+                'tolerance': self._CALLS_URLTEST_TOLERANCE_MS,
             })
 
         # Required system outbounds.
@@ -1084,8 +1138,10 @@ class SubscriptionService:
           * ``Auto`` (url-test) — the fastest of the same set.
           * ``demoted`` — protocols DPIMonitor holds at the tail for this
             user's ASN; Cascade and Auto leave them out, ``VPN`` (the
-            manual pick) and ``Calls`` keep them.
-          * ``Calls`` (url-test) — UDP-native servers only, as before.
+            manual pick) keeps them, ``Calls`` moves them to its end.
+          * ``Calls`` (fallback, since 2026-11) — the servers that carry
+            UDP, hy2 first, then Reality and the DE reserve (xudp inside
+            TCP), Turbo last; the channels' copies after them.
           * the groups health-check gstatic, like the sing-box profile;
             our ``/probe/<token>/<provider>`` is the providers' health
             check only — telemetry, never a failover input.
@@ -1109,6 +1165,7 @@ class SubscriptionService:
         without a profile update. Without WEBAPP_URL there is nothing to
         point at and the profile is exactly what it was before E1.
         """
+        demoted = self._demoted_set(demoted)
         proxies, calls, protocol_of = self._clash_proxies(user, enabled_protocols)
         names = [p['name'] for p in proxies]
         uuid = getattr(user, 'uuid', None) if user else None
@@ -1144,12 +1201,28 @@ class SubscriptionService:
                         )
             groups += [cascade, auto]
         if calls:
-            # UDP-native only (see _collect_outbounds) — call media must
-            # never land on a TCP transport.
-            groups.append({'name': 'Calls', 'type': 'url-test', 'proxies': calls,
+            # IMPROVEMENT_PLAN F, A1/A2: a fallback group — the first live
+            # server in priority order (hy2, Reality, the DE reserve, Turbo;
+            # see _collect_outbounds), with what DPIMonitor demotes for this
+            # network moved to the end. The fastest-wins url-test it replaces
+            # chased short probes (that is how Turbo used to take calls).
+            calls = self._calls_order(calls, protocol_of, demoted)
+            calls_group = {'name': 'Calls', 'type': 'fallback', 'proxies': calls,
                            'url': self._CLASH_TEST_URL,
-                           'interval': self._CLASH_GROUP_INTERVAL,
-                           'tolerance': 50})
+                           'interval': self._CLASH_GROUP_INTERVAL}
+            if use:
+                # The channels' copies of the same servers, after the
+                # profile's own: a call keeps a path when the servers
+                # changed and the profile has not caught up. Only the call
+                # servers — the providers carry every server — matched by
+                # name, end-anchored like Cascade's exclude-filter (u1-hy2
+                # must not catch u1-hy2t). One regex on purpose: mihomo
+                # re-sorts a group by its filters when there are several.
+                calls_group['use'] = use
+                calls_group['filter'] = (
+                    '(?:' + '|'.join(re.escape(n) for n in calls) + ')$'
+                )
+            groups.append(calls_group)
 
         if lockdown:
             # B5: every lookup through the tunnel; proxy hostnames still
@@ -1760,6 +1833,13 @@ class SubscriptionService:
                 'detour': stls_tag,
                 'server': host,
                 'server_port': port,
+                # ShadowTLS is TCP-only, and UDP to entry:443 is the hy2
+                # DNAT — an SS UDP relay there is garbage. Declared so a
+                # client that drops the profile's groups (Hiddify keeps
+                # only the outbounds and balances UDP over all of them)
+                # never sends a call's UDP here (IMPROVEMENT_PLAN F, A3).
+                # The Clash form says the same with ``udp: false``.
+                'network': 'tcp',
             },
             {
                 'type': 'shadowtls',

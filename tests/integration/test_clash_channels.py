@@ -136,9 +136,11 @@ class TestCascadeGroup:
         g = _groups(cfg)
         assert g['Cascade']['proxies'] == _names('ws', 'stls')
         assert g['Auto']['proxies'] == _names('ws', 'stls')
-        # the manual pick and the calls group keep them
+        # the manual pick and the calls group keep them (Calls moves the
+        # demoted to its end — here every call server is demoted, so the
+        # order stays)
         assert g['VPN']['proxies'] == ['Cascade', 'Auto'] + _names(*ALL)
-        assert g['Calls']['proxies'] == _names('hy2')
+        assert g['Calls']['proxies'] == _names('hy2', 'reality')
         assert [p['name'] for p in cfg['proxies']] == _names(*ALL)
 
     def test_demoted_keeps_reserve_last(self):
@@ -271,9 +273,10 @@ class TestProviders:
 
     def test_groups_take_the_providers(self):
         g = _groups(_build(config=_config(SUB_MIRROR_URLS='https://m1.example.net')))
-        for name in ('VPN', 'Cascade', 'Auto'):
+        for name in ('VPN', 'Cascade', 'Auto', 'Calls'):
             assert g[name]['use'] == ['emergency', 'mirror-1'], name
-        assert 'use' not in g['Calls']
+        # Calls takes only the channels' copies of its own servers
+        assert g['Calls']['filter'] == r'(?:u1\-hy2|u1\-reality)$'
 
     @pytest.mark.parametrize('raw,mirrors', [
         ('', []),
