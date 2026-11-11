@@ -1924,7 +1924,8 @@ class SubscriptionService:
 
         Reaches its server through entry's haproxy :8443, which routes it by
         its SNI (``XHR_SNI``, a dest of its own). The server must be an xray
-        of its own on exit, not a panel inbound (AGENTS.md §51). One multiplexed HTTP/2 session instead of a TLS
+        of its own on exit, not a panel inbound (scripts/setup_xhr_exit.sh,
+        AGENTS.md §51). One multiplexed HTTP/2 session instead of a TLS
         handshake per connection; the client keeps at most
         ``XHR_MAX_CONNECTIONS`` of them (the advice for RU networks is
         three). No Vision flow: XHTTP does not carry it. Off while XHR_SNI

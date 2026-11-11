@@ -914,8 +914,9 @@ class MyKeyAnswerHandler(BaseCallbackHandler):
     DEFAULT_CASCADE_ORDER = ('hy2t', 'stls', 'ws', 'hy2', 'reality')
     # Known protocols that join the cascade only when the operator switches
     # them on (the dashboard editor): until then they are listed disabled.
-    # XHTTP (E3) needs an exit inbound and an haproxy route first — an
-    # automatic "enabled" on deploy would hand out a server nobody runs.
+    # XHTTP (E3) needs its server on exit (scripts/setup_xhr_exit.sh) and
+    # an haproxy route on entry first — an automatic "enabled" on deploy
+    # would hand out a server nobody runs.
     OPT_IN_PROTOCOLS = ('xhr',)
     SETTING_KEY = 'cascade_protocol_order'
     COUNTRY_SETTING_KEY = 'cascade_by_country'
