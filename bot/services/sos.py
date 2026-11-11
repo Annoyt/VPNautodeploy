@@ -112,6 +112,7 @@ PROTO_LABEL = {
     'hy2': 'Hysteria2',
     'hy2t': 'Hysteria2 Turbo',
     'xhttp': 'XHTTP',
+    'xhr': 'VLESS XHTTP',
 }
 _VERDICT_TEXT = {
     'ru': {'ok': ('✅', 'работает'), 'silent': ('⚠️', 'с перебоями'),

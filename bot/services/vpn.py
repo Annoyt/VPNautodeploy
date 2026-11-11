@@ -15,6 +15,8 @@ from bot.utils.exceptions import (
     InvalidStateError
 )
 
+from bot.services import tls_fingerprint
+
 logger = logging.getLogger(__name__)
 
 
@@ -264,7 +266,7 @@ class VPNService:
             "type=tcp",
             "security=reality",
             f"pbk={public_key}",
-            "fp=chrome",
+            f"fp={tls_fingerprint.for_user(self.config, client_uuid)}",
             f"sni={sni}",
         ]
         
@@ -458,13 +460,35 @@ class VPNService:
             "tls": "tls",
             "sni": sni,
             "alpn": "h2,http/1.1",
-            "fp": "chrome",
+            "fp": tls_fingerprint.for_user(self.config, client_uuid),
             "mode": "auto",
         }
         encoded = base64.b64encode(
             _json.dumps(vmess_config, separators=(',', ':')).encode()
         ).decode()
         return f"vmess://{encoded}"
+
+    def generate_xhr_link(self, client_uuid: str, email: str) -> Optional[str]:
+        """``vless://`` share link for VLESS + XHTTP + Reality
+        (IMPROVEMENT_PLAN F, E3); None while XHR_SNI is empty."""
+        from urllib.parse import quote
+        cfg = self.config
+        sni = getattr(cfg, 'XHR_SNI', '') or ''
+        host = getattr(cfg, 'ENTRY_NODE_IP', '') or ''
+        pbk = getattr(cfg, 'XHR_PUBLIC_KEY', '') or getattr(cfg, 'REALITY_PUBLIC_KEY', '') or ''
+        if not (isinstance(sni, str) and sni and host and pbk and client_uuid):
+            return None
+        port = int(getattr(cfg, 'XHR_PORT', 0) or getattr(cfg, 'ENTRY_NODE_PORT', 443) or 443)
+        sid = getattr(cfg, 'XHR_SID', '') or getattr(cfg, 'SID_VALUE', '') or ''
+        path = getattr(cfg, 'XHR_PATH', '') or '/xhr'
+        params = [
+            'type=xhttp', 'security=reality', 'encryption=none',
+            f'sni={sni}', f'pbk={pbk}', f'sid={sid}',
+            f'fp={tls_fingerprint.for_user(cfg, client_uuid)}',
+            f'path={quote(path, safe="")}', 'mode=auto',
+        ]
+        name = quote(f"{(email or 'user').split('@')[0]}-xhr")
+        return f"vless://{client_uuid}@{host}:{port}?{'&'.join(params)}#{name}"
 
     def generate_vless_ws_link(
         self,
@@ -507,7 +531,7 @@ class VPNService:
             "tls": "tls",
             "sni": sni,
             "alpn": "http/1.1",
-            "fp": "chrome",
+            "fp": tls_fingerprint.for_user(self.config, client_uuid),
         }
         encoded = base64.b64encode(
             _json.dumps(vmess_config, separators=(',', ':')).encode()

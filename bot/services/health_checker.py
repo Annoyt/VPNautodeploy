@@ -82,6 +82,16 @@ class HealthChecker:
     RESERVE_TAG = probe_rules.RESERVE_TAG
     RESERVE_PROBE_PORT = 18086
 
+    # VLESS + XHTTP + Reality (IMPROVEMENT_PLAN F, E3): sing-box has no
+    # XHTTP, so this one protocol is probed through a second sidecar on
+    # mihomo — the client's own core (scripts/gen_probe_config_mihomo.py,
+    # compose service probe-proxy-mihomo). Probed where XHR_SNI is set.
+    XHR_TAG = 'xhr'
+    XHR_PROBE_PORT = 18087
+    # Tags whose sidecar inbound arrives with a regenerated probe config:
+    # until it does, every probe is proxy_down and nothing is written.
+    OPTIONAL_SIDECAR_TAGS = (RESERVE_TAG, XHR_TAG)
+
     # Per-request time budget, seconds. Every request of a run starts at
     # once (the pool holds one connection per target), so the budget is
     # the request's own: until 2026-11 five connections served ten requests
@@ -151,7 +161,15 @@ class HealthChecker:
             ports[cls.HY2T_TAG] = cls.HY2T_PROBE_PORT
         if cls.reserve_probe_enabled(config):
             ports[cls.RESERVE_TAG] = cls.RESERVE_PROBE_PORT
+        if cls.xhr_probe_enabled(config):
+            ports[cls.XHR_TAG] = cls.XHR_PROBE_PORT
         return ports
+
+    @staticmethod
+    def xhr_probe_enabled(config) -> bool:
+        """Same gate as subscription._build_xhr: XHR_SNI set (a string)."""
+        sni = getattr(config, 'XHR_SNI', '') or ''
+        return isinstance(sni, str) and bool(sni.strip())
 
     @classmethod
     def probe_tags_for(cls, config) -> List[str]:
@@ -170,7 +188,14 @@ class HealthChecker:
 
     def _proxy_url(self, protocol: str) -> Optional[str]:
         port = self.probe_ports.get(protocol)
-        return f'http://{self.proxy_host}:{port}' if port else None
+        if not port:
+            return None
+        if protocol == self.XHR_TAG:
+            host = (getattr(self.config, 'PROBE_PROXY_MIHOMO_HOST', '') or
+                    'probe-proxy-mihomo')   # Settings + compose pass it
+            host = host.strip() if isinstance(host, str) else 'probe-proxy-mihomo'
+            return f'http://{host}:{port}'
+        return f'http://{self.proxy_host}:{port}'
 
     async def check_all_outbounds(self) -> Dict[str, Dict[str, str]]:
         """Run health checks for all configured outbounds against all targets.
@@ -202,6 +227,15 @@ class HealthChecker:
         the probe config predates B6 — rows saying "dark" would page about
         a reserve that may be fine."""
         proxy = self._proxy_url(protocol)
+        # A sidecar of its own that does not answer at all (not created yet,
+        # stopped, its name unresolvable) is not a dark protocol: aiohttp
+        # reports a name it cannot resolve as a plain error, not proxy_down,
+        # and the rows would page "xhr dark" and demote it (review of E).
+        if (protocol in self.OPTIONAL_SIDECAR_TAGS and proxy
+                and not await self._sidecar_answers(proxy)):
+            logger.warning(f"health_checker: the probe sidecar for {protocol} "
+                           f"({proxy}) does not answer — no rows written")
+            return None
         connector = aiohttp.TCPConnector(limit=len(self.TARGET_DOMAINS))
         async with aiohttp.ClientSession(connector=connector) as session:
             statuses = await asyncio.gather(
@@ -217,12 +251,12 @@ class HealthChecker:
                         'error': str(status_obj)[:200],
                     }
                 protocol_results[domain] = status_obj
-            if (protocol == self.RESERVE_TAG
+            if (protocol in self.OPTIONAL_SIDECAR_TAGS
                     and all(r['status'] == 'proxy_down' for r in protocol_results.values())):
                 logger.warning(
-                    "health_checker: the probe sidecar has no inbound for the DE "
-                    "reserve yet — regenerate it (scripts/gen_probe_config.py); "
-                    "no rows written"
+                    f"health_checker: no probe sidecar inbound for {protocol} yet — "
+                    f"regenerate it (scripts/gen_probe_config.py, "
+                    f"gen_probe_config_mihomo.py for xhr); no rows written"
                 )
                 return None
             for domain, result in protocol_results.items():
@@ -230,6 +264,24 @@ class HealthChecker:
             bulk = await self._check_bulk(session, proxy)
             self._write_bulk(protocol, bulk)
         return protocol_results
+
+    SIDECAR_CONNECT_S = 3
+
+    async def _sidecar_answers(self, proxy: str) -> bool:
+        """Does the sidecar's port take a TCP connection at all?"""
+        from urllib.parse import urlsplit
+        parts = urlsplit(proxy)
+        try:
+            _reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(parts.hostname, parts.port), self.SIDECAR_CONNECT_S)
+        except Exception:
+            return False
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except Exception:
+            pass
+        return True
 
     async def _check_bulk(self, session: aiohttp.ClientSession,
                           proxy: Optional[str]) -> Dict:

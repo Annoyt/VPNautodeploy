@@ -60,6 +60,11 @@ def build_config(config, user, svc=None, *, log=None) -> dict:
     log = log or (lambda msg: None)
     inbounds, outbounds, rules = [], [], []
     for proto, port in HealthChecker.probe_ports_for(config).items():
+        if proto == HealthChecker.XHR_TAG:
+            # sing-box has no XHTTP: the mihomo sidecar probes it
+            # (scripts/gen_probe_config_mihomo.py).
+            log(f"skip {proto}: probed by the mihomo sidecar")
+            continue
         if proto == HealthChecker.RESERVE_TAG:
             # The DE reserve (IMPROVEMENT_PLAN F, B6) is no cascade builder:
             # its outbound is the one paid users get, for the probe user.

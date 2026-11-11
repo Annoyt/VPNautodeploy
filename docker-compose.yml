@@ -131,6 +131,18 @@ services:
       # /sub mirrors on other domains for the FlClash profile's
       # proxy-providers (comma-separated base URLs, E5). Empty = off.
       - SUB_MIRROR_URLS=${SUB_MIRROR_URLS:-}
+      - TLS_FINGERPRINTS=${TLS_FINGERPRINTS:-}
+      - SSH_EXIT_HOST=${SSH_EXIT_HOST:-}
+      - SSH_EXIT_PORT=${SSH_EXIT_PORT:-}
+      - SSH_HOST_KEY=${SSH_HOST_KEY:-}
+      - SSH_USER_SECRET=${SSH_USER_SECRET:-}
+      - XHR_SNI=${XHR_SNI:-}
+      - XHR_PATH=${XHR_PATH:-}
+      - XHR_PUBLIC_KEY=${XHR_PUBLIC_KEY:-}
+      - XHR_SID=${XHR_SID:-}
+      - XHR_PORT=${XHR_PORT:-}
+      - XHR_MAX_CONNECTIONS=${XHR_MAX_CONNECTIONS:-}
+      - PROBE_PROXY_MIHOMO_HOST=${PROBE_PROXY_MIHOMO_HOST:-probe-proxy-mihomo}
       # OpenCode AI agent — host-side `opencode serve` (headless HTTP).
       # Empty OPENCODE_URL disables the /ai command. Basic-auth password
       # must match OPENCODE_SERVER_PASSWORD set on the opencode.service unit.
@@ -291,6 +303,21 @@ services:
     # No published ports: only vpn-bot talks to it, over the compose
     # network (probe-proxy:18081..18085; 18085 = hy2t, emitted by the
     # generator only when HY2T_PORT is set — see HealthChecker.PROBE_PORTS).
+
+  # Second probe sidecar on mihomo (IMPROVEMENT_PLAN F, E3): sing-box has no
+  # XHTTP, so VLESS + XHTTP + Reality is probed through the client's own core.
+  # Config: scripts/gen_probe_config_mihomo.py > ./probe-proxy-mihomo/config.yaml.
+  # Only needed where XHR_SNI is set; probe-proxy-mihomo:18087.
+  probe-proxy-mihomo:
+    image: metacubex/mihomo:v1.19.33
+    container_name: probe-proxy-mihomo
+    restart: unless-stopped
+    command: ["-d", "/root/.config/mihomo"]
+    volumes:
+      - ./probe-proxy-mihomo:/root/.config/mihomo
+    networks:
+      - vpn-net
+    profiles: ["xhr"]
 
 volumes:
   3xui-data:

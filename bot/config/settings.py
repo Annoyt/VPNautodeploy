@@ -280,6 +280,36 @@ class Settings:
         # delivering the servers if the main domain gets blocked. A mirror
         # must proxy /sub/<token>?format=clash-proxies to this bot. Empty = off.
         self.SUB_MIRROR_URLS: str = os.getenv('SUB_MIRROR_URLS', '').strip()
+        # TLS fingerprint pool, comma-separated (IMPROVEMENT_PLAN F, E1):
+        # each user gets one value by uuid; unset = chrome for everyone.
+        self.TLS_FINGERPRINTS: str = os.getenv('TLS_FINGERPRINTS', '').strip()
+        # VLESS + XHTTP + Reality (IMPROVEMENT_PLAN F, E3): one multiplexed
+        # HTTP/2 session instead of a handshake per connection, behind
+        # entry's haproxy :8443, routed by its own SNI. The server is NOT a
+        # panel inbound: the relational panel gives every VLESS inbound the
+        # client's Vision flow, and xray rejects flow-less TLS-in-TLS on it
+        # (the CDN inbound is VMess for that reason) — it needs an xray of
+        # its own on exit. Empty XHR_SNI = the protocol is off everywhere.
+        # SSH as the paid users' emergency path (IMPROVEMENT_PLAN F, E4;
+        # bot/services/ssh_exit.py, scripts/setup_ssh_exit.sh on exit).
+        self.SSH_EXIT_HOST: str = os.getenv('SSH_EXIT_HOST', '').strip()
+        self.SSH_EXIT_PORT: str = os.getenv('SSH_EXIT_PORT', '22022').strip() or '22022'
+        self.SSH_HOST_KEY: str = os.getenv('SSH_HOST_KEY', '').strip()
+        self.SSH_USER_SECRET: str = os.getenv('SSH_USER_SECRET', '').strip()
+        self.XHR_SNI: str = os.getenv('XHR_SNI', '').strip()
+        self.XHR_PATH: str = os.getenv('XHR_PATH', '/xhr').strip() or '/xhr'
+        self.XHR_PUBLIC_KEY: str = os.getenv('XHR_PUBLIC_KEY', '').strip()
+        self.XHR_SID: str = os.getenv('XHR_SID', '').strip()
+        try:
+            self.XHR_PORT: int = int(os.getenv('XHR_PORT', '0') or '0')
+            # The mihomo probe sidecar (compose profile xhr) that probes xhr.
+            self.PROBE_PROXY_MIHOMO_HOST: str = (
+                os.getenv('PROBE_PROXY_MIHOMO_HOST', 'probe-proxy-mihomo').strip()
+                or 'probe-proxy-mihomo')
+            self.XHR_MAX_CONNECTIONS: int = int(os.getenv('XHR_MAX_CONNECTIONS', '3') or '3')
+        except ValueError:
+            self.XHR_PORT, self.XHR_MAX_CONNECTIONS = 0, 3
+            self.PROBE_PROXY_MIHOMO_HOST = 'probe-proxy-mihomo'
 
         # OpenCode AI agent — the bot talks to a local `opencode serve`
         # HTTP server (headless). Optional: if OPENCODE_URL is empty, the

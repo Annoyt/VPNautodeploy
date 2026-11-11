@@ -33,6 +33,7 @@ from bot.services.fallback_node import (
     FallbackNodeService,
 )
 from bot.services import rule_lists
+from bot.services import tls_fingerprint
 
 logger = logging.getLogger(__name__)
 
@@ -145,6 +146,7 @@ class SubscriptionService:
             'hy2t': vpn.generate_hy2t_link,
             'ws': vpn.generate_vless_ws_link,
             'stls': vpn.generate_stls_link,
+            'xhr': vpn.generate_xhr_link,
         }
         links: List[str] = []
         for proto in enabled_protocols:
@@ -180,7 +182,7 @@ class SubscriptionService:
         pbk = fb._cfg('FALLBACK_NODE_PBK')
         sid = fb._cfg('FALLBACK_NODE_SID')
         params = (
-            'encryption=none&security=reality&type=tcp&fp=chrome'
+            f'encryption=none&security=reality&type=tcp&fp={self._fp(user.uuid)}'
             f'&sni={sni}&pbk={pbk}&sid={sid}'
         )
         return f'vless://{user.uuid}@{host}:{port}?{params}#{name}'
@@ -209,6 +211,7 @@ class SubscriptionService:
         builders = {
             'reality': self._xray_reality,
             'ws': self._xray_ws,
+            'xhr': self._xray_xhr,
         }
         for proto in enabled_protocols:
             builder = builders.get(proto)
@@ -298,7 +301,41 @@ class SubscriptionService:
                     'serverName': sni,
                     'publicKey': pbk,
                     'shortId': getattr(cfg, 'SID_VALUE', '') or '',
-                    'fingerprint': 'chrome',
+                    'fingerprint': self._fp(user.uuid),
+                },
+            },
+        }
+
+    def _xray_xhr(self, user) -> Optional[dict]:
+        """VLESS + XHTTP + Reality in xray shape (E3); XMUX caps the
+        client's connections like the Clash form's reuse-settings."""
+        ob = self._build_xhr(getattr(user, 'uuid', None),
+                             (getattr(user, 'email', '') or 'user').split('@')[0])
+        if ob is None:
+            return None
+        tls, transport = ob['tls'], ob['transport']
+        return {
+            'protocol': 'vless',
+            'tag': ob['tag'],
+            'settings': {
+                'vnext': [{
+                    'address': ob['server'],
+                    'port': ob['server_port'],
+                    'users': [{'id': ob['uuid'], 'encryption': 'none'}],
+                }],
+            },
+            'streamSettings': {
+                'network': 'xhttp',
+                'security': 'reality',
+                'xhttpSettings': {
+                    'path': transport['path'], 'mode': transport['mode'],
+                    'extra': {'xmux': {'maxConnections': transport['max_connections']}},
+                },
+                'realitySettings': {
+                    'serverName': tls['server_name'],
+                    'publicKey': tls['reality']['public_key'],
+                    'shortId': tls['reality']['short_id'],
+                    'fingerprint': tls['utls']['fingerprint'],
                 },
             },
         }
@@ -329,7 +366,7 @@ class SubscriptionService:
                 'network': 'httpupgrade',
                 'security': 'tls',
                 'httpupgradeSettings': {'path': path, 'host': host},
-                'tlsSettings': {'serverName': sni, 'fingerprint': 'chrome'},
+                'tlsSettings': {'serverName': sni, 'fingerprint': self._fp(user.uuid)},
             },
         }
 
@@ -361,7 +398,7 @@ class SubscriptionService:
                 'xhttpSettings': {'path': path, 'host': host, 'mode': 'auto'},
                 'tlsSettings': {
                     'serverName': sni,
-                    'fingerprint': 'chrome',
+                    'fingerprint': self._fp(user.uuid),
                     'alpn': ['h2', 'http/1.1'],
                 },
             },
@@ -394,7 +431,7 @@ class SubscriptionService:
                     'serverName': fb._cfg('FALLBACK_NODE_SNI', 'www.google.com'),
                     'publicKey': fb._cfg('FALLBACK_NODE_PBK'),
                     'shortId': fb._cfg('FALLBACK_NODE_SID'),
-                    'fingerprint': 'chrome',
+                    'fingerprint': self._fp(user.uuid),
                 },
             },
         }
@@ -418,8 +455,14 @@ class SubscriptionService:
     # least this many cascade servers stay visible (the reserve not counted).
     HIDDIFY_MIN_VISIBLE = 2
 
+    def _fp(self, uuid) -> str:
+        """This user's TLS fingerprint (IMPROVEMENT_PLAN F, E1): one value
+        of ``TLS_FINGERPRINTS``, chosen by uuid; ``chrome`` when unset."""
+        return tls_fingerprint.for_user(self.config, uuid)
+
     def _collect_outbounds(
         self, user, enabled_protocols, *, protocols: Optional[dict] = None,
+        emergency: bool = False,
     ) -> tuple:
         """sing-box outbounds for the cascade (+ the reserve DE node for
         paid tiers) as ``(outbounds, proxy_tags, udp_call_tags)``.
@@ -480,6 +523,21 @@ class SubscriptionService:
                 proxy_tags.append(fb['tag'])
                 # VLESS-Reality: UDP over xudp, usable for calls too.
                 call_tags['de'].append(fb['tag'])
+
+        # E4: the emergency profiles (lockdown, /sub?emergency=1, the kit)
+        # of paid users end with an SSH server on exit — a different kind of
+        # traffic, reported exempt from the 16-KB freeze. TCP only, so never
+        # in the calls group; not a cascade protocol, so no protocol name.
+        if emergency and user:
+            try:
+                from bot.services import ssh_exit
+                ssh = ssh_exit.outbound(self.config, user)
+            except Exception as e:
+                logger.warning(f'subscription: ssh outbound skipped: {e}')
+                ssh = None
+            if ssh is not None:
+                outbounds.append(ssh)
+                proxy_tags.append(ssh['tag'])
 
         if not proxy_tags:
             # Empty cascade — return a no-op config rather than a
@@ -574,8 +632,18 @@ class SubscriptionService:
         demoted = self._demoted_set(demoted)
         protocol_of: dict = {}
         outbounds, proxy_tags, udp_call_tags = self._collect_outbounds(
-            user, enabled_protocols, protocols=protocol_of,
+            user, enabled_protocols, protocols=protocol_of, emergency=lockdown,
         )
+        # sing-box cannot parse an XHTTP transport: such servers exist only
+        # in the Clash / xray / links forms (E3).
+        clash_only = {ob['tag'] for ob in outbounds
+                      if (ob.get('transport') or {}).get('type') in self.CLASH_ONLY_TRANSPORTS}
+        if clash_only:
+            outbounds = [ob for ob in outbounds if ob['tag'] not in clash_only]
+            proxy_tags = [t for t in proxy_tags if t not in clash_only]
+            udp_call_tags = [t for t in udp_call_tags if t not in clash_only]
+            for t in clash_only:
+                protocol_of.pop(t, None)
         udp_call_tags = self._calls_order(udp_call_tags, protocol_of, demoted)
         excluded = self._clash_excluded(proxy_tags, protocol_of, demoted)
         if hiddify:
@@ -598,9 +666,12 @@ class SubscriptionService:
 
         # urltest auto-selector at the top so the client's default mode
         # picks the fastest live outbound, falling back along the
-        # cascade order on probe failure — without the demoted ones (C1).
+        # cascade order on probe failure — without the demoted ones (C1)
+        # and without SSH (E4): a last resort with no traffic accounting and
+        # no UDP must not win a speed test (it skips entry and often would).
         selector_tags = ['auto'] + proxy_tags if proxy_tags else []
-        auto_tags = [t for t in proxy_tags if t not in excluded]
+        last_resort = {ob['tag'] for ob in outbounds if ob.get('type') == 'ssh'}
+        auto_tags = [t for t in proxy_tags if t not in excluded and t not in last_resort]
         outbounds.insert(0, {
             'type': 'urltest',
             'tag': 'auto',
@@ -803,7 +874,7 @@ class SubscriptionService:
             'tls': {
                 'enabled': True,
                 'server_name': ru_exit['sni'],
-                'utls': {'enabled': True, 'fingerprint': 'chrome'},
+                'utls': {'enabled': True, 'fingerprint': self._fp(uuid)},
                 'reality': reality_cfg,
             },
         }
@@ -839,7 +910,7 @@ class SubscriptionService:
             'flow': 'xtls-rprx-vision',
             'packet-encoding': 'xudp',
             'servername': ob['tls']['server_name'],
-            'client-fingerprint': 'chrome',
+            'client-fingerprint': self._fp(ob['uuid']),
             'reality-opts': {'public-key': reality['public_key']},
         }
         if reality.get('short_id'):
@@ -907,14 +978,14 @@ class SubscriptionService:
     # for a whole day.
     _CLASH_TELEMETRY_INTERVAL = 3600
 
-    def _clash_proxies(self, user, enabled_protocols) -> tuple:
+    def _clash_proxies(self, user, enabled_protocols, *, emergency: bool = False) -> tuple:
         """The cascade as mihomo proxies: ``(proxies, call_names,
         protocol_by_name)``. One converter for the profile and for the
         ``clash-proxies`` provider format, so both carry the same servers
         under the same names, in the same (cascade) order."""
         protocols: dict = {}
         outbounds, proxy_tags, udp_call_tags = self._collect_outbounds(
-            user, enabled_protocols, protocols=protocols,
+            user, enabled_protocols, protocols=protocols, emergency=emergency,
         )
         by_tag = {ob['tag']: ob for ob in outbounds}
         proxies = []
@@ -1163,6 +1234,7 @@ class SubscriptionService:
         *,
         lockdown: bool = False,
         demoted: Iterable[str] = frozenset(),
+        big_check: bool = False,
     ) -> str:
         """The main profile for Clash/mihomo clients (FlClash) — same
         servers, rules and DNS policy as ``build_singbox_config``. That
@@ -1198,6 +1270,12 @@ class SubscriptionService:
             ``client_probe`` tells per protocol what still gets through
             for this user (``_clash_telemetry_providers``).
 
+        ``big_check`` (IMPROVEMENT_PLAN F, E5, an experiment for testers):
+        Cascade / Auto / Calls check our ``/probe-big`` instead of gstatic —
+        a 204 with ~20 KB of headers, so a path that freezes after 16 KB
+        fails the check and the group moves on. It sits behind exit's
+        Caddy: while exit is down the DE reserve fails that check too.
+
         Not carried over: TLS ClientHello fragmentation — mihomo has no
         such option (sing-box ``tls.fragment`` on Reality / ws / stls).
         Emitted as JSON — a YAML 1.2 subset mihomo parses as a profile.
@@ -1210,7 +1288,8 @@ class SubscriptionService:
         point at and the profile is exactly what it was before E1.
         """
         demoted = self._demoted_set(demoted)
-        proxies, calls, protocol_of = self._clash_proxies(user, enabled_protocols)
+        proxies, calls, protocol_of = self._clash_proxies(user, enabled_protocols,
+                                                          emergency=lockdown)
         names = [p['name'] for p in proxies]
         uuid = getattr(user, 'uuid', None) if user else None
         token = self.derive_token(uuid) if uuid else None
@@ -1219,6 +1298,9 @@ class SubscriptionService:
         providers = self._clash_providers(token) if names else {}
         use = list(providers)
 
+        base_url = (getattr(self.config, 'WEBAPP_URL', '') or '').rstrip('/')
+        test_url = (f'{base_url}/probe-big' if big_check and base_url
+                    else self._CLASH_TEST_URL)
         groups = [{'name': 'VPN', 'type': 'select',
                    'proxies': (['Cascade', 'Auto'] + names) if names else ['DIRECT']}]
         if use:
@@ -1226,11 +1308,15 @@ class SubscriptionService:
         if names:
             excluded = self._clash_excluded(names, protocol_of, demoted)
             kept = [n for n in names if n not in excluded]
+            # SSH (E4) is the last resort: the tail of Cascade (it comes
+            # last in the profile), never the fastest-wins Auto.
+            last_resort = {p['name'] for p in proxies if p.get('type') == 'ssh'}
             cascade = {'name': 'Cascade', 'type': 'fallback', 'proxies': kept,
-                       'url': self._CLASH_TEST_URL,
+                       'url': test_url,
                        'interval': self._CLASH_GROUP_INTERVAL}
-            auto = {'name': 'Auto', 'type': 'url-test', 'proxies': kept,
-                    'url': self._CLASH_TEST_URL,
+            auto = {'name': 'Auto', 'type': 'url-test',
+                    'proxies': [n for n in kept if n not in last_resort] or kept,
+                    'url': test_url,
                     'interval': self._CLASH_GROUP_INTERVAL, 'tolerance': 50}
             for group in (cascade, auto):
                 if use:
@@ -1252,7 +1338,7 @@ class SubscriptionService:
             # chased short probes (that is how Turbo used to take calls).
             calls = self._calls_order(calls, protocol_of, demoted)
             calls_group = {'name': 'Calls', 'type': 'fallback', 'proxies': calls,
-                           'url': self._CLASH_TEST_URL,
+                           'url': test_url,
                            'interval': self._CLASH_GROUP_INTERVAL}
             if use:
                 # The channels' copies of the same servers, after the
@@ -1373,6 +1459,19 @@ class SubscriptionService:
             proxy = {**base, 'type': 'vless', 'uuid': ob['uuid'], 'network': 'tcp',
                      'udp': True, 'tls': True, 'servername': tls.get('server_name'),
                      'client-fingerprint': fingerprint}
+            transport = ob.get('transport') or {}
+            if transport.get('type') == 'xhttp':
+                # E3: mihomo's VLESS XHTTP (adapter/outbound/vless.go,
+                # XHTTPOptions); reuse-settings = XMUX.
+                proxy['network'] = 'xhttp'
+                proxy['xhttp-opts'] = {
+                    'path': transport.get('path') or '/',
+                    'mode': transport.get('mode') or 'auto',
+                    'reuse-settings': {
+                        'max-connections': str(transport.get('max_connections') or 3)},
+                }
+            elif transport:
+                return None
             if ob.get('flow'):
                 proxy['flow'] = ob['flow']
             if ob.get('packet_encoding') == 'xudp':
@@ -1424,6 +1523,10 @@ class SubscriptionService:
             elif transport:
                 return None
             return proxy
+        if kind == 'ssh':
+            # E4: mihomo's ssh proxy; the host key is pinned.
+            return {**base, 'type': 'ssh', 'username': ob['user'],
+                    'password': ob['password'], 'host-key': list(ob.get('host_key') or [])}
         if kind == 'shadowsocks':
             proxy = {**base, 'type': 'ss', 'cipher': ob['method'],
                      'password': ob['password'], 'udp': True}
@@ -1682,6 +1785,7 @@ class SubscriptionService:
             'hy2t': self._build_hy2t,
             'ws': self._build_ws,
             'stls': self._build_stls,
+            'xhr': self._build_xhr,
         }
 
     def _build_reality(self, uuid: str, name_prefix: str) -> Optional[dict]:
@@ -1707,7 +1811,7 @@ class SubscriptionService:
             'tls': {
                 'enabled': True,
                 'server_name': sni,
-                'utls': {'enabled': True, 'fingerprint': 'chrome'},
+                'utls': {'enabled': True, 'fingerprint': self._fp(uuid)},
                 'reality': reality_cfg,
                 **self._TLS_FRAGMENT,
             },
@@ -1808,6 +1912,59 @@ class SubscriptionService:
                 ob['hop_interval'] = '30s'
         return ob
 
+    # Transports a sing-box profile cannot carry: sing-box has no XHTTP
+    # (see the note in _outbound_builders). Such outbounds exist for the
+    # Clash form, the xray form and the share links only.
+    CLASH_ONLY_TRANSPORTS = ('xhttp',)
+
+    def _build_xhr(self, uuid: str, name_prefix: str) -> Optional[dict]:
+        """VLESS + XHTTP + Reality (IMPROVEMENT_PLAN F, E3), in the internal
+        sing-box-like shape the Clash converter reads — NOT valid sing-box
+        (``transport.type`` xhttp): ``build_singbox_config`` drops it.
+
+        Reaches its server through entry's haproxy :8443, which routes it by
+        its SNI (``XHR_SNI``, a dest of its own). The server must be an xray
+        of its own on exit, not a panel inbound (AGENTS.md §51). One multiplexed HTTP/2 session instead of a TLS
+        handshake per connection; the client keeps at most
+        ``XHR_MAX_CONNECTIONS`` of them (the advice for RU networks is
+        three). No Vision flow: XHTTP does not carry it. Off while XHR_SNI
+        is empty."""
+        cfg = self.config
+        sni = getattr(cfg, 'XHR_SNI', '') or ''
+        host = getattr(cfg, 'ENTRY_NODE_IP', '') or ''
+        pbk = getattr(cfg, 'XHR_PUBLIC_KEY', '') or getattr(cfg, 'REALITY_PUBLIC_KEY', '') or ''
+        if not (isinstance(sni, str) and sni and host and pbk and uuid):
+            return None
+        try:
+            port = int(getattr(cfg, 'XHR_PORT', 0) or getattr(cfg, 'ENTRY_NODE_PORT', 443) or 443)
+        except (TypeError, ValueError):
+            port = 443
+        sid = getattr(cfg, 'XHR_SID', '') or getattr(cfg, 'SID_VALUE', '') or ''
+        try:
+            max_conns = int(getattr(cfg, 'XHR_MAX_CONNECTIONS', 3) or 3)
+        except (TypeError, ValueError):
+            max_conns = 3
+        return {
+            'type': 'vless',
+            'tag': f'{name_prefix}-xhr',
+            'server': host,
+            'server_port': port,
+            'uuid': uuid,
+            'packet_encoding': 'xudp',
+            'tls': {
+                'enabled': True,
+                'server_name': sni,
+                'utls': {'enabled': True, 'fingerprint': self._fp(uuid)},
+                'reality': {'enabled': True, 'public_key': pbk, 'short_id': sid},
+            },
+            'transport': {
+                'type': 'xhttp',
+                'path': getattr(cfg, 'XHR_PATH', '') or '/xhr',
+                'mode': 'auto',
+                'max_connections': max_conns,
+            },
+        }
+
     def _build_ws(self, uuid: str, name_prefix: str) -> Optional[dict]:
         """VMess over httpupgrade through Cloudflare.
 
@@ -1840,7 +1997,7 @@ class SubscriptionService:
             'tls': {
                 'enabled': True,
                 'server_name': sni,
-                'utls': {'enabled': True, 'fingerprint': 'chrome'},
+                'utls': {'enabled': True, 'fingerprint': self._fp(uuid)},
                 **self._TLS_FRAGMENT,
             },
         }
@@ -1895,7 +2052,7 @@ class SubscriptionService:
                 'tls': {
                     'enabled': True,
                     'server_name': sni,
-                    'utls': {'enabled': True, 'fingerprint': 'chrome'},
+                    'utls': {'enabled': True, 'fingerprint': self._fp(uuid)},
                     **self._TLS_FRAGMENT,
                 },
             },
@@ -1933,7 +2090,7 @@ class SubscriptionService:
             'tls': {
                 'enabled': True,
                 'server_name': sni,
-                'utls': {'enabled': True, 'fingerprint': 'chrome'},
+                'utls': {'enabled': True, 'fingerprint': self._fp(uuid)},
                 'reality': reality_cfg,
                 **self._TLS_FRAGMENT,
             },

@@ -123,11 +123,11 @@ probe_rules = _load_probe_rules()
 PROBED = ['reality', 'hy2', 'ws', 'stls']      # what the probe sidecar ALWAYS speaks
 # Probed only where the deployment has them — decided per run by
 # probed_tags(): hy2t with HY2T_PORT, the DE reserve with FALLBACK_NODE_*.
-PROBED_OPTIONAL = ['hy2t', probe_rules.RESERVE_TAG]
+PROBED_OPTIONAL = ['hy2t', probe_rules.RESERVE_TAG, 'xhr']
 PROTOCOLS = ['reality', 'hy2', 'hy2t', 'ws', 'stls']   # what we always report on
 # ...plus the DE reserve (B6) where it is probed: it joins the report only
 # with probe rows of its own, judged from them alone (no layer B/C facts).
-REPORT_ORDER = PROTOCOLS + [probe_rules.RESERVE_TAG]
+REPORT_ORDER = PROTOCOLS + [probe_rules.RESERVE_TAG, 'xhr']
 
 # One definition with the pager, the monitor and /protocols (probe_rules,
 # IMPROVEMENT_PLAN F, B5). Until 2026-11 this script called a window

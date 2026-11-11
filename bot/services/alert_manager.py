@@ -1667,7 +1667,7 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
     # hy2 auth allows (no exit report behind it): its blocks count only
     # while the bot itself was running.
     INBOUND_DROP_TAGS = {'reality': 'reality', 'cf-ws': 'ws', 'ss2022': 'stls',
-                         'xhttp': 'xhttp', 'hy2-8400': 'hy2'}
+                         'xhttp': 'xhttp', 'hy2-8400': 'hy2', 'xhr': 'xhr'}
     _BOT_TAGS = ('hy2-8400',)
     # 'started': when this process began (the hy2 rollup has no heartbeat
     # but the bot itself); a test seam like the rest of the cache.

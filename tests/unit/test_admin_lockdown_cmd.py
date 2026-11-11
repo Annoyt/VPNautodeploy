@@ -170,7 +170,7 @@ class TestOverview:
         assert 'режим: auto (решает детектор) · статус: ⚪️ не активен' in text
         assert f'• paid: {PAID_DEFAULT}' in text
         assert f'• demo: {DEMO_DEFAULT}' in text
-        assert 'при включении наверх: ws, stls, reality, hy2, hy2t' in text
+        assert 'при включении наверх: ws, stls, xhr, reality, hy2, hy2t' in text
         assert 'сигнатура шатдауна 0/2 прогонов подряд · здоровых 0/12' in text
         assert 'последнее изменение: не было' in text
         assert '/lockdown on · /lockdown off · /lockdown auto · оповестить юзеров: /broadcast' in text
@@ -230,7 +230,7 @@ class TestOverview:
         for raw in ('[]', '["bogus"]', '{oops', 'null', '{"a": 1}'):
             db.set_setting(LOCKDOWN_ORDER_KEY, raw)
             text = text_of(handler)
-            assert 'при включении наверх: ws, stls, reality, hy2, hy2t' in text, raw
+            assert 'при включении наверх: ws, stls, xhr, reality, hy2, hy2t' in text, raw
             assert 'override' not in text, raw
 
     def test_bad_json_is_auto_inactive_not_an_error(self, handler, db):
