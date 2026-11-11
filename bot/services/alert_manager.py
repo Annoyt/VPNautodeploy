@@ -1874,7 +1874,9 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
                     "exit_dpi_reporter.py на exit не присылал отчёт дольше "
                     f"{INBOUND_DROP_REPORT_STALE_MIN} мин. Пока так, алерт по "
                     "подключениям на инбаундах слеп. Таймер exit-dpi-reporter "
-                    "на exit, токен DPI_REPORT_TOKEN, доступ exit → entry :8080."
+                    "на exit, токен DPI_REPORT_TOKEN, доступ exit → entry: BOT_URL "
+                    "https://<entry>:8448 и пин BOT_CA_FILE в /etc/exit-dpi.env "
+                    "(AGENTS.md §53)."
                 ),
             ))
         if empty:

@@ -137,14 +137,15 @@ Files with this mark: `test_database.py`, `test_security.py`, `test_state_machin
 | `bot/services/billing.py` | `tests/unit/test_billing.py`, `tests/integration/test_limit_ip.py`, `tests/integration/test_mykey_lost_key.py` (the key re-add uses its values) |
 | `bot/core/database.py` schema | `tests/integration/test_migration.py`, `tests/unit/test_database.py` |
 | `bot/models/vpn_node.py` | All cluster tests using `VPNNode` |
+| `bot/services/hop_tls.py`, `scripts/caddy_entry_hop.py`, `systemd/hysteria-entry-hop.conf` | `tests/integration/test_hop_tls.py`, `tests/integration/test_hop_tls_stand.py`, `docs/runbooks/entry_hop_tls.md` (its blocks run in the tests) |
 
 ---
 
 ## Deployment
 
 **Active production (as of 2026-08-30; flipped since the May notes — the bot moved to ENTRY on 2026-07-19):**
-- **Entry node** (`ssh entry`) — the **vpn-bot container** lives HERE (`/opt/vpn-bot`), plus a LOCAL `3x-ui` for CF-fronted inbounds, ingress :443, dashboard API :8080, and the Hermes `/ai` agent (:4097, systemd `hermes-api.service`).
-- **Exit node** (`ssh vpn-exit`) — the real x-ui panel :2026 + xray :443 (the backend the bot manages over HTTP API), Caddy :9443 → entry :8080 (dashboard TLS), tinyproxy :8888 (bot's Telegram egress).
+- **Entry node** (`ssh entry`) — the **vpn-bot container** lives HERE (`/opt/vpn-bot`), plus a LOCAL `3x-ui` for CF-fronted inbounds, ingress :443, dashboard API :8080 (and the same app over HTTPS on :8448 for exit, §53), and the Hermes `/ai` agent (:4097, systemd `hermes-api.service`).
+- **Exit node** (`ssh vpn-exit`) — the real x-ui panel :2026 + xray :443 (the backend the bot manages over HTTP API), Caddy :9443 → entry (dashboard TLS; the hop to entry runs in clear to :8080 until the §53 cutover, then TLS to :8448 with a pinned certificate), tinyproxy :8888 (bot's Telegram egress).
 - **GitHub**: `git@github.com:Annoyt/VPNautodeploy.git` — `origin/main` is the source of truth.
 - **`/opt/vpn-bot` on entry is NOT a git checkout** — it's an rsync target. `git pull/reset` there is impossible; code that isn't rsynced doesn't exist in prod (a fix once sat undeployed for 11 days while everyone debugged "a bug").
 
@@ -157,12 +158,14 @@ It stamps the git sha into `bot/version.txt`, rsyncs ONLY `bot/` + `scripts/` + 
 (never compose/.env — entry keeps hand-tuned copies), runs the remote
 `deploy_entry_bot.sh` (hardcoded `--no-deps` so 3x-ui is never recreated —
 see the 2026-07-19 incident), then FAILS unless `/health` reports that
-exact sha. Commit before deploying or the stamp says `-dirty`.
+exact sha, and, once the hop's certificate exists, unless the HTTPS listener
+on 8448 answers the same sha through the pin (§53). Commit before deploying
+or the stamp says `-dirty`.
 
 - Compose project name is pinned to `vpn-bot` via `name: vpn-bot` — must not change (volume names derive from it).
 - Volumes on entry: `vpn-bot_3xui-data` (local 3x-ui), `vpn-bot_vpn-bot-data` (bot.db at `/var/lib/vpn-bot/`), `vpn-bot_vpn-bot-logs`.
 - The bot talks to BOTH panels via HTTP API only; `xui.db` direct access is dead on entry (the May notes about making x-ui.db group-writable are historical).
-- **Backup subscription domain (2026-10-08, IMPROVEMENT_PLAN E5):** `https://sub.nekoweather.xyz:2096` — Cloudflare-proxied A record to exit, Caddy site block on exit `:2096` (a port CF proxies end-to-end) reverse-proxying entry `:8080` + the `/rule-sets/` mirror; cert from acme.sh `dns_cf` installed to `/etc/ssl/sub` with reloadcmd `chgrp caddy … && chmod 640 … && systemctl reload caddy` (acme.sh writes the key 600 root — without the hook every renewal breaks the Caddy reload). Caddyfile backups: `/etc/caddy/Caddyfile.bak-*`.
+- **Backup subscription domain (2026-10-08, IMPROVEMENT_PLAN E5):** `https://sub.nekoweather.xyz:2096` — Cloudflare-proxied A record to exit, Caddy site block on exit `:2096` (a port CF proxies end-to-end) reverse-proxying entry (`:8080` in clear until the §53 cutover, then `:8448` over pinned TLS) + the `/rule-sets/` mirror; cert from acme.sh `dns_cf` installed to `/etc/ssl/sub` with reloadcmd `chgrp caddy … && chmod 640 … && systemctl reload caddy` (acme.sh writes the key 600 root — without the hook every renewal breaks the Caddy reload). Caddyfile backups: `/etc/caddy/Caddyfile.bak-*`.
 
 **Backups before risky operations:**
 ```bash
@@ -857,3 +860,33 @@ Package E of `docs/IMPROVEMENT_PLAN.md` section F. **All of it is off until conf
   - Why: step 0 showed ws reaches exit through entry (DNAT 2053/2054), so "direct dark, ws alive" cannot come from a broken entry→exit leg. Public measurements also put Cloudflare outside the mobile whitelists. Why a switch: the detector fires on "direct dark, ws alive" from entry's vantage, and only the operator knows whether that vantage speaks for the mobile networks.
 - E7 (AnyTLS, Mieru, Sudoku) waits for data, as planned.
 - **Tests:** `tests/integration/test_protocols_fingerprints.py` (26 plus the 2 stands above). 23 mutants killed, restored by reverse text replacement with a hash check. Review of E: unset settings build exactly what a config without them builds, SSH out of the speed tests, the sidecar check, xhr only for the app, the E6 switch and the override, the cached evidence, SHA-512 crypt against glibc, no panel attach; the older lockdown / SOS / Clash tests back on ws first.
+
+### 53. TLS on the exit → entry hop: the bot's own HTTPS listener, pinned on exit (2026-11-11)
+
+Everything exit sends the bot crosses the public internet, abroad → Russia, and until this went in clear to entry `:8080`: both Caddy sites (the dashboard with its initData and admin tokens, every `/sub` profile through the dashboard domain and the Cloudflare mirror), both hysteria instances' auth callback on every hy2 connection (the password is the user's uuid), and the DPI reporter's `X-DPI-Token`, which also opens `/api/xhr/users` and `/api/ssh/users` through Caddy's public `:9443`. The DOCKER-USER rule `entry-fw-8080` only limits who may connect; anyone recording the hop (SORM/TSPU on the RU side included) read all of it.
+
+**Not deployed.** The code is inert until the certificate exists; the cutover is `docs/runbooks/entry_hop_tls.md` (backups, verification, rollback per step), run with the owner's go-ahead. `:8080` keeps working until the cutover is verified, and closes only after the DOCKER-USER counter for exit's address on it reads zero.
+
+- **The listener** (`WebAppServer.start_sites`): the same aiohttp app on a second site with an ssl_context, on `WEB_TLS_PORT` (8448; compose publishes `${WEB_TLS_BIND:-127.0.0.1}:8448:8448`, entry sets `WEB_TLS_BIND=0.0.0.0` behind DOCKER-USER `entry-fw-8448`, exit's address only, `ctorigdstport`). It is on only when `WEB_TLS_DIR` (`/var/lib/vpn-bot/hop-tls`, the bot's volume) holds `cert.pem` + `key.pem`. A pair that does not load, or a port that is taken, is logged and left off; the plain listener and the bot run on. TLS 1.3 only, ALPN `http/1.1`.
+  - Why in the bot and not entry's haproxy: `request.remote` stays exit's address (the X-Forwarded-For and own-address logic and the rate limits see what they saw), and haproxy carries Reality ingress for every user: a bad reload there takes them all down.
+- **The certificate** (`bot/services/hop_tls.py`; `docker exec -w /app vpn-bot python3 scripts/hop_tls.py init | show [--pem] | check | verify`, run as the container's user, so the key is written into the volume and never leaves it): EC P-256, self-signed, 10 years. SAN `DNS:entry-hop.invalid` + `IP:<ENTRY_NODE_IP>`; `CA:TRUE, pathlen:0` with critical name constraints that permit exactly those two, so a leaked key vouches for no other name or address (checked against OpenSSL and Go's x509). A pair is never replaced without `--force`, because exit must pin the new one.
+- **Why `entry-hop.invalid`:** no public CA can ever certify a `.invalid` name. Caddy and the reporter trust the pin alone; hysteria cannot (its HTTP auth has no CA option), so it keeps the system's CAs next to the pin and verifies the name. A publicly-trusted certificate for entry's address (Let's Encrypt issues IP certificates) cannot pass for the hop there.
+- **What changes on exit** (each step in the runbook):
+  - **Caddy:** in both sites, `reverse_proxy 130.49.146.10:8080` becomes `import entry_hop`, a snippet with `reverse_proxy https://130.49.146.10:8448 { transport http { tls_server_name entry-hop.invalid; tls_trust_pool file /etc/nekovpn-hop/entry-hop.pem } }`. The trust pool replaces the system's CAs for that upstream. `scripts/caddy_entry_hop.py` makes the edit: a dry run prints the diff; `--apply` backs up, runs `caddy validate`, puts the file back on a rejection, then reloads. It refuses anything it does not expect: a count other than 2, a line with a block of its own, a snippet already there, a missing pin.
+  - **hysteria ×2:** the auth URL becomes `https://entry-hop.invalid:8448/api/hy2[t]/auth`. The drop-in `systemd/hysteria-entry-hop.conf` (for `hysteria` and `hysteria-turbo`) sets `SSL_CERT_DIR=/etc/ssl/certs:/etc/nekovpn-hop` for those units only, and `BindReadOnlyPaths=/etc/nekovpn-hop/hosts:/etc/hosts`, so the name resolves to entry whatever rewrites the real /etc/hosts.
+    - The callback resolves names through the system, not through hysteria's own `resolver:` (a dead one on the stand changed nothing).
+    - hysteria logs no reason when the callback fails, even at debug. The canary is the hy2 probe: `curl -x http://probe-proxy:18082 …` from vpn-bot, and `protocol_down:hy2`.
+  - **DPI reporter:** the defaults are now `BOT_URL=https://130.49.146.10:8448` and `BOT_CA_FILE=/etc/nekovpn-hop/entry-hop.pem`, the only trust anchor (empty = the system's CAs, for a public URL). It refuses plain http to anything but loopback, so the old `http://…:8080` env does not work with the new script: change both together.
+  - **xhr/ssh sync scripts** (not deployed): optional `BOT_CA_FILE`, passed to curl as `--cacert … --capath /dev/null`. Debian's curl loads `/etc/ssl/certs` next to `--cacert` (verified), so `--cacert` alone is no pin. Plain http only to loopback. Their documented `BOT_URL` (the dashboard domain) becomes TLS end to end with the Caddy change.
+- **A tunnel user** leaves exit from exit's address and reaches `:8448` as it reached `:8080`. The firewall admits exit's address, not exit's processes, and the bot's whole surface is public through Caddy anyway.
+- **Deploy smoke** (`scripts/deploy_to_entry.sh`): after `/health` on 8080, `hop_tls.py check` runs from inside the container. No certificate = `off`, skipped. Otherwise the listener must answer the deployed sha through the pin (by name) and carry `ENTRY_NODE_IP`, or the deploy fails: after the cutover, a bot without its listener cuts exit off (every subscription refresh, new hy2 connections, the reports) while 8080 looks healthy.
+- **`hop_tls.py verify`** (the cutover check) fetches `/health` and the probe account's profile (`?format=clash` and the plain `/sub`) through the listener itself, `WEBAPP_URL` and each `SUB_MIRROR_URLS` mirror, and requires 200, one version and the same bytes. It prints codes, sizes and sha256 prefixes, never the token or a profile. All three paths count as our own address (loopback, entry via Caddy, Cloudflare), so nothing is recorded for the probe account.
+- **Rotation / a new entry address:** `init --force [--ip …]`, recreate vpn-bot, pin again on exit, reload Caddy, restart hysteria. Exit is cut off in between; do it in one sitting.
+- **Tests:**
+  - `tests/integration/test_hop_tls.py` (real WebAppServer, real sqlite): the certificate and its constraints, the listener, `check`/`verify`, the CLI, and every block of the runbook run on copies of the files it edits.
+  - `tests/unit/test_exit_dpi_reporter.py::TestHopTls`, `test_setup_{ssh,xhr}_exit_sh.py::TestTheHop` (real curl over the pinned hop included), `test_caddy_entry_hop.py`, `test_deploy_to_entry_hop.py` (the script from a throwaway checkout with fake ssh/rsync).
+  - Stand `tests/integration/test_hop_tls_stand.py` (`requires_docker`, images local, no internet):
+    - Caddy 2.11.3 with the tool's Caddyfile serves `/health`, the probe profile and the hy2 callback byte for byte over the listener; another pin, another name or the system's CAs instead of the pin give 502.
+    - hysteria 2.9.2 with the drop-in's environment lets a paid uuid through and the bot logs the allow; the bot denies an unknown uuid; without the pin the callback never reaches the bot.
+    - Go's x509 refuses certificates the hop key would sign for other names.
+  - 56 mutants over the listener, the certificate, `check`/`verify`, the reporter, both sync scripts, the Caddy tool and the deploy smoke. 55 killed; restored by positional replacement with a hash check (§28), the scripts' mutants run in a throwaway container. One is equivalent: the bash check reads the host after the last `@` of an http URL, as Python's urlsplit does. Reading after the first `@` changes nothing, because curl rejects a URL with two `@` ("Bad hostname") before it connects.

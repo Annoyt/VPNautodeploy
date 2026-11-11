@@ -392,7 +392,8 @@ class Env:
 
     def env(self, **extra):
         env = {k: v for k, v in os.environ.items()
-               if not (k.startswith('XHR_') or k in ('BOT_URL', 'DPI_REPORT_TOKEN', 'XUI_DB_PATH'))}
+               if not (k.startswith('XHR_')
+                       or k in ('BOT_URL', 'BOT_CA_FILE', 'DPI_REPORT_TOKEN', 'XUI_DB_PATH'))}
         env.update(PATH=f'{self.bin}:{env["PATH"]}', FAKE_STATE=str(self.state),
                    FAKE_PRIV=PRIV, FAKE_PUB=PUB,
                    XHR_EXIT_DIR=str(self.dir), XHR_EXIT_ENV=str(self.env_file),
@@ -646,6 +647,12 @@ class TestSetup:
         # a "?" would make the rest of the path an sqlite URI parameter
         (dict(XUI_DB_PATH='/tmp/x-ui.db?mode=rwc'), 'odd characters in XUI_DB_PATH'),
         (dict(XUI_DB_PATH='/tmp/x ui.db'), 'odd characters in XUI_DB_PATH'),
+        # the token and the users' uuids never cross the internet in clear
+        # (AGENTS.md §53)
+        (dict(BOT_URL='http://130.49.146.10:8080'), 'plain http to another host'),
+        (dict(BOT_URL='http://127.0.0.1.evil.com'), 'plain http to another host'),
+        (dict(BOT_URL='ftp://130.49.146.10'), 'must be an http(s) URL'),
+        (dict(BOT_CA_FILE='/nonexistent/entry-hop.pem'), 'is not readable'),
     ])
     def test_bad_settings(self, env, over, message):
         env.write_env(**over)
@@ -1856,3 +1863,35 @@ def test_stand_the_scripts_server_behind_haproxy_in_mihomo(env, tmp_path):
         _docker('network', 'rm', net, check=False)
         asyncio.run_coroutine_threadsafe(runner.cleanup(), loop).result(10)
         loop.call_soon_threadsafe(loop.stop)
+
+
+class TestTheHop:
+    """BOT_CA_FILE (AGENTS.md §53): curl trusts the hop's pinned certificate
+    alone (--capath /dev/null: Debian's curl loads /etc/ssl/certs next to
+    --cacert); plain http only to loopback (the bad settings above)."""
+
+    def test_the_pin_reaches_curl(self, env):
+        pin = env.root / 'entry-hop.pem'
+        pin.write_text('-----BEGIN CERTIFICATE-----\n')
+        env.write_env(BOT_URL='https://130.49.146.10:8448', BOT_CA_FILE=str(pin))
+        r = env.run()
+        assert r.returncode == 0, r.stderr
+        curl = [c for c in env.calls() if c[0] == 'curl'][-1]
+        i = curl.index('--cacert')
+        assert curl[i:i + 4] == ['--cacert', str(pin), '--capath', '/dev/null']
+        assert curl[-1] == 'https://130.49.146.10:8448/api/xhr/users'
+        assert curl[curl.index('-H') + 1] == '@-'
+
+    def test_no_pin_no_flags_and_loopback_http(self, env):
+        env.write_env(BOT_URL='http://127.0.0.1:8080')
+        r = env.run()
+        assert r.returncode == 0, r.stderr
+        curl = [c for c in env.calls() if c[0] == 'curl'][-1]
+        assert '--cacert' not in curl and curl[-1] == 'http://127.0.0.1:8080/api/xhr/users'
+
+    def test_the_environment_is_no_source_of_the_pin(self, env):
+        pin = env.root / 'entry-hop.pem'
+        pin.write_text('x')
+        r = env.run(BOT_CA_FILE=str(pin))
+        assert r.returncode == 0, r.stderr
+        assert '--cacert' not in [c for c in env.calls() if c[0] == 'curl'][-1]

@@ -10,7 +10,11 @@
 #
 # /etc/ssh-exit.env (root-only), KEY=VALUE lines read as data, never sourced
 # (quotes and an `export ` prefix are fine; nothing in a value ever runs):
-#   BOT_URL=https://<dashboard host>:9443     the bot, reachable from exit
+#   BOT_URL=https://<dashboard host>:9443     the bot, reachable from exit; or
+#           https://<entry ip>:8448 with BOT_CA_FILE (the hop, AGENTS.md §53).
+#           Plain http only to loopback: the token must not cross in clear.
+#   BOT_CA_FILE=/etc/nekovpn-hop/entry-hop.pem  optional, the only CA for
+#           BOT_URL (the hop's pinned certificate); empty = the system's CAs
 #   DPI_REPORT_TOKEN=<the same token as /etc/exit-dpi.env>
 #   SSH_EXIT_PORT=22022                       the port users connect to
 #
@@ -129,7 +133,7 @@ read_env() {  # $1 = file; then the keys to take from it
   done < "$file"
 }
 
-ENV_KEYS='BOT_URL DPI_REPORT_TOKEN SSH_EXIT_PORT'
+ENV_KEYS='BOT_URL BOT_CA_FILE DPI_REPORT_TOKEN SSH_EXIT_PORT'
 
 load_env() {  # the env file is the only source of these
   [ -r "$ENV_FILE" ] || { echo "missing $ENV_FILE (BOT_URL, DPI_REPORT_TOKEN, SSH_EXIT_PORT)" >&2; exit 2; }
@@ -139,6 +143,39 @@ load_env() {  # the env file is the only source of these
   read_env "$ENV_FILE" $ENV_KEYS
   : "${BOT_URL:?BOT_URL not set}" "${DPI_REPORT_TOKEN:?DPI_REPORT_TOKEN not set}"
   SSH_EXIT_PORT="${SSH_EXIT_PORT:-22022}"
+  check_bot_url
+}
+
+# The token, and the users' hashes it fetches, must not cross the internet
+# in clear: plain http only to loopback. BOT_CA_FILE pins the hop's
+# certificate (AGENTS.md §53), and curl then trusts that file alone:
+# --capath /dev/null, because Debian's curl also loads /etc/ssl/certs next
+# to --cacert. The same check as setup_xhr_exit.sh.
+BOT_TLS=()
+check_bot_url() {
+  local authority host
+  case "$BOT_URL" in
+    https://*) ;;
+    http://*)
+      authority=${BOT_URL#http://}
+      authority=${authority%%[/?#]*}
+      authority=${authority##*@}
+      case "$authority" in
+        \[*) host=${authority%%]*}; host=${host#[} ;;
+        *) host=${authority%%:*} ;;
+      esac
+      if [ "$host" != localhost ] && [ "$host" != ::1 ] \
+         && ! [[ $host =~ ^127\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+        echo "BOT_URL is plain http to another host: the token would cross the internet in clear (the hop's https listener, AGENTS.md §53)" >&2
+        exit 2
+      fi ;;
+    *) echo "BOT_URL must be an http(s) URL" >&2; exit 2 ;;
+  esac
+  BOT_TLS=()
+  if [ -n "${BOT_CA_FILE:-}" ]; then
+    [ -r "$BOT_CA_FILE" ] || { echo "BOT_CA_FILE $BOT_CA_FILE is not readable" >&2; exit 2; }
+    BOT_TLS=(--cacert "$BOT_CA_FILE" --capath /dev/null)
+  fi
 }
 
 sync_users() {
@@ -149,7 +186,8 @@ sync_users() {
   # The token goes through stdin, not argv: /proc/<pid>/cmdline is
   # readable by every local user (printf is a builtin, so not even there).
   json="$(printf 'X-DPI-Token: %s\n' "$DPI_REPORT_TOKEN" \
-          | curl -fsS --max-time 20 -H @- "${BOT_URL%/}/api/ssh/users")" \
+          | curl -fsS --max-time 20 -H @- ${BOT_TLS[@]+"${BOT_TLS[@]}"} \
+                 "${BOT_URL%/}/api/ssh/users")" \
     || { echo "bot unreachable — users unchanged"; exit 0; }
   # The plan as shell lines: "user<TAB>hash", validated (names n + 12 hex, hashes $6$).
   local plan

@@ -178,7 +178,8 @@ class Env:
 
     def env(self, **extra):
         env = {k: v for k, v in os.environ.items()
-               if not (k.startswith('SSH_EXIT_') or k in ('BOT_URL', 'DPI_REPORT_TOKEN', 'FORCE'))}
+               if not (k.startswith('SSH_EXIT_')
+                       or k in ('BOT_URL', 'BOT_CA_FILE', 'DPI_REPORT_TOKEN', 'FORCE'))}
         env.update(PATH=f'{self.bin}:{env["PATH"]}', FAKE_STATE=str(self.state),
                    REAL_INSTALL=shutil.which('install'),
                    SSH_EXIT_DIR=str(self.dir), SSH_EXIT_ENV=str(self.env_file),
@@ -500,3 +501,124 @@ async def test_the_bots_own_answer_syncs(set_up, tmp_path):
     assert got_name == name and got_hash.startswith('$6$')
     assert ssh_exit.sha512_crypt(ssh_exit.password_for(config, paid),
                                  got_hash.split('$')[2]) == got_hash
+
+
+class _UsersOverTls:
+    """``GET /api/ssh/users`` over TLS with the hop's certificate (AGENTS.md
+    §53), answering only the right token."""
+
+    def __init__(self, cert_dir, body):
+        import http.server
+        import ssl
+        import threading
+        seen = self.seen = []
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                seen.append((self.path, self.headers.get('X-DPI-Token')))
+                ok = self.path == '/api/ssh/users' and self.headers.get('X-DPI-Token') == TOKEN
+                out = body.encode() if ok else b'{"ok": false}'
+                self.send_response(200 if ok else 403)
+                self.send_header('Content-Length', str(len(out)))
+                self.end_headers()
+                self.wfile.write(out)
+
+            def log_message(self, *a):
+                pass
+
+        self.httpd = http.server.HTTPServer(('127.0.0.1', 0), Handler)
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(os.path.join(cert_dir, 'cert.pem'), os.path.join(cert_dir, 'key.pem'))
+        self.httpd.socket = ctx.wrap_socket(self.httpd.socket, server_side=True)
+        self.url = f'https://127.0.0.1:{self.httpd.server_address[1]}'
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+
+    def close(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+
+class TestTheHop:
+    """BOT_URL / BOT_CA_FILE (AGENTS.md §53): the token and the users' hashes
+    never cross the internet in clear, and with BOT_CA_FILE curl trusts the
+    hop's pinned certificate alone (--capath /dev/null: Debian's curl loads
+    /etc/ssl/certs next to --cacert)."""
+
+    def _pin(self, env):
+        pin = env.root / 'entry-hop.pem'
+        pin.write_text('-----BEGIN CERTIFICATE-----\n')
+        return pin
+
+    def test_the_pin_reaches_curl(self, env):
+        pin = self._pin(env)
+        env.write_env(BOT_URL='https://130.49.146.10:8448', BOT_CA_FILE=str(pin))
+        r = env.run()
+        assert r.returncode == 0, r.stderr
+        curl = env.curl_calls()[-1]
+        i = curl.index('--cacert')
+        assert curl[i:i + 4] == ['--cacert', str(pin), '--capath', '/dev/null']
+        assert curl[-1] == 'https://130.49.146.10:8448/api/ssh/users'
+        assert env.curl_header() == f'X-DPI-Token: {TOKEN}\n'
+        assert env.run('--sync').returncode == 0
+        assert '--cacert' in env.curl_calls()[-1]
+
+    def test_no_pin_no_flags(self, env):
+        assert env.run().returncode == 0
+        curl = env.curl_calls()[-1]
+        assert '--cacert' not in curl and '--capath' not in curl
+
+    @pytest.mark.parametrize('args', [(), ('--sync',)])
+    @pytest.mark.parametrize('url,message', [
+        ('http://130.49.146.10:8080', 'plain http to another host'),
+        ('http://127.evil.com', 'plain http to another host'),
+        ('http://user@127.0.0.1@evil.com/', 'plain http to another host'),
+        ('ftp://130.49.146.10', 'must be an http(s) URL'),
+    ])
+    def test_cleartext_to_another_host_is_refused(self, env, url, message, args):
+        env.write_env(BOT_URL=url)
+        r = env.run(*args)
+        assert r.returncode == 2 and message in r.stderr
+        assert not env.calls()
+
+    @pytest.mark.parametrize('url', ['http://127.0.0.1:8080', 'http://localhost:8080',
+                                     'http://[::1]:8080'])
+    def test_loopback_http_is_allowed(self, env, url):
+        env.write_env(BOT_URL=url)
+        r = env.run()
+        assert r.returncode == 0, r.stderr
+        assert env.curl_calls()[-1][-1] == url + '/api/ssh/users'
+
+    def test_an_unreadable_pin(self, env):
+        env.write_env(BOT_CA_FILE=str(env.root / 'missing.pem'))
+        r = env.run()
+        assert r.returncode == 2 and 'not readable' in r.stderr
+        assert not env.calls()
+
+    def test_the_environment_is_no_source_of_the_pin(self, env):
+        r = env.run(BOT_CA_FILE=str(self._pin(env)))
+        assert r.returncode == 0, r.stderr
+        assert '--cacert' not in env.curl_calls()[-1]
+
+    def test_real_curl_over_the_pinned_hop(self, set_up):
+        if shutil.which('curl') is None:
+            pytest.skip('curl is not installed')
+        from bot.services import hop_tls
+        good, other = set_up.root / 'good', set_up.root / 'other'
+        hop_tls.generate(str(good), '127.0.0.1')
+        hop_tls.generate(str(other), '127.0.0.1')
+        bot = _UsersOverTls(str(good), answer([N1, N2]))
+        (set_up.bin / 'curl').unlink()          # the real curl talks to the real TLS
+        try:
+            set_up.write_env(BOT_URL=bot.url, BOT_CA_FILE=str(good / 'cert.pem'))
+            r = set_up.run('--sync')
+            assert r.returncode == 0, r.stderr
+            assert set_up.applied()[-1] == plan(N1, N2)
+            assert bot.seen == [('/api/ssh/users', TOKEN)]
+            # another certificate, or the system's CAs: nothing is fetched
+            for pin in (str(other / 'cert.pem'), ''):
+                set_up.write_env(BOT_URL=bot.url, BOT_CA_FILE=pin)
+                r = set_up.run('--sync')
+                assert r.returncode == 0 and 'bot unreachable' in r.stdout
+            assert set_up.applied()[-1] == plan(N1, N2) and len(bot.seen) == 1
+        finally:
+            bot.close()

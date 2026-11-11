@@ -79,7 +79,11 @@
 # /etc/xhr-exit.env (root-only), read by setup; --sync reads only BOT_URL
 # and the token from it (the server parameters setup checked are kept in
 # /etc/xhr-exit/server.env, so an edit here takes effect via setup):
-#   BOT_URL=https://<dashboard host>:9443   the bot, reachable from exit
+#   BOT_URL=https://<dashboard host>:9443   the bot, reachable from exit; or
+#           https://<entry ip>:8448 with BOT_CA_FILE (the hop, AGENTS.md §53).
+#           Plain http only to loopback: the token must not cross in clear.
+#   BOT_CA_FILE=/etc/nekovpn-hop/entry-hop.pem   optional, the only CA for
+#           BOT_URL (the hop's pinned certificate); empty = the system's CAs
 #   DPI_REPORT_TOKEN=<the same token as /etc/exit-dpi.env>
 #   XHR_SNI=<Reality dest of its own: TLS 1.3, h2, certificate record
 #           <= 8000 B; not a name entry's haproxy routes elsewhere>
@@ -162,7 +166,7 @@ read_env() {  # $1 = file; then the keys to take from it
   done < "$file"
 }
 
-ENV_KEYS='BOT_URL DPI_REPORT_TOKEN XHR_SNI XHR_PATH XHR_EXIT_PORT XHR_EXIT_PUBLIC_IP XHR_EXIT_IMAGE XHR_EXIT_MEMORY XUI_DB_PATH'
+ENV_KEYS='BOT_URL BOT_CA_FILE DPI_REPORT_TOKEN XHR_SNI XHR_PATH XHR_EXIT_PORT XHR_EXIT_PUBLIC_IP XHR_EXIT_IMAGE XHR_EXIT_MEMORY XUI_DB_PATH'
 
 load_env() {  # the env file is the only source of these
   [ -r "$ENV_FILE" ] || die "missing $ENV_FILE (BOT_URL, DPI_REPORT_TOKEN, XHR_SNI)"
@@ -173,6 +177,37 @@ load_env() {  # the env file is the only source of these
   [ -n "${BOT_URL:-}" ] || die "BOT_URL not set in $ENV_FILE"
   [ -n "${DPI_REPORT_TOKEN:-}" ] || die "DPI_REPORT_TOKEN not set in $ENV_FILE"
   case "$DPI_REPORT_TOKEN" in *[!A-Za-z0-9._~+/=-]*) die "odd characters in DPI_REPORT_TOKEN" ;; esac
+  check_bot_url
+}
+
+# The token, and the users' list it fetches, must not cross the internet in
+# clear: plain http only to loopback. BOT_CA_FILE pins the hop's certificate
+# (AGENTS.md §53), and curl then trusts that file alone: --capath /dev/null,
+# because Debian's curl also loads /etc/ssl/certs next to --cacert.
+BOT_TLS=()
+check_bot_url() {
+  local authority host
+  case "$BOT_URL" in
+    https://*) ;;
+    http://*)
+      authority=${BOT_URL#http://}
+      authority=${authority%%[/?#]*}
+      authority=${authority##*@}
+      case "$authority" in
+        \[*) host=${authority%%]*}; host=${host#[} ;;
+        *) host=${authority%%:*} ;;
+      esac
+      if [ "$host" != localhost ] && [ "$host" != ::1 ] \
+         && ! [[ $host =~ ^127\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+        die "BOT_URL is plain http to another host: the token would cross the internet in clear (the hop's https listener, AGENTS.md §53)"
+      fi ;;
+    *) die "BOT_URL must be an http(s) URL" ;;
+  esac
+  BOT_TLS=()
+  if [ -n "${BOT_CA_FILE:-}" ]; then
+    [ -r "$BOT_CA_FILE" ] || die "BOT_CA_FILE $BOT_CA_FILE is not readable"
+    BOT_TLS=(--cacert "$BOT_CA_FILE" --capath /dev/null)
+  fi
 }
 
 version_lt() {  # $1 < $2, dotted versions
@@ -684,7 +719,8 @@ fetch_users() {
   # The token goes through stdin, not argv: /proc/<pid>/cmdline is
   # readable by every local user.
   code=$(printf 'X-DPI-Token: %s\n' "$DPI_REPORT_TOKEN" \
-         | curl -sS --max-time 20 -H @- -o "$ANSWER" -w '%{http_code}' \
+         | curl -sS --max-time 20 -H @- ${BOT_TLS[@]+"${BOT_TLS[@]}"} \
+                -o "$ANSWER" -w '%{http_code}' \
                 "${BOT_URL%/}/api/xhr/users" 2>/dev/null) || code=000
   case "$code" in
     200) ;;
