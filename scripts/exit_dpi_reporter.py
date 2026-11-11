@@ -242,6 +242,20 @@ JOURNAL_CURSOR_MAX_AGE_S = 30 * 60
 JOURNAL_TIMEOUT_S = 30
 
 
+def _message_text(raw) -> str:
+    """A journal MESSAGE as text. ``journalctl -o json`` gives it as a string,
+    or as an array of byte values when the line holds control characters:
+    hysteria colours its level (``ESC[34mINFO ESC[0m``), so every line of it
+    arrives as bytes (seen on exit, 2026-11-11). The codes stay: they sit
+    before the level, and the event pattern is searched for, not anchored."""
+    if isinstance(raw, list):
+        try:
+            raw = bytes(raw).decode("utf-8", "replace")
+        except (TypeError, ValueError):
+            return ""
+    return str(raw or "")
+
+
 def _journal_restart(state: dict, why: str) -> None:
     logger.warning(f"hysteria journal: {why} — starting 10 min back, open connects forgotten")
     state.pop("journal_cursor", None)
@@ -287,7 +301,7 @@ def read_hysteria_events(state: dict, now: Optional[float] = None) -> list:
         # its head (rc 0): entries older than the cursor's are not news.
         if cursor and epoch and epoch < cursor_ts:
             continue
-        m = HY_EVENT_RE.search(str(entry.get("MESSAGE") or ""))
+        m = HY_EVENT_RE.search(_message_text(entry.get("MESSAGE")))
         if not m:
             continue
         try:

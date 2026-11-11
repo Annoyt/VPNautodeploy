@@ -9,7 +9,7 @@
 # the remote rebuild, then verifies /health reports that exact sha.
 #
 # Usage:
-#   ./scripts/deploy_to_entry.sh              # full bot/ + deploy script
+#   ./scripts/deploy_to_entry.sh              # full bot/ + scripts/ + systemd/
 #   ./scripts/deploy_to_entry.sh bot/core/web_server.py bot/webapp/app.js
 #
 # NEVER pass compose files or .env here — entry keeps hand-tuned copies
@@ -31,15 +31,19 @@ if [ ${#paths[@]} -eq 0 ]; then
     # scripts/ ships whole: the Dockerfile bakes it into the image, so a
     # helper that only exists locally is invisible to `docker exec`
     # (that is how the panel audit failed its first deploy).
-    paths=(bot/ scripts/)
+    # systemd/ ships too: host installers read their unit files from it
+    # (scripts/install_protocol_healthcheck.sh failed its first run on
+    # entry, 2026-11-11, because only bot/ and scripts/ were there).
+    # Nothing is installed by shipping it.
+    paths=(bot/ scripts/ systemd/)
 fi
 # version.txt must always ship, whatever subset is deployed.
 paths+=(bot/version.txt)
 
 for p in "${paths[@]}"; do
     case "$p" in
-        bot/*|bot|scripts/*) ;;
-        *) echo "ERROR: refusing to deploy '$p' — only bot/ and scripts/ belong here." >&2
+        bot/*|bot|scripts/*|systemd/*) ;;
+        *) echo "ERROR: refusing to deploy '$p' — only bot/, scripts/ and systemd/ belong here." >&2
            exit 1 ;;
     esac
 done

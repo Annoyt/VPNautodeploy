@@ -364,6 +364,29 @@ class TestJournalRead:
         assert state['journal_cursor'] == 'c2' and state['journal_cursor_ts'] == 1762800060.0
         assert calls[0][-2:] == ['--after-cursor', 'c0']
 
+    def test_hysterias_coloured_lines_arrive_as_bytes(self, monkeypatch):
+        # what journalctl -o json gives for hysteria on exit: MESSAGE as an
+        # array of byte values, because the level is coloured (ESC[34m)
+        import json as _json
+        text = ('2026-11-11T09:43:57+05:00\t\x1b[34mINFO\x1b[0m\tclient disconnected\t'
+                '{"addr": "1.2.3.4:36389", "id": "u1@x", "error": "timeout: no recent network activity"}')
+        entry = {'__CURSOR': 'c1', '_SYSTEMD_UNIT': 'hysteria.service', '_BOOT_ID': 'boot',
+                 '_PID': '77', '__REALTIME_TIMESTAMP': '1762800000000000',
+                 'MESSAGE': list(text.encode('utf-8'))}
+        monkeypatch.setattr(reporter.subprocess, 'run',
+                            lambda cmd, **kw: _Run(_json.dumps(entry)))
+        events = reporter.read_hysteria_events({}, now=1762800100.0)
+        assert events == [('hysteria', 1762800000.0, 'disconnected', 'u1@x',
+                           'timeout: no recent network activity', 'boot:77', '1.2.3.4:36389')]
+
+    def test_a_message_that_is_not_bytes_is_skipped(self, monkeypatch):
+        import json as _json
+        entry = {'__CURSOR': 'c1', '_SYSTEMD_UNIT': 'hysteria.service',
+                 '__REALTIME_TIMESTAMP': '1762800000000000', 'MESSAGE': [300, 'x']}
+        monkeypatch.setattr(reporter.subprocess, 'run',
+                            lambda cmd, **kw: _Run(_json.dumps(entry)))
+        assert reporter.read_hysteria_events({}, now=1762800100.0) == []
+
     def test_a_failing_journalctl_starts_over(self, monkeypatch):
         monkeypatch.setattr(reporter.subprocess, 'run',
                             lambda cmd, **kw: _Run('', rc=1, stderr='Failed to seek to cursor'))
