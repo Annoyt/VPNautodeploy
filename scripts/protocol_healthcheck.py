@@ -26,7 +26,9 @@ improvisation. It reads the THREE signals that actually distinguish
      accepted connections per inbound, hop REDIRECT rules, hysteria
      connections in the last hour, the Reality dest certificate size
      (the 2026-07-20 outage: cert > 8192 bytes kills Reality for all),
-     free RAM.
+     free RAM, and what a tunnel user can reach on exit itself: the
+     hysteria ACLs, a listener on :2019 (Caddy's admin), the panel xray's
+     routing towards its own API (AGENTS.md §52; ``exit_guard()``).
 
 Each layer is collected in isolation with its own timeout, so a dead
 exit link never hides a flow wipe and vice versa. A layer that could
@@ -85,6 +87,7 @@ subprocess has a timeout.
 """
 
 import argparse
+import ipaddress
 import json
 import os
 import re
@@ -270,9 +273,11 @@ for tag in ("inbound-443", "inbound-2053", "inbound-8444", "inbound-2054"):
         rt[tag] = {"error": (e.strip() or str(ex))[:200]}
 out["runtime"] = rt
 cfg = {}
+xcfg = None
 rc, o, e = sh("docker exec 3x-ui cat /app/bin/config.json", 15)
 try:
-    for ib in json.loads(o).get("inbounds") or []:
+    xcfg = json.loads(o)
+    for ib in xcfg.get("inbounds") or []:
         clients = (ib.get("settings") or {}).get("clients") or []
         cfg[ib.get("tag")] = {"count": len(clients), "protocol": ib.get("protocol"),
                               "with_flow": sum(1 for c in clients if c.get("flow"))}
@@ -311,7 +316,151 @@ try:
     out["free_ram_mb"] = int(o.strip())
 except ValueError:
     out["free_ram_mb"] = None
+# What a tunnel user can reach on exit itself (AGENTS.md 52). Only the facts
+# the verdict needs leave the host: the hysteria configs also hold the auth
+# URL, the obfs password and the stats secret; config.json holds every key.
+guard = {"hysteria": {}}
+try:
+    for u in ("hysteria", "hysteria-turbo"):
+        rc, o, e = sh("systemctl cat " + u, 10)
+        if rc != 0:
+            guard["hysteria"][u] = {"missing": (e.strip() or "rc=" + str(rc))[:160]}
+            continue
+        guard["hysteria"][u] = guard_hysteria(o, guard_read)
+    rc, o, e = sh("ss -ltnH", 10)
+    guard["listen_2019"] = guard_listen(o, 2019) if rc == 0 else None
+    rc, o, e = sh("docker exec 3x-ui /app/bin/xray-linux-amd64 version", 15)
+    guard["xray_version"] = (o.strip().splitlines() or [""])[0][:160]
+    guard["xray"] = guard_xray_view(xcfg) if isinstance(xcfg, dict) else None
+except Exception as ex:
+    guard["error"] = str(ex)[:200]
+out["guard"] = guard
 print(json.dumps(out))
+'''
+
+# Helpers of the layer-C script, sent ahead of it (not %-formatted). They are
+# plain functions so the tests can run them on sample text.
+GUARD_HELPERS = r'''
+import json as _gjson
+import re as _gre
+
+
+def guard_read(path):
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        return fh.read(262144)
+
+
+def guard_acl_block(text):
+    """The top-level `acl` block of a hysteria YAML config, as lines."""
+    out, inside = [], False
+    for line in text.splitlines():
+        if not inside:
+            if _gre.match(r"acl\s*:", line):
+                inside = True
+                out.append(line)
+            continue
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#") and line[:1] not in (" ", "\t"):
+            break
+        out.append(line)
+    return out
+
+
+def guard_hysteria(unit_text, read):
+    """The ACL facts of one hysteria unit: its config path and the `acl`
+    block (or, for a JSON config, the `acl` object), plus the rules file the
+    block names. ``read(path)`` returns a file's text or raises."""
+    path = None
+    for line in unit_text.splitlines():
+        if line.startswith("ExecStart="):
+            m = _gre.search(r"\s(?:-c|--config)(?:\s+|=)(\S+)", line)
+            if m:
+                path = m.group(1).strip("\"'")
+    if not path:
+        return {"error": "no -c/--config in ExecStart"}
+    try:
+        text = read(path)
+    except Exception as e:
+        return {"config": path, "error": str(e)[:200]}
+    fpath = None
+    if path.endswith(".json"):
+        try:
+            acl = _gjson.loads(text).get("acl")
+        except Exception as e:
+            return {"config": path, "error": "config json: " + str(e)[:160]}
+        info = {"config": path, "acl_json": acl if isinstance(acl, dict) or acl is None else str(acl)[:200]}
+        if isinstance(acl, dict) and acl.get("file"):
+            fpath = str(acl.get("file"))
+    else:
+        block = guard_acl_block(text)
+        info = {"config": path, "acl_lines": block[:400]}
+        for line in block:
+            m = _gre.match(r"\s+file\s*:\s*(\S+)", line)
+            if m:
+                fpath = m.group(1).strip("\"'")
+    if fpath:
+        info["acl_file"] = fpath
+        try:
+            info["acl_file_lines"] = read(fpath).splitlines()[:2000]
+        except Exception as e:
+            info["acl_file_error"] = str(e)[:200]
+    return info
+
+
+def guard_listen(ss_text, port):
+    """Local addresses of the TCP listeners on ``port`` in ``ss -ltnH``."""
+    found = []
+    for line in ss_text.splitlines():
+        f = line.split()
+        if len(f) >= 4 and f[3].rsplit(":", 1)[-1] == str(port):
+            found.append(f[3])
+    return found
+
+
+def guard_xray_view(cfg):
+    """What decides whether a tunnel user reaches the panel xray's API: the
+    routing, the outbounds' kinds and final rules, the inbounds' kinds. No
+    client, key or password leaves the host; a rule's other conditions are
+    kept by name only."""
+    rt = cfg.get("routing") or {}
+    kept = ("inboundTag", "outboundTag", "balancerTag", "port", "network", "ip")
+    rules = []
+    for r in rt.get("rules") or []:
+        if not isinstance(r, dict):
+            continue
+        v = {k: r[k] for k in kept if k in r}
+        if isinstance(v.get("ip"), list):
+            v["ip"] = [str(x) for x in v["ip"]][:64]
+        v["other"] = sorted(k for k in r if k not in kept + ("type", "ruleTag"))
+        rules.append(v)
+    outs = []
+    for ob in cfg.get("outbounds") or []:
+        if not isinstance(ob, dict):
+            continue
+        st = ob.get("settings") or {}
+        o = {"tag": ob.get("tag"), "protocol": ob.get("protocol")}
+        if ob.get("protocol") in ("freedom", "direct"):
+            fr = st.get("finalRules")
+            if isinstance(fr, list):
+                o["finalRules"] = [{k: x.get(k) for k in ("action", "network", "port", "ip")}
+                                   for x in fr if isinstance(x, dict)]
+            elif fr is not None:
+                o["finalRules"] = str(fr)[:200]
+        outs.append(o)
+    api = cfg.get("api") or {}
+    met = cfg.get("metrics") or {}
+    return {
+        "domainStrategy": rt.get("domainStrategy"),
+        "rules": rules,
+        "balancers": [{"tag": b.get("tag"), "selector": b.get("selector")}
+                      for b in rt.get("balancers") or [] if isinstance(b, dict)],
+        "outbounds": outs,
+        "inbounds": [{"tag": ib.get("tag"), "protocol": ib.get("protocol"),
+                      "listen": ib.get("listen"), "port": ib.get("port")}
+                     for ib in cfg.get("inbounds") or [] if isinstance(ib, dict)],
+        "api": {"tag": api.get("tag"), "listen": api.get("listen")},
+        "metrics": {"tag": met.get("tag"), "listen": met.get("listen")},
+    }
 '''
 
 
@@ -396,7 +545,7 @@ def parse_exit_json(text: str) -> dict:
     base = {'ok': False, 'error': None, 'services': {}, 'runtime': {}, 'config': {},
             'accepted': {}, 'last_accepted': {}, 'nat_prerouting': [],
             'hy2_connections_1h': {}, 'cert_lines': [], 'cert_sni': None,
-            'free_ram_mb': None, 'errors': {}}
+            'free_ram_mb': None, 'errors': {}, 'guard': {}}
     text = (text or '').strip()
     # ssh banners / MOTD may precede the blob: take the last line that parses.
     candidate = None
@@ -507,7 +656,7 @@ def collect_layer_b() -> dict:
 
 def collect_layer_c(sni: str) -> dict:
     """Exit host in ONE ssh round-trip: the remote python script prints JSON."""
-    script = REMOTE_C % {'sni': sni}
+    script = GUARD_HELPERS + REMOTE_C % {'sni': sni}
     rc, so, se = _run(['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=8',
                        EXIT_SSH_HOST, 'python3', '-'], TIMEOUT_C, stdin=script)
     data = parse_exit_json(so)
@@ -690,6 +839,433 @@ def _hy2_suspects(tag: str, b: dict, c: dict, entry_dnat: set, exit_hop: set) ->
     return out
 
 
+# ---------------------------------------------------------------------------
+# Exit guard (AGENTS.md §52): what a tunnel user can reach on exit itself.
+# Pure functions over layer C's ``guard`` facts (GUARD_HELPERS collects them).
+# ---------------------------------------------------------------------------
+
+# xray's freedom checks the address it actually dials against a built-in
+# default rule (Xray-core PR #5947, first released in v26.4.15) — for traffic
+# from these inbound protocols only; configured finalRules come first.
+XRAY_DEFAULT_RULE_SINCE = (26, 4, 15)
+XRAY_DEFAULT_RULE_INBOUNDS = ('vless', 'vmess', 'trojan', 'hysteria', 'wireguard')
+FREEDOM_PROTOCOLS = ('freedom', 'direct')
+HY2_UNITS = ('hysteria', 'hysteria-turbo')
+# hysteria runs on the HOST (root, no default block for private addresses):
+# its ACL is all that keeps a hy2 user off the host's loopback (Caddy admin
+# :2019, hysteria's stats APIs) and the docker bridge (the panel container).
+HY2_LOOPBACK_TARGETS = ('127.0.0.1', '::1')
+HY2_PRIVATE_TARGETS = ('10.0.0.1', '100.64.0.1', '169.254.169.254', '172.16.0.1',
+                       '172.20.0.2', '192.168.0.1', 'fc00::1', 'fe80::1')
+GUARD_KEYS_XRAY = ('xray_api_exposed', 'xray_api_polling')
+HY2_ACL_NEXT = ('AGENTS.md §52: в {config} блок acl: inline: с reject(127.0.0.0/8), reject(::1/128) '
+                'и частными сетями, затем systemctl restart {unit}')
+
+
+def parse_xray_version(text) -> Optional[Tuple[int, int, int]]:
+    m = re.search(r'Xray (\d+)\.(\d+)\.(\d+)', str(text or ''))
+    return tuple(int(x) for x in m.groups()) if m else None
+
+
+def _as_list(value) -> list:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        return [str(x) for x in value]
+    return [x.strip() for x in str(value).split(',') if x.strip()]
+
+
+def port_spec_has(spec, port: int) -> bool:
+    """xray's port syntax: 53 / "53" / "1000-2000" / "53,443,1000-2000"."""
+    for part in _as_list(spec):
+        lo, sep, hi = part.partition('-')
+        try:
+            if sep:
+                if int(lo) <= port <= int(hi):
+                    return True
+            elif int(part) == port:
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def _network_has_tcp(spec) -> bool:
+    return spec is None or 'tcp' in [x.lower() for x in _as_list(spec)]
+
+
+def _ip_entry_covers(entry: str, ip: str, unknown: bool) -> bool:
+    """Does one routing / final-rule ``ip`` entry cover ``ip``? ``unknown`` is
+    the answer for entries this script cannot evaluate (ext:…, geoip:xx): the
+    caller picks the side that cannot hide an exposure."""
+    entry = str(entry).strip().lower()
+    if entry == 'geoip:private':
+        return True
+    if entry.startswith(('geoip:', 'ext:', 'ext-ip:')):
+        return unknown
+    try:
+        net = ipaddress.ip_network(entry, strict=False)
+    except ValueError:
+        return unknown
+    target = ipaddress.ip_address(ip)
+    return target.version == net.version and target in net
+
+
+def _host_port(listen) -> Tuple[Optional[str], Optional[int]]:
+    """'127.0.0.1:11111' / '[::1]:62789' → (host, port)."""
+    host, _, port = str(listen or '').rpartition(':')
+    try:
+        return host.strip('[]') or None, int(port)
+    except ValueError:
+        return None, None
+
+
+def _is_loopback_listen(listen) -> bool:
+    host = str(listen or '').strip('[]').lower()
+    if host == 'localhost':
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _freedom_guarded(ob: dict, inbound_proto: str, port: int, version) -> Tuple[bool, str]:
+    """Does this freedom outbound refuse a dial to 127.0.0.1:``port`` for
+    traffic from an ``inbound_proto`` inbound? Configured finalRules first,
+    then xray's default rule."""
+    rules = ob.get('finalRules')
+    if isinstance(rules, str):
+        return False, f'finalRules не читаются ({rules[:60]})'
+    for fr in rules or []:
+        if not isinstance(fr, dict):
+            continue
+        if not _network_has_tcp(fr.get('network')):
+            continue
+        if fr.get('port') not in (None, '') and not port_spec_has(fr['port'], port):
+            continue
+        action = str(fr.get('action') or '').lower()
+        ips = _as_list(fr.get('ip'))
+        # an allow we cannot read may cover loopback; a block we cannot read
+        # is not credited
+        if ips and not any(_ip_entry_covers(x, '127.0.0.1', unknown=(action == 'allow'))
+                           for x in ips):
+            continue
+        if action == 'allow':
+            return False, 'finalRules: allow перед встроенным правилом'
+        if action == 'block':
+            return True, 'finalRules: block'
+    if version < XRAY_DEFAULT_RULE_SINCE:
+        return False, 'xray {} старше 26.4.15 (нет встроенного правила)'.format(
+            '.'.join(str(x) for x in version))
+    proto = str(inbound_proto or '').lower()
+    if proto not in XRAY_DEFAULT_RULE_INBOUNDS and not proto.startswith('shadowsocks'):
+        return False, f'у {proto or "?"}-инбаунда нет встроенного правила'
+    return True, 'встроенное правило'
+
+
+def _reachable_outbounds(view: dict, inbound_tag: str, port: int) -> List[str]:
+    """Outbound tags where a user's TCP request (from ``inbound_tag``, to a
+    name of the user's choice, at ``port``) can end. A rule with conditions
+    beyond inbound/port/network may or may not match — the user picks — so
+    its outbound is reachable and the walk goes on; the first rule without
+    them decides; nothing decisive → the first outbound (xray's default)."""
+    outbounds = view.get('outbounds') or []
+    balancers = {b.get('tag'): _as_list(b.get('selector')) for b in view.get('balancers') or []}
+    reachable: List[str] = []
+
+    def targets(rule):
+        if rule.get('balancerTag'):
+            prefixes = balancers.get(rule['balancerTag'])
+            if prefixes is None:
+                return [o.get('tag') for o in outbounds]
+            return [o.get('tag') for o in outbounds
+                    if any(str(o.get('tag') or '').startswith(p) for p in prefixes)]
+        return [rule.get('outboundTag')]
+
+    for rule in view.get('rules') or []:
+        if 'inboundTag' in rule and inbound_tag not in _as_list(rule['inboundTag']):
+            continue
+        if 'port' in rule and not port_spec_has(rule['port'], port):
+            continue
+        if 'network' in rule and not _network_has_tcp(rule['network']):
+            continue
+        reachable.extend(targets(rule))
+        if not rule.get('other') and 'ip' not in rule:
+            return reachable
+    if outbounds:
+        reachable.append(outbounds[0].get('tag'))
+    return reachable
+
+
+def _inbound_port(ib: dict) -> Optional[int]:
+    port = ib.get('port')
+    if isinstance(port, int):
+        return port
+    return int(port) if isinstance(port, str) and port.isdigit() else None
+
+
+def _local_service_ports(view: dict) -> Dict[int, str]:
+    """{port: what} for the xray services on the container's loopback."""
+    ports: Dict[int, str] = {}
+    api = view.get('api') or {}
+    if api.get('listen'):
+        host, port = _host_port(api['listen'])
+        if port:
+            ports[port] = 'API'
+    for tag in _api_inbound_tags(view):
+        for ib in view.get('inbounds') or []:
+            if ib.get('tag') == tag and _inbound_port(ib):
+                ports[_inbound_port(ib)] = 'API'
+    met = view.get('metrics') or {}
+    if met.get('listen'):
+        host, port = _host_port(met['listen'])
+        if port and _is_loopback_listen(host):
+            ports.setdefault(port, 'metrics')
+    return ports
+
+
+def _api_inbound_tags(view: dict) -> List[str]:
+    """The inbounds the panel polls the API through: those a rule sends to
+    the api outbound, and one tagged like it (3x-ui's ``api``) even when no
+    rule does — then nothing serves its polling."""
+    api_tag = (view.get('api') or {}).get('tag')
+    tags: List[str] = []
+    for rule in view.get('rules') or []:
+        if api_tag and rule.get('outboundTag') == api_tag:
+            tags.extend(_as_list(rule.get('inboundTag')))
+    if api_tag and api_tag not in tags and any(
+            ib.get('tag') == api_tag for ib in view.get('inbounds') or []):
+        tags.append(api_tag)
+    return tags
+
+
+def xray_guard_verdict(view: dict, version) -> dict:
+    """``exposed``: [(inbound, protocol, port, service, outbound, why)] —
+    user inbounds whose traffic can dial a local xray service through a
+    freedom that does not refuse loopback. ``polling``: the rule that takes
+    the panel's own API traffic away from the api outbound (None = fine)."""
+    out = {'exposed': [], 'polling': None, 'ports': _local_service_ports(view)}
+    by_tag = {o.get('tag'): o for o in view.get('outbounds') or []}
+    api_inbounds = set(_api_inbound_tags(view))
+    for ib in view.get('inbounds') or []:
+        tag = ib.get('tag')
+        if not tag or tag in api_inbounds or _is_loopback_listen(ib.get('listen')):
+            continue
+        if str(ib.get('protocol') or '').lower() in ('dokodemo-door', 'tunnel'):
+            continue                           # its client cannot pick the destination
+        for port, what in sorted(out['ports'].items()):
+            for ob_tag in _reachable_outbounds(view, tag, port):
+                ob = by_tag.get(ob_tag) or {}
+                proto = str(ob.get('protocol') or '').lower()
+                if proto == 'loopback':
+                    why = 'loopback-аутбаунд (трафик заходит в роутинг заново)'
+                elif proto in FREEDOM_PROTOCOLS:
+                    guarded, why = _freedom_guarded(ob, ib.get('protocol'), port, version)
+                    if guarded:
+                        continue
+                else:
+                    continue
+                out['exposed'].append((tag, ib.get('protocol'), port, what, ob_tag, why))
+                break
+    api_tag = (view.get('api') or {}).get('tag')
+    if api_inbounds and not (view.get('api') or {}).get('listen'):
+        for tag in sorted(api_inbounds):
+            port = next((_inbound_port(ib) for ib in view.get('inbounds') or []
+                         if ib.get('tag') == tag), None)
+            if not port:
+                continue
+            decided = None
+            for i, rule in enumerate(view.get('rules') or []):
+                if 'inboundTag' in rule and tag not in _as_list(rule['inboundTag']):
+                    continue
+                if 'port' in rule and not port_spec_has(rule['port'], port):
+                    continue
+                if 'network' in rule and not _network_has_tcp(rule['network']):
+                    continue
+                if rule.get('other'):
+                    continue            # domain/user/source…: not this request, or not knowable
+                if 'ip' in rule and not any(_ip_entry_covers(x, '127.0.0.1', unknown=False)
+                                            for x in _as_list(rule['ip'])):
+                    continue
+                decided = (i, rule.get('outboundTag') or rule.get('balancerTag'))
+                break
+            if decided is None:
+                outs = view.get('outbounds') or []
+                decided = (None, outs[0].get('tag') if outs else None)
+            if decided[1] != api_tag:
+                out['polling'] = decided
+                break
+    return out
+
+
+_HY_RULE = re.compile(r'([A-Za-z_][\w-]*)\s*\(([^()]*)\)')
+
+
+def parse_hysteria_acl(info) -> Tuple[Optional[List[Tuple[str, str, str]]], Optional[str]]:
+    """The ACL rules [(outbound, address, proto/port)] in order, or (None,
+    why) when they could not be read. No acl → []: everything goes out."""
+    if not isinstance(info, dict) or info.get('error') or info.get('missing'):
+        info = info if isinstance(info, dict) else {}
+        return None, str(info.get('error') or info.get('missing') or 'нет данных')[:160]
+    texts: List[str] = []
+    if 'acl_json' in info:
+        acl = info['acl_json']
+        if isinstance(acl, dict):
+            inline = acl.get('inline') or []
+            texts.extend(str(x) for x in (inline if isinstance(inline, list) else [inline]))
+        elif acl is not None:
+            return None, f'acl не объект: {str(acl)[:80]}'
+    elif 'acl_lines' in info:
+        texts.extend(str(line).split('#', 1)[0] for line in info.get('acl_lines') or [])
+    else:
+        return None, 'нет данных об acl'
+    if info.get('acl_file'):
+        if info.get('acl_file_error') or not isinstance(info.get('acl_file_lines'), list):
+            return None, f"файл ACL {info['acl_file']}: {info.get('acl_file_error') or 'не прочитан'}"
+        texts.extend(str(line).split('#', 1)[0] for line in info['acl_file_lines'])
+    rules = []
+    for text in texts:
+        for m in _HY_RULE.finditer(text):
+            args = [a.strip().strip('"\'').lower() for a in m.group(2).split(',')]
+            rules.append((m.group(1).lower(), args[0] if args else '',
+                          args[1] if len(args) > 1 else ''))
+    return rules, None
+
+
+def _hy_addr_matches(addr: str, ip: str) -> bool:
+    if addr in ('all', '*'):
+        return True
+    try:
+        net = ipaddress.ip_network(addr, strict=False)
+    except ValueError:
+        return False                       # names, wildcards, suffix:, geoip:, geosite:
+    target = ipaddress.ip_address(ip)
+    return target.version == net.version and target in net
+
+
+def _hy_tcp_scope(protoport: str) -> str:
+    """How much of TCP a rule's protocol/port part covers: all, some, none."""
+    if protoport in ('', '*', '*/*', 'tcp', 'tcp/*'):
+        return 'all'
+    proto = protoport.partition('/')[0]
+    return 'none' if proto == 'udp' else 'some'
+
+
+def hysteria_uncovered(rules, targets) -> List[str]:
+    """The ``targets`` a hy2 user still reaches over TCP: the first rule that
+    covers all of TCP decides; an earlier non-reject for some ports leaves
+    those ports open; nothing decisive → the default outbound (direct)."""
+    out = []
+    for ip in targets:
+        decided = None
+        for outbound, addr, protoport in rules:
+            if not _hy_addr_matches(addr, ip):
+                continue
+            scope = _hy_tcp_scope(protoport)
+            if scope == 'none':
+                continue
+            if scope == 'all':
+                decided = outbound == 'reject'
+                break
+            if outbound != 'reject':
+                decided = False
+                break
+        if decided is not True:
+            out.append(ip)
+    return out
+
+
+def exit_guard(c: dict) -> Tuple[List[dict], List[str]]:
+    """(findings, unjudged keys) from layer C's ``guard`` facts. A key this
+    run could not look at is ``unjudged``: the bot keeps its alert as it was
+    instead of reading the missing finding as "fixed"."""
+    guard = c.get('guard')
+    all_keys = [f'hy2_acl:{u}' for u in HY2_UNITS] + list(GUARD_KEYS_XRAY)
+    if not isinstance(guard, dict) or not guard:
+        return [], all_keys                    # a collector without the guard
+    if guard.get('error'):
+        return ([{'key': 'exit_guard_unreadable', 'severity': 'warn', 'layer': 'c',
+                  'title': f"проверка доступа из туннеля к exit упала: {str(guard['error'])[:160]}",
+                  'next': "ssh exit-node 'systemctl cat hysteria; ss -ltnH'"}], all_keys)
+    findings: List[dict] = []
+    unjudged: List[str] = []
+    blind: List[str] = []
+    listen = guard.get('listen_2019')
+    caddy = ''
+    if isinstance(listen, list) and listen:
+        caddy = f"; Caddy admin слушает {', '.join(listen[:3])}"
+    services = c.get('services') or {}
+    for unit in HY2_UNITS:
+        state = services.get(unit)
+        if state in ('inactive', 'failed'):
+            continue                           # a stopped hysteria serves nobody
+        if state not in ('active', 'activating', 'reloading', 'deactivating'):
+            unjudged.append(f'hy2_acl:{unit}')
+            blind.append(f'{unit}: состояние юнита {str(state)[:60]!r}')
+            continue
+        info = (guard.get('hysteria') or {}).get(unit)
+        rules, err = parse_hysteria_acl(info)
+        if rules is None:
+            unjudged.append(f'hy2_acl:{unit}')
+            blind.append(f'{unit}: {err}')
+            continue
+        config = (info or {}).get('config') or '/etc/hysteria/config.yaml'
+        nxt = HY2_ACL_NEXT.format(config=config, unit=unit)
+        lo = hysteria_uncovered(rules, HY2_LOOPBACK_TARGETS)
+        if lo:
+            what = 'нет ACL' if not rules else f"ACL не закрывает {', '.join(lo)}"
+            findings.append({'key': f'hy2_acl:{unit}', 'severity': 'critical', 'layer': 'c',
+                             'title': (f'{unit}: {what} — hy2-юзеры достают loopback хоста exit'
+                                       f'{caddy}'),
+                             'next': nxt})
+            continue
+        priv = hysteria_uncovered(rules, HY2_PRIVATE_TARGETS)
+        if priv:
+            findings.append({'key': f'hy2_acl:{unit}', 'severity': 'warn', 'layer': 'c',
+                             'title': f"{unit}: ACL не закрывает частные сети ({', '.join(priv)})",
+                             'next': nxt})
+    view = guard.get('xray')
+    version = parse_xray_version(guard.get('xray_version'))
+    if not isinstance(view, dict) or version is None:
+        unjudged.extend(GUARD_KEYS_XRAY)
+        blind.append('xray: ' + ('нет config.json' if not isinstance(view, dict)
+                                 else f"версия не читается ({str(guard.get('xray_version'))[:60]})"))
+    else:
+        verdict = xray_guard_verdict(view, version)
+        block_tag = next((o.get('tag') for o in view.get('outbounds') or []
+                          if o.get('protocol') == 'blackhole'), '<blackhole>')
+        ports = ','.join(str(p) for p in sorted(verdict['ports'])) or '62789'
+        rule = f'{{"type": "field", "port": "{ports}", "outboundTag": "{block_tag}"}}'
+        if verdict['exposed']:
+            shown = '; '.join(f'{ib} ({proto}) → {ob} → :{port} {what}: {why}'
+                              for ib, proto, port, what, ob, why in verdict['exposed'][:3])
+            findings.append({'key': 'xray_api_exposed', 'severity': 'critical', 'layer': 'c',
+                             'title': f'API xray панели достаётся из туннеля: {shown}',
+                             'next': f'в шаблон xray панели сразу ПОСЛЕ api-правила: {rule} '
+                                     '(AGENTS.md §52), затем перезапуск xray'})
+        if verdict['polling']:
+            index, outbound = verdict['polling']
+            where = f'правило №{index + 1}' if index is not None else 'нет api-правила, маршрут по умолчанию'
+            findings.append({'key': 'xray_api_polling', 'severity': 'critical', 'layer': 'c',
+                             'title': (f'опрос API панелью уходит в {outbound} ({where}): '
+                                       'учёт трафика стоит'),
+                             'next': 'в шаблоне xray панели api-правило (inboundTag api → api) '
+                                     'должно быть первым (AGENTS.md §52, §26)'})
+    if blind:
+        findings.append({'key': 'exit_guard_unreadable', 'severity': 'warn', 'layer': 'c',
+                         'title': 'проверка доступа из туннеля к exit не прочитала: ' + '; '.join(blind),
+                         'next': "ssh exit-node 'systemctl cat hysteria hysteria-turbo; "
+                                 "docker exec 3x-ui /app/bin/xray-linux-amd64 version'"})
+    return findings, unjudged
+
+
+def unjudged_for(layers: dict) -> List[str]:
+    """Finding keys this run could not look at, while their layer did look."""
+    c = layers.get('c') or {}
+    return exit_guard(c)[1] if c.get('ok') else []
+
+
 # Findings (IMPROVEMENT_PLAN F, D1): facts that break users BEFORE the probes
 # go dark, judged on their own, whatever the probe verdict says. The bot turns
 # each into an alert ``healthcheck:<key>`` when this script runs on its timer
@@ -743,6 +1319,7 @@ def findings_for(layers: dict) -> List[dict]:
                     out.append({'key': f'exit_hop:{tag}', 'severity': 'warn', 'layer': 'c',
                                 'title': f'{tag}: нет REDIRECT {", ".join(missing)} на exit (порт-хоп)',
                                 'next': "ssh exit-node \"iptables -t nat -S PREROUTING | grep -E '8400|8402'\""})
+        out.extend(exit_guard(c)[0])
     if b.get('ok'):
         dnat = parse_dnat_rules(b.get('nat_prerouting'))
         for tag, rules in ENTRY_DNAT_FOR.items():
@@ -1113,6 +1690,7 @@ def assess(layers: dict, now: Optional[datetime] = None) -> dict:
         'protocols': protocols,
         'suspects': suspects,
         'findings': findings_for(layers),
+        'unjudged': unjudged_for(layers),
         'layers': {
             'a': 'ok' if a_ok else f'FAILED: {a.get("error") or "нет данных"}',
             'b': 'ok' if b.get('ok') else f'FAILED: {b.get("error") or "нет данных"}',
@@ -1209,6 +1787,13 @@ def render_human(report: dict) -> str:
             out.append(f"    → {s['next']}")
     else:
         out.append('ПОДОЗРЕВАЕМЫЕ: нет — ничего чинить не надо')
+    found = report.get('findings') or []
+    if found:
+        out.append('')
+        out.append('НАХОДКИ (вне вердикта по протоколам):')
+        for f in found:
+            out.append(f" [{f.get('severity')}] {f.get('key')}: {f.get('title')}")
+            out.append(f"    → {f.get('next')}")
     alerts = ctx.get('recent_alerts') or []
     if alerts:
         out.append('')

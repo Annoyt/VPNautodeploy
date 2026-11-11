@@ -13,12 +13,12 @@
 
 | Узел | SSH-алиас | Что там |
 |---|---|---|
-| **Entry** (РФ-facing) | `entry` | контейнер `vpn-bot` (`/opt/vpn-bot`, rsync-деплой), локальный `3x-ui` для CF-fronted инбаундов, ingress :443 (форвард на exit), dashboard API :8080, Hermes-агент `/ai` :4097 |
-| **Exit** (за границей) | `vpn-exit` | боевая панель 3x-ui :2026 (форк v3.4) + xray :443, два инстанса hysteria2 (hy2 + hy2t Turbo :8402), Caddy :9443 → entry:8080 (TLS дашборда), tinyproxy :8888 (Telegram-egress бота), hy2-traffic-collector, probe-раннеры |
+| **Entry** (РФ-facing) | `entry` | контейнер `vpn-bot` (`/opt/vpn-bot`, rsync-деплой), локальный `3x-ui` для CF-fronted инбаундов, ingress :443 (форвард на exit), dashboard API :8080 (+ то же приложение по HTTPS :8448 для exit, AGENTS.md §53), Hermes-агент `/ai` :4097 |
+| **Exit** (за границей) | `vpn-exit` | боевая панель 3x-ui :2026 (форк v3.4) + xray :443, два инстанса hysteria2 (hy2 + hy2t Turbo :8402), Caddy :9443 → entry (TLS дашборда; перегон до entry — открытый :8080 до перехода по §53, затем :8448 TLS с пином), tinyproxy :8888 (Telegram-egress бота), hy2-traffic-collector, probe-раннеры |
 | **Reserve DE** | — | запасная VLESS-Reality нода для paid (панель x-ui 2.8.11), lazy-провижн при `/sub`; хостит чужой прод — не трогать его контейнеры |
 
 Путь юзера: клиент → entry :443 → exit :443 → xray → интернет.
-Путь админа: браузер → `https://<dashboard-host>:9443` (Caddy на exit) → entry :8080.
+Путь админа: браузер → `https://<dashboard-host>:9443` (Caddy на exit) → entry :8080, после перехода — :8448 по TLS с пином (`docs/runbooks/entry_hop_tls.md`).
 
 **`/opt/vpn-bot` на entry — НЕ git-checkout.** Это rsync-приёмник; код, который
 не задеплоен скриптом, в проде не существует.

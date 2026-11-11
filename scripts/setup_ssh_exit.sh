@@ -8,8 +8,13 @@
 #   setup_ssh_exit.sh --print-entrypoint  the container's entrypoint (egress rules, users)
 #   setup_ssh_exit.sh --remove        timer and container off (keys stay)
 #
-# /etc/ssh-exit.env (root-only):
-#   BOT_URL=https://<dashboard host>:9443     the bot, reachable from exit
+# /etc/ssh-exit.env (root-only), KEY=VALUE lines read as data, never sourced
+# (quotes and an `export ` prefix are fine; nothing in a value ever runs):
+#   BOT_URL=https://<dashboard host>:9443     the bot, reachable from exit; or
+#           https://<entry ip>:8448 with BOT_CA_FILE (the hop, AGENTS.md §53).
+#           Plain http only to loopback: the token must not cross in clear.
+#   BOT_CA_FILE=/etc/nekovpn-hop/entry-hop.pem  optional, the only CA for
+#           BOT_URL (the hop's pinned certificate); empty = the system's CAs
 #   DPI_REPORT_TOKEN=<the same token as /etc/exit-dpi.env>
 #   SSH_EXIT_PORT=22022                       the port users connect to
 #
@@ -30,11 +35,15 @@
 # and recreate vpn-bot. Open the port in exit's firewall (ufw allow 22022/tcp).
 set -euo pipefail
 
-CONF_DIR=/etc/ssh-exit
-ENV_FILE=/etc/ssh-exit.env
+# SSH_EXIT_DIR / _ENV / _UNIT_DIR / _BIN exist for the tests
+# (tests/unit/test_setup_ssh_exit_sh.py); prod runs the defaults. The env
+# file cannot set them: it is read for its three keys only (load_env).
+CONF_DIR="${SSH_EXIT_DIR:-/etc/ssh-exit}"
+ENV_FILE="${SSH_EXIT_ENV:-/etc/ssh-exit.env}"
+UNIT_DIR="${SSH_EXIT_UNIT_DIR:-/etc/systemd/system}"
 IMAGE=ssh-exit:local
 NAME=ssh-exit
-SYNC_BIN=/usr/local/sbin/ssh-exit-sync
+SYNC_BIN="${SSH_EXIT_BIN:-/usr/local/sbin/ssh-exit-sync}"
 PLAN_FILE=$CONF_DIR/users.plan
 # alpine 3.20, pinned (the repo pins its images, AGENTS.md §23)
 BASE_IMAGE=alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
@@ -99,12 +108,74 @@ exec /usr/sbin/sshd -D -e -f /etc/ssh/sshd_config
 EP
 }
 
-load_env() {
+# KEY=VALUE files are read as data, never sourced: whatever a value holds
+# (`;`, `$(…)`, a backquote) stays text and never runs as root. The same
+# reader as setup_xhr_exit.sh.
+read_env() {  # $1 = file; then the keys to take from it
+  local file=$1 line key value want
+  shift
+  while IFS= read -r line || [ -n "$line" ]; do
+    line=${line%$'\r'}
+    case "$line" in
+      'export '*=*) line=${line#export } ;;
+      [A-Za-z_]*=*) ;;
+      *) continue ;;
+    esac
+    key=${line%%=*}
+    value=${line#*=}
+    case "$value" in
+      \"*\") value=${value#\"}; value=${value%\"} ;;
+      \'*\') value=${value#\'}; value=${value%\'} ;;
+    esac
+    for want in "$@"; do
+      if [ "$key" = "$want" ]; then printf -v "$want" '%s' "$value"; fi
+    done
+  done < "$file"
+}
+
+ENV_KEYS='BOT_URL BOT_CA_FILE DPI_REPORT_TOKEN SSH_EXIT_PORT'
+
+load_env() {  # the env file is the only source of these
   [ -r "$ENV_FILE" ] || { echo "missing $ENV_FILE (BOT_URL, DPI_REPORT_TOKEN, SSH_EXIT_PORT)" >&2; exit 2; }
-  # shellcheck disable=SC1090
-  . "$ENV_FILE"
+  # shellcheck disable=SC2086
+  unset $ENV_KEYS
+  # shellcheck disable=SC2086
+  read_env "$ENV_FILE" $ENV_KEYS
   : "${BOT_URL:?BOT_URL not set}" "${DPI_REPORT_TOKEN:?DPI_REPORT_TOKEN not set}"
   SSH_EXIT_PORT="${SSH_EXIT_PORT:-22022}"
+  check_bot_url
+}
+
+# The token, and the users' hashes it fetches, must not cross the internet
+# in clear: plain http only to loopback. BOT_CA_FILE pins the hop's
+# certificate (AGENTS.md §53), and curl then trusts that file alone:
+# --capath /dev/null, because Debian's curl also loads /etc/ssl/certs next
+# to --cacert. The same check as setup_xhr_exit.sh.
+BOT_TLS=()
+check_bot_url() {
+  local authority host
+  case "$BOT_URL" in
+    https://*) ;;
+    http://*)
+      authority=${BOT_URL#http://}
+      authority=${authority%%[/?#]*}
+      authority=${authority##*@}
+      case "$authority" in
+        \[*) host=${authority%%]*}; host=${host#[} ;;
+        *) host=${authority%%:*} ;;
+      esac
+      if [ "$host" != localhost ] && [ "$host" != ::1 ] \
+         && ! [[ $host =~ ^127\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+        echo "BOT_URL is plain http to another host: the token would cross the internet in clear (the hop's https listener, AGENTS.md §53)" >&2
+        exit 2
+      fi ;;
+    *) echo "BOT_URL must be an http(s) URL" >&2; exit 2 ;;
+  esac
+  BOT_TLS=()
+  if [ -n "${BOT_CA_FILE:-}" ]; then
+    [ -r "$BOT_CA_FILE" ] || { echo "BOT_CA_FILE $BOT_CA_FILE is not readable" >&2; exit 2; }
+    BOT_TLS=(--cacert "$BOT_CA_FILE" --capath /dev/null)
+  fi
 }
 
 sync_users() {
@@ -112,7 +183,11 @@ sync_users() {
   [ "$(docker inspect -f '{{.State.Running}}' "$NAME" 2>/dev/null)" = "true" ] \
     || { echo "container $NAME not running — skip"; exit 0; }
   local json
-  json="$(curl -fsS --max-time 20 -H "X-DPI-Token: ${DPI_REPORT_TOKEN}" "${BOT_URL%/}/api/ssh/users")" \
+  # The token goes through stdin, not argv: /proc/<pid>/cmdline is
+  # readable by every local user (printf is a builtin, so not even there).
+  json="$(printf 'X-DPI-Token: %s\n' "$DPI_REPORT_TOKEN" \
+          | curl -fsS --max-time 20 -H @- ${BOT_TLS[@]+"${BOT_TLS[@]}"} \
+                 "${BOT_URL%/}/api/ssh/users")" \
     || { echo "bot unreachable — users unchanged"; exit 0; }
   # The plan as shell lines: "user<TAB>hash", validated (names n + 12 hex, hashes $6$).
   local plan
@@ -184,7 +259,7 @@ DOCKERFILE
   if [ "$(readlink -f "$0")" != "$SYNC_BIN" ]; then
     install -m 755 -o root -g root "$0" "$SYNC_BIN"
   fi
-  cat > /etc/systemd/system/ssh-exit-sync.service <<UNIT
+  cat > "$UNIT_DIR/ssh-exit-sync.service" <<UNIT
 [Unit]
 Description=SSH emergency exit: sync users from the bot (IMPROVEMENT_PLAN F, E4)
 After=docker.service network-online.target
@@ -192,7 +267,7 @@ After=docker.service network-online.target
 Type=oneshot
 ExecStart=$SYNC_BIN --sync
 UNIT
-  cat > /etc/systemd/system/ssh-exit-sync.timer <<'UNIT'
+  cat > "$UNIT_DIR/ssh-exit-sync.timer" <<'UNIT'
 [Unit]
 Description=Sync the SSH emergency exit users every 2 minutes
 [Timer]

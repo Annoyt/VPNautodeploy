@@ -1874,7 +1874,9 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
                     "exit_dpi_reporter.py на exit не присылал отчёт дольше "
                     f"{INBOUND_DROP_REPORT_STALE_MIN} мин. Пока так, алерт по "
                     "подключениям на инбаундах слеп. Таймер exit-dpi-reporter "
-                    "на exit, токен DPI_REPORT_TOKEN, доступ exit → entry :8080."
+                    "на exit, токен DPI_REPORT_TOKEN, доступ exit → entry: BOT_URL "
+                    "https://<entry>:8448 и пин BOT_CA_FILE в /etc/exit-dpi.env "
+                    "(AGENTS.md §53)."
                 ),
             ))
         if empty:
@@ -1924,14 +1926,16 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
         """What ``scripts/protocol_healthcheck.py --post`` found on its last
         run on entry (IMPROVEMENT_PLAN F, D1): its ``findings`` — the Reality
         dest certificate, entry DNAT, exit hop rules, the hysteria units,
-        shadow-tls, the panel's client fields — each an alert
-        ``healthcheck:<key>``, before the probes go dark.
+        shadow-tls, the panel's client fields, and what a tunnel user can
+        reach on exit itself (hysteria's ACL, the panel xray's API, AGENTS.md
+        §52) — each an alert ``healthcheck:<key>``, before the probes go dark.
 
         "Could not look" is never "fixed" (AlertManager's judged set): a
         report older than HEALTHCHECK_STALE_MIN pages ``healthcheck:stale``
         and judges no finding, and a finding of a layer that could not look
-        this run (ssh to exit failed…) keeps its alert as it is. A layer that
-        could not look HEALTHCHECK_BLIND_RUNS runs in a row pages
+        this run (ssh to exit failed…) keeps its alert as it is, and so does a
+        key the report lists as ``unjudged`` (one read of its layer failed). A
+        layer that could not look HEALTHCHECK_BLIND_RUNS runs in a row pages
         ``healthcheck:blind``. Both are critical: a dead adviser is the one
         thing nobody would otherwise notice. No report ever = the timer is
         not installed: nothing to say. A failed read judges nothing. No
@@ -2003,9 +2007,15 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
                 detail=f"Следующая команда: {str(f.get('next') or '—')[:400]}",
             ))
 
+        # Keys the script could not look at although their layer did (one
+        # read of the exit guard failed, AGENTS.md §52): kept as they were.
+        unjudged = {str(k) for k in (newest.get('unjudged') or []) if isinstance(k, str)}
+
         def judged(key: str) -> bool:
             if key in HEALTHCHECK_FIXED:
                 return True
+            if key[len(HEALTHCHECK_PREFIX):] in unjudged:
+                return False
             return _key_layer(key) in ok_now
 
         return (HEALTHCHECK_PREFIX, alerts, judged)

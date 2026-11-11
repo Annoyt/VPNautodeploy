@@ -990,9 +990,7 @@ class WebAppServer:
         """GET /api/ssh/users — the exit's sshd sync (scripts/setup_ssh_exit.sh,
         IMPROVEMENT_PLAN F, E4): ``{"users": [{"user", "hash"}]}`` for the
         paid users, SHA-512 crypt hashes only. The exit report's token."""
-        expected = (getattr(self.config, 'DPI_REPORT_TOKEN', '') or '').strip()
-        got = request.headers.get('X-DPI-Token', '')
-        if not expected or not hmac.compare_digest(got, expected):
+        if not self._dpi_token_ok(request):
             return web.json_response({'ok': False}, status=403)
         from bot.services import ssh_exit
         if not ssh_exit.enabled(self.config):
@@ -5025,18 +5023,40 @@ class WebAppServer:
 
     # ==================== Server Lifecycle ====================
 
+    async def start_sites(self, runner, host: str = '0.0.0.0', port: int = 8080,
+                          tls=None) -> list:
+        """Start the plain listener and, with ``tls`` = ``(port, context)``,
+        the HTTPS one exit uses across the hop (AGENTS.md §53): the same
+        app, so the same routes, and ``request.remote`` is the caller's
+        address on both. A TLS listener that fails to start is logged and
+        left off; the plain one and the bot keep running."""
+        site = web.TCPSite(runner, host, port)
+        await site.start()
+        sites = [site]
+        logger.info(f"Web server started on http://{host}:{port}")
+        if tls:
+            tls_port, context = tls
+            tls_site = web.TCPSite(runner, host, tls_port, ssl_context=context)
+            try:
+                await tls_site.start()
+            except OSError as e:
+                logger.error(f"hop TLS: the HTTPS listener on :{tls_port} did not start: {e}")
+            else:
+                sites.append(tls_site)
+                logger.info(f"hop TLS: listening on https://{host}:{tls_port}")
+        return sites
+
     def run_in_thread(self, port: int = 8080):
         """Run the web server in a separate thread."""
         def _run():
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-            
+
             runner = web.AppRunner(self.app)
             loop.run_until_complete(runner.setup())
-            site = web.TCPSite(runner, '0.0.0.0', port)
-            loop.run_until_complete(site.start())
-            
-            logger.info(f"Web server started on http://0.0.0.0:{port}")
+            from bot.services import hop_tls
+            loop.run_until_complete(self.start_sites(
+                runner, '0.0.0.0', port, hop_tls.listener(self.config)))
             loop.run_forever()
             
         thread = threading.Thread(target=_run, daemon=True)

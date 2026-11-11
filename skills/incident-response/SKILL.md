@@ -133,7 +133,7 @@ admin wants it faster, the message is «Включён устойчивый ре
 | All users down, xray container down on exit | OOM / restart loop on the 929 MB exit | `ssh exit-node 'dmesg -T \| tail; docker ps -a \| grep 3x-ui'` |
 | New keys "fail to connect", old ones work | `sid`/`pbk` env passthrough broken | `$DC exec -T vpn-bot env \| grep -E 'SID_VALUE\|REALITY'` |
 | Bot polls but doesn't respond | Telegram rate limit / BOT_TOKEN revoked, or Telegram egress proxy down | `$DC logs vpn-bot \| grep -i '429\|401\|forbidden'` |
-| Dashboard 502 | reverse proxy can't reach `:8080` | `curl -s http://127.0.0.1:8080/health` |
+| Dashboard 502 | reverse proxy can't reach the bot (`:8080`, or `:8448` over TLS after the hop cutover) | `curl -s http://127.0.0.1:8080/health`; `docker exec -w /app vpn-bot python3 scripts/hop_tls.py check` |
 | Mass disconnect every ~few min | entry NAT/conntrack timeout < client keepalive | `sysctl net.netfilter.nf_conntrack_*timeout*` |
 | Panel/subscription HTTP 500 | schema drift between `database.py` and prod DB | `$DC logs vpn-bot \| grep 'no such column'` |
 
