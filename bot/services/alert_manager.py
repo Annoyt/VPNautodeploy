@@ -124,8 +124,10 @@ PROTOCOL_AGENT_PREFIX = 'protocol_down:'
 # turn as protocol_down, the same family for the one-turn-per-tick rule.
 INBOUND_DROP_PREFIX = 'inbound_drop:'
 PROTOCOL_FAMILY_PREFIXES = (PROTOCOL_AGENT_PREFIX, INBOUND_DROP_PREFIX)
+# The healthcheck script's findings, posted by its timer (D1).
+HEALTHCHECK_PREFIX = 'healthcheck:'
 # Families whose recovery is announced where the alert went (B2/B3).
-RECOVERY_PREFIXES = PROTOCOL_FAMILY_PREFIXES
+RECOVERY_PREFIXES = PROTOCOL_FAMILY_PREFIXES + (HEALTHCHECK_PREFIX,)
 # Keys of that family that are about our own reporting, not a protocol: no
 # agent turn (a 300-s Hermes turn every 2 h while a reporter is down).
 AGENT_SKIP_KEYS = ('inbound_drop:no_reports', 'inbound_drop:empty_reports')
@@ -166,6 +168,13 @@ PROTOCOL_HEALTHCHECK_CMD = 'python3 /opt/vpn-bot/scripts/protocol_healthcheck.py
 
 # Telegram hard cap is 4096; leave headroom for the prefix + HTML.
 _FOLLOWUP_BODY_LIMIT = 3500
+
+# D2: the agent names one of a fixed list of actions; the bot offers it as
+# a button running ordinary code (bot/services/agent_actions.py).
+try:
+    from bot.services.agent_actions import PROMPT_LINE as AGENT_ACTION_LINE
+except Exception:            # the pager must not die with that import
+    AGENT_ACTION_LINE = ''
 
 
 class AlertManager:
@@ -904,7 +913,16 @@ class AlertManager:
         logger.info(f"{tag}: analysis stored for {alert.key} ({len(reply)} chars)")
 
         if post_to_topic:
-            self._post_agent_followup(alert, reply)
+            markup = None
+            if session_prefix == 'proto-alert':
+                try:
+                    from bot.services import agent_actions
+                    proposed = agent_actions.parse(reply)
+                    if proposed:
+                        markup = agent_actions.keyboard(*proposed)
+                except Exception as e:
+                    logger.warning(f"{tag}: action button skipped: {e}")
+            self._post_agent_followup(alert, reply, reply_markup=markup)
         return reply
 
     def _post_agent_silence(self, alert: Alert, why: str) -> None:
@@ -921,10 +939,12 @@ class AlertManager:
         except Exception as e:
             logger.warning(f"agent silence note failed for {alert.key}: {e}")
 
-    def _post_agent_followup(self, alert: Alert, reply: str) -> None:
-        """Post the agent's diagnosis to the same place the alert went.
-        Never raises — a Telegram hiccup here must not be mistaken for
-        an agent failure by the caller."""
+    def _post_agent_followup(self, alert: Alert, reply: str, *,
+                             reply_markup: Optional[dict] = None) -> None:
+        """Post the agent's diagnosis to the same place the alert went,
+        with the proposed action's button when there is one (D2). Never
+        raises — a Telegram hiccup here must not be mistaken for an agent
+        failure by the caller."""
         try:
             head = (f"🤖 <b>Диагностика по алерту</b> "
                     f"<code>{html.escape(alert.key)}</code>:")
@@ -940,6 +960,7 @@ class AlertManager:
                 body += "\n… (обрезано)"
             self._deliver_to_admin(
                 f"{head}\n\n{body}",
+                reply_markup=reply_markup,
                 pm_fallback=(alert.severity == 'critical'),
             )
         except Exception as e:
@@ -1000,7 +1021,8 @@ def _protocol_agent_prompt(alert: Alert) -> str:
         f"ИТОГ: одна строка на протокол (reality, hy2, ws, stls, hy2t) — "
         f"жив / лежит <сколько> / нет данных.\n"
         f"ПОДОЗРЕВАЕМЫЙ: главная причина + улика (процитируй строку вывода скрипта).\n"
-        f"СЛЕДУЮЩАЯ КОМАНДА: одна точная команда для подтверждения или починки.\n\n"
+        f"СЛЕДУЮЩАЯ КОМАНДА: одна точная команда для подтверждения или починки.\n"
+        f"{AGENT_ACTION_LINE}\n\n"
         f"Ничего не меняй сам: никаких рестартов, правок панели, iptables и "
         f"записи в БД без явного OK админа. Если скрипт отсутствует или упал — "
         f"напиши это одной строкой и остановись."
@@ -1877,6 +1899,117 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
 
     check_inbound_drop.cache = _drop_cache       # test seam
 
+    # ---- the healthcheck script on its timer (D1) ----
+    HEALTHCHECK_STALE_MIN = 45     # the timer runs every 15 min
+    HEALTHCHECK_BLIND_RUNS = 3     # a layer that could not look three runs in a row
+    HEALTHCHECK_FIXED = ('healthcheck:stale', 'healthcheck:blind')
+
+    def _finding_layer(f: dict) -> str:
+        """Which layer a finding came from: the script says so; an older copy
+        of it that does not is read by the key."""
+        layer = f.get('layer') if isinstance(f, dict) else None
+        if layer in ('a', 'b', 'c'):
+            return layer
+        key = str((f or {}).get('key') or '')
+        if key == 'panel_audit':
+            return 'a'
+        if key.startswith('entry_dnat:') or key == 'unit:shadow-tls':
+            return 'b'
+        return 'c'
+
+    def _key_layer(key: str) -> str:
+        return _finding_layer({'key': key[len(HEALTHCHECK_PREFIX):]})
+
+    def check_healthcheck():
+        """What ``scripts/protocol_healthcheck.py --post`` found on its last
+        run on entry (IMPROVEMENT_PLAN F, D1): its ``findings`` — the Reality
+        dest certificate, entry DNAT, exit hop rules, the hysteria units,
+        shadow-tls, the panel's client fields — each an alert
+        ``healthcheck:<key>``, before the probes go dark.
+
+        "Could not look" is never "fixed" (AlertManager's judged set): a
+        report older than HEALTHCHECK_STALE_MIN pages ``healthcheck:stale``
+        and judges no finding, and a finding of a layer that could not look
+        this run (ssh to exit failed…) keeps its alert as it is. A layer that
+        could not look HEALTHCHECK_BLIND_RUNS runs in a row pages
+        ``healthcheck:blind``. Both are critical: a dead adviser is the one
+        thing nobody would otherwise notice. No report ever = the timer is
+        not installed: nothing to say. A failed read judges nothing. No
+        agent turn: the findings are the script's own."""
+        try:
+            db_path = getattr(config, 'DB_PATH', None) or '/var/lib/vpn-bot/bot.db'
+            import json as _json
+            import sqlite3
+            from datetime import datetime
+            now = datetime.utcnow()
+            with sqlite3.connect(db_path) as conn:
+                rows = conn.execute(
+                    "SELECT ts, exit_code, report_json FROM healthcheck_reports "
+                    "ORDER BY id DESC LIMIT ?", (HEALTHCHECK_BLIND_RUNS,)).fetchall()
+        except Exception as e:
+            logger.warning(f"healthcheck alert read failed: {e}")
+            return (HEALTHCHECK_PREFIX, [], frozenset())
+        if not rows:
+            return (HEALTHCHECK_PREFIX, [])
+
+        def parsed(raw):
+            try:
+                data = _json.loads(raw or '{}')
+            except (TypeError, ValueError):
+                return {}
+            return data if isinstance(data, dict) else {}
+
+        reports = [parsed(raw) for _ts, _code, raw in rows]
+        newest_ts = rows[0][0]
+        age = _minutes_since(newest_ts, now)
+        if age > HEALTHCHECK_STALE_MIN:
+            return (HEALTHCHECK_PREFIX, [Alert(
+                key='healthcheck:stale', severity='critical', min_cycles=2,
+                title=f'Скрипт проверки не присылал отчёт {_humanize_minutes(age)}',
+                detail=('Таймер protocol-healthcheck на entry не отработал. Пока так, '
+                        'сертификат Reality-dest, DNAT и юниты hysteria не проверяются, '
+                        'а его прежние находки остаются как были. '
+                        'systemctl status protocol-healthcheck.timer'),
+            )], frozenset({'healthcheck:blind'}))
+
+        def looked(report) -> set:
+            layers = report.get('layers') or {}
+            return {name for name in ('a', 'b', 'c') if layers.get(name) == 'ok'}
+
+        alerts = []
+        newest = reports[0]
+        ok_now = looked(newest)
+        if len(reports) >= HEALTHCHECK_BLIND_RUNS:
+            blind = [name for name in ('a', 'b', 'c')
+                     if all(name not in looked(r) for r in reports)]
+            if blind:
+                names = {'a': 'A (bot.db)', 'b': 'B (entry)', 'c': 'C (exit)'}
+                why = '; '.join(f"{names[n]}: {str((newest.get('layers') or {}).get(n) or '—')[:120]}"
+                                for n in blind)
+                alerts.append(Alert(
+                    key='healthcheck:blind', severity='critical', min_cycles=1,
+                    title=(f'Скрипт проверки {HEALTHCHECK_BLIND_RUNS} раза подряд не смог '
+                           f'посмотреть слой {", ".join(names[n] for n in blind)}'),
+                    detail=(f'{why}. Находки этого слоя пока не проверяются и остаются как '
+                            f'были. journalctl -u protocol-healthcheck -n 40'),
+                ))
+        for f in (newest.get('findings') or []):
+            if not isinstance(f, dict) or not f.get('key'):
+                continue
+            severity = 'critical' if f.get('severity') == 'critical' else 'warn'
+            alerts.append(Alert(
+                key=f"healthcheck:{str(f['key'])[:60]}", severity=severity, min_cycles=1,
+                title=str(f.get('title') or f['key'])[:200],
+                detail=f"Следующая команда: {str(f.get('next') or '—')[:400]}",
+            ))
+
+        def judged(key: str) -> bool:
+            if key in HEALTHCHECK_FIXED:
+                return True
+            return _key_layer(key) in ok_now
+
+        return (HEALTHCHECK_PREFIX, alerts, judged)
+
     def check_lockdown_active():
         """LOCKDOWN (IMPROVEMENT_PLAN B1, bot/services/lockdown.py) is
         a standing change to what every user receives — fronted-first
@@ -1923,7 +2056,7 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
     checks.extend([
         check_cpu, check_ram, check_disk,
         check_opencode, check_xray_reload_sidecar, check_xui_inbounds,
-        check_protocol_probe_down, check_inbound_drop,
+        check_protocol_probe_down, check_inbound_drop, check_healthcheck,
         check_dpi_short_sessions, check_dpi_handshake_spike, check_dpi_rst_spike,
         check_lockdown_active,
     ])

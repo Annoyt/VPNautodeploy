@@ -1,0 +1,24 @@
+[Unit]
+Description=Protocol healthcheck -> bot (oneshot, timer-driven; IMPROVEMENT_PLAN F, D1)
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Runs as root on ENTRY: it reads iptables, systemd units and docker, and
+# ssh's to exit. The bot token (DPI_REPORT_TOKEN) is read from
+# /opt/vpn-bot/.env by the script itself. ~15 s of entry's single core.
+# A root-owned copy, never the rsync target: /opt/vpn-bot belongs to the
+# deploy account, and a root timer must not run a file another account can
+# change (AGENTS.md §36). scripts/install_protocol_healthcheck.sh installs
+# it; re-run that after the script changes.
+ExecStart=/usr/bin/python3 /usr/local/lib/nekovpn-healthcheck/protocol_healthcheck.py --post http://127.0.0.1:8080/api/healthcheck/report
+# 1 = something is wrong, 2 = could not look: both are reports, not failures
+SuccessExitStatus=1 2
+TimeoutStartSec=180
+Nice=10
+MemoryMax=256M
+CPUQuota=50%
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full

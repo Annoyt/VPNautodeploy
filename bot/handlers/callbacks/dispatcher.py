@@ -35,6 +35,7 @@ from bot.handlers.callbacks.admin import (
     CloseTicketHandler,
     BanFromTicketHandler,
     AlertAckHandler,
+    AgentActionHandler,
     MailRequestHandler,
 )
 from bot.handlers.callbacks.ai_model import AiModelSelectHandler
@@ -109,6 +110,7 @@ class CallbackDispatcher:
         self.handlers.append(CloseTicketHandler(self.bot, self.db, self.config))
         self.handlers.append(BanFromTicketHandler(self.bot, self.db, self.config))
         self.handlers.append(AlertAckHandler(self.bot, self.db, self.config))
+        self.handlers.append(AgentActionHandler(self.bot, self.db, self.config))
         self.handlers.append(MailRequestHandler(self.bot, self.db, self.config))
         # «➕ в blocked-recent» / «✖ игнор» on site complaint cards (admin-only).
         self.handlers.append(RuleListQueueHandler(self.bot, self.db, self.config))

@@ -736,6 +736,9 @@ class AdminOpsMixin(AdminHandlerBase):
                 # When it IS expected, the loop above already rendered a
                 # real line (grey "нет проб" until the first run writes).
                 lines.append("⚪ <b>hy2t</b>: без проб, см. /ai")
+        hy2 = self._hy2_sessions_line(now)
+        if hy2:
+            lines.append(hy2)
         lines.append("")
         lines.append(self._panel_audit_line())
         lines.append("")
@@ -745,6 +748,112 @@ class AdminOpsMixin(AdminHandlerBase):
         if len(text) > 3900:  # Telegram cap is 4096
             text = text[:3900] + "\n…(обрезано)"
         return text
+
+    HY2_SESSIONS_WINDOW_H = 24
+    HY2_LONG_SESSION_S = 30 * 60
+
+    def _hy2_sessions_line(self, now: datetime) -> Optional[str]:
+        """D4: how long users' hy2 sessions last, from the hysteria journal
+        on exit (``hy2_sessions``) — the probes cannot see a session that
+        connects and then dies. None without data."""
+        since = (now - timedelta(hours=self.HY2_SESSIONS_WINDOW_H)).isoformat()
+        try:
+            with self.db._connect() as conn:
+                rows = conn.execute(
+                    "SELECT duration_s, reason FROM hy2_sessions WHERE ended_at >= ? "
+                    "AND (instance = 'hysteria' OR instance IS NULL OR instance = '')",
+                    (since,)).fetchall()
+        except Exception:
+            return None
+        if not rows:
+            return None
+        durations = sorted(int(r[0]) for r in rows)
+        median = durations[len(durations) // 2]
+        long_share = sum(1 for d in durations if d >= self.HY2_LONG_SESSION_S) / len(durations)
+        reasons: dict = {}
+        for _d, reason in rows:
+            reasons[reason or 'none'] = reasons.get(reason or 'none', 0) + 1
+        top, n_top = max(reasons.items(), key=lambda kv: kv[1])
+        return (f"⏱ hy2 сессии за {self.HY2_SESSIONS_WINDOW_H} ч: {len(durations)}, медиана "
+                f"{_humanize_minutes(median / 60)}, ≥ 30 мин — {long_share:.0%}; "
+                f"чаще всего кончаются: {html.escape(top)} ({n_top * 100 // len(durations)}%)")
+
+    # ----- /usage (D3) -----
+
+    USAGE_DEFAULT_DAYS = 7
+    USAGE_MAX_ASNS = 15
+
+    def show_usage(self, chat_id: str, args: list) -> None:
+        """Who used which protocol, per operator (IMPROVEMENT_PLAN F, D3):
+        distinct users per (network, protocol) over the last N days, from
+        the exit report's presence (every xray client, Hiddify included)
+        and hy2 auth allows. The network is ``users.last_asn`` — the last
+        profile fetch's; users who never fetched one sit under «?»."""
+        try:
+            days = int(args[0]) if args else self.USAGE_DEFAULT_DAYS
+        except ValueError:
+            days = self.USAGE_DEFAULT_DAYS
+        days = max(1, min(days, 30))
+        try:
+            text = self._usage_report(days)
+        except Exception as e:
+            logger.exception("/usage failed")
+            text = f"❌ /usage: {html.escape(str(e))[:200]}"
+        self._send(chat_id=chat_id, text=text, parse_mode='HTML')
+
+    # A user counts under an xray protocol that carried at least this share
+    # of their accepted connections in the period: a client's url test
+    # through every server is a handful of connections, real traffic is many.
+    USAGE_MIN_SHARE = 0.2
+
+    def _usage_report(self, days: int) -> str:
+        now = datetime.utcnow()
+        day0 = (now - timedelta(days=days - 1)).strftime('%Y-%m-%d')
+        cells: dict = {}
+        with self.db._connect() as conn:
+            per_user: dict = {}
+            for proto, asn, chat, conns in conn.execute(
+                    "SELECT p.proto, COALESCE(NULLIF(UPPER(TRIM(u.last_asn)), ''), '?'), "
+                    "p.chat_id, SUM(p.conns) "
+                    "FROM protocol_usage p LEFT JOIN users u ON u.chat_id = p.chat_id "
+                    "WHERE p.day >= ? GROUP BY p.chat_id, p.proto", (day0,)):
+                per_user.setdefault((asn, chat), {})[proto] = int(conns or 0)
+            for (asn, chat), by_proto in per_user.items():
+                total = sum(by_proto.values()) or 1
+                for proto, n in by_proto.items():
+                    if n / total >= self.USAGE_MIN_SHARE:
+                        cells.setdefault(asn, {}).setdefault(proto, set()).add(chat)
+            # Calendar days, like the xray columns (hy2_auth_log.ts is
+            # CURRENT_TIMESTAMP, a SPACE format date() reads).
+            for asn, chat in conn.execute(
+                    "SELECT COALESCE(NULLIF(UPPER(TRIM(u.last_asn)), ''), '?'), h.chat_id "
+                    "FROM hy2_auth_log h LEFT JOIN users u ON u.chat_id = h.chat_id "
+                    "WHERE h.decision = 'allow' AND date(h.ts) >= ? AND h.chat_id IS NOT NULL "
+                    "AND h.chat_id != 'probe_internal'", (day0,)):
+                cells.setdefault(asn, {}).setdefault('hy2', set()).add(chat)
+        if not cells:
+            return (f"📊 <b>Протоколы по операторам</b> за {days} д: данных нет — "
+                    f"отчёты exit ещё не пришли")
+        protos = [p for p in ('reality', 'cf-ws', 'ss2022', 'xhttp', 'hy2')
+                  if any(p in v for v in cells.values())]
+        protos += sorted({p for v in cells.values() for p in v} - set(protos))
+        short = {'reality': 'real', 'cf-ws': 'ws', 'ss2022': 'stls', 'xhttp': 'xh', 'hy2': 'hy2'}
+        users = {asn: set().union(*v.values()) for asn, v in cells.items()}
+        order = sorted(cells, key=lambda a: (-len(users[a]), a))[:self.USAGE_MAX_ASNS]
+        head = f"{'сеть':<10}" + ''.join(f"{short.get(p, p)[:5]:>6}" for p in protos) + f"{'всего':>7}"
+        lines = [head]
+        for asn in order:
+            row = f"{asn[:10]:<10}" + ''.join(f"{len(cells[asn].get(p, ())):>6}" for p in protos)
+            lines.append(row + f"{len(users[asn]):>7}")
+        rest = len(cells) - len(order)
+        out = [f"📊 <b>Протоколы по операторам</b> за {days} д (уникальных пользователей):",
+               "<pre>" + html.escape("\n".join(lines)) + "</pre>"]
+        if rest > 0:
+            out.append(f"<i>ещё сетей: {rest}</i>")
+        out.append(f"<i>xray: протокол, на который пришлось ≥ {int(self.USAGE_MIN_SHARE * 100)} % "
+                   f"подключений пользователя (url-тесты клиентов не в счёт); hy2 — была "
+                   f"авторизация (вместе с hy2t). «?» — профиль ни разу не обновлялся из своей сети</i>")
+        return "\n".join(out)
 
     def _read_probe_state(self, now: datetime) -> dict:
         """``read_probe_state`` with this card's window (class attrs so

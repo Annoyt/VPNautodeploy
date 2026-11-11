@@ -90,6 +90,27 @@ class TestMigrationV3:
         assert {'idx_outbound_bulk_tag_ts', 'idx_exit_reports_ts'} <= idx
         assert tuple(row)[:3] == (0, 0, 0) and row[3]
 
+    def test_adviser_tables(self, mock_bot_db):
+        """IMPROVEMENT_PLAN F, package D: healthcheck reports (D1), protocol
+        usage per day (D3), hy2 sessions from the hysteria journal (D4)."""
+        conn = mock_bot_db._connect()
+        try:
+            def cols(table):
+                return [r[1] for r in conn.execute(f"PRAGMA table_info({table})")]
+            got = {t: cols(t) for t in ('healthcheck_reports', 'protocol_usage', 'hy2_sessions')}
+            conn.execute("INSERT INTO protocol_usage (day, chat_id, proto, conns) "
+                         "VALUES ('2026-11-10', '1', 'reality', 3)")
+            with pytest.raises(sqlite3.IntegrityError):
+                conn.execute("INSERT INTO protocol_usage (day, chat_id, proto, conns) "
+                             "VALUES ('2026-11-10', '1', 'reality', 4)")
+        finally:
+            conn.close()
+        assert got == {
+            'healthcheck_reports': ['id', 'ts', 'exit_code', 'verdict', 'report_json'],
+            'protocol_usage': ['day', 'chat_id', 'proto', 'conns'],
+            'hy2_sessions': ['id', 'ended_at', 'chat_id', 'instance', 'duration_s', 'reason'],
+        }
+
     def test_alert_state_of_the_first_b3_shape_gets_the_incident_columns(self, tmp_path):
         """A db created before opened_ts / closed_ts existed is migrated."""
         import sqlite3 as _sq

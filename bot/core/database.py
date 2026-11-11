@@ -127,6 +127,9 @@ class Database:
         self._init_outbound_bulk()
         self._init_exit_reports()
         self._init_alert_state()
+        self._init_healthcheck_reports()
+        self._init_protocol_usage()
+        self._init_hy2_sessions()
         self._init_client_probe()
         self._init_client_apps()
 
@@ -960,6 +963,84 @@ class Database:
                 conn.commit()
         except sqlite3.Error as e:
             logger.error(f"_init_alert_state failed: {e}")
+
+    def _init_healthcheck_reports(self) -> None:
+        """scripts/protocol_healthcheck.py reports posted by its timer on
+        entry (IMPROVEMENT_PLAN F, D1): verdict, exit code (2 = could not
+        look) and the report JSON whose ``findings`` the alert reads. Naive
+        UTC ISO ``ts``; kept 7 days."""
+        try:
+            with self._connect() as conn:
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS healthcheck_reports ("
+                    "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                    "ts TEXT NOT NULL, "
+                    "exit_code INTEGER, "
+                    "verdict TEXT, "
+                    "report_json TEXT)"
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_healthcheck_reports_ts "
+                    "ON healthcheck_reports(ts)"
+                )
+                conn.commit()
+        except sqlite3.Error as e:
+            logger.error(f"_init_healthcheck_reports failed: {e}")
+
+    def _init_protocol_usage(self) -> None:
+        """Who used which protocol, per day (IMPROVEMENT_PLAN F, D3): from
+        the exit report's presence block (xray protocols, Hiddify included)
+        and hy2 auth allows. One row per (day, chat_id, proto); ``conns`` =
+        accepted connections that day. Kept 90 days."""
+        try:
+            with self._connect() as conn:
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS protocol_usage ("
+                    "day TEXT NOT NULL, "
+                    "chat_id TEXT NOT NULL, "
+                    "proto TEXT NOT NULL, "
+                    "conns INTEGER NOT NULL DEFAULT 0, "
+                    "PRIMARY KEY (day, chat_id, proto))"
+                )
+                conn.commit()
+        except sqlite3.Error as e:
+            logger.error(f"_init_protocol_usage failed: {e}")
+
+    def _init_hy2_sessions(self) -> None:
+        """hy2 sessions from the hysteria journal on exit (IMPROVEMENT_PLAN F,
+        D4), sent with the exit report: when it ended, whose, which instance,
+        how long it lasted and why it ended. Kept 30 days."""
+        try:
+            with self._connect() as conn:
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS hy2_sessions ("
+                    "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                    "ended_at TEXT NOT NULL, "
+                    "chat_id TEXT, "
+                    "instance TEXT, "
+                    "duration_s INTEGER NOT NULL, "
+                    "reason TEXT)"
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_hy2_sessions_ended "
+                    "ON hy2_sessions(ended_at)"
+                )
+                conn.commit()
+        except sqlite3.Error as e:
+            logger.error(f"_init_hy2_sessions failed: {e}")
+            return
+        # One session = one (instance, user, end time, length): a window the
+        # reporter sends again (its POST timed out after the bot stored it)
+        # adds nothing (INSERT OR IGNORE).
+        try:
+            with self._connect() as conn:
+                conn.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_hy2_sessions_once "
+                    "ON hy2_sessions(IFNULL(instance, ''), IFNULL(chat_id, ''), ended_at, duration_s)"
+                )
+                conn.commit()
+        except sqlite3.Error as e:
+            logger.error(f"hy2_sessions unique index failed: {e}")
 
     def _init_client_apps(self) -> None:
         """Which app fetched a user's profile, and when: one row per (user,

@@ -1,6 +1,7 @@
 """Admin callback handlers."""
 
 import logging
+import threading
 from typing import TYPE_CHECKING
 
 from bot.config import UserState
@@ -654,6 +655,68 @@ class AlertAckHandler(BaseCallbackHandler):
                     )
                 except Exception as e:
                     logger.warning(f"alert ack: edit failed: {e}")
+
+
+class AgentActionHandler(BaseCallbackHandler):
+    """The ▶️ button under the agent's diagnosis (IMPROVEMENT_PLAN F, D2):
+    runs the one whitelisted action the agent proposed
+    (``bot/services/agent_actions.py``). Admins only; the button's data is
+    client-supplied and checked again; a stale button is refused, and a
+    button runs once (a double tap, a press after the edit failed). The
+    result replaces the button in the message; when Telegram refuses the
+    edit, it goes to the same chat and topic — never the admin's PM."""
+
+    CALLBACK_PATTERN = 'agent_act:'
+    # Buttons pressed in this process (a double tap arrives before the
+    # first press has written its audit row).
+    _pressed: set = set()
+    _pressed_lock = threading.Lock()
+
+    def can_handle(self, callback_data: str) -> bool:
+        return callback_data.startswith(self.CALLBACK_PATTERN)
+
+    def handle(self, update: dict, chat_id: str, user_id: str, **kwargs) -> None:
+        try:
+            self.validator.validate_admin(user_id)
+        except PermissionDeniedError:
+            self.bot.send_message(chat_id=user_id, text="❌ No permission.")
+            return
+        from bot.services import agent_actions
+        data = kwargs.get('data', '')
+        parsed = agent_actions.parse_callback(data)
+        cb_msg = update.get('callback_query', {}).get('message', {})
+        msg_id = cb_msg.get('message_id')
+        msg_chat = (cb_msg.get('chat') or {}).get('id')
+        thread = cb_msg.get('message_thread_id')
+        button = agent_actions.button_id(msg_chat, msg_id, data)
+        if isinstance(parsed, str):
+            result = f"❌ {parsed}"
+        else:
+            with self._pressed_lock:
+                first = button not in self._pressed
+                self._pressed.add(button)
+            if not first or agent_actions.already_done(self.db, button):
+                result = "ℹ️ уже выполнено по этой кнопке — /protocols покажет, что сейчас"
+            else:
+                xui = (self.bot.services.get('xui')
+                       if hasattr(self.bot, 'services') else None)
+                result = agent_actions.execute(*parsed, db=self.db, config=self.config,
+                                               xui=xui, admin_id=str(user_id), button=button)
+        if msg_id and msg_chat is not None:
+            try:
+                edited = self.bot.client.edit_message_text(
+                    chat_id=str(msg_chat), message_id=msg_id,
+                    text=f"{cb_msg.get('text', '')}\n\n{result}",
+                )
+                if edited is not None:
+                    return
+                logger.warning("agent action: edit returned nothing")
+            except Exception as e:
+                logger.warning(f"agent action: edit failed: {e}")
+            kw = {'message_thread_id': thread} if thread else {}
+            self.bot.send_message(chat_id=str(msg_chat), text=result, **kw)
+            return
+        self.bot.send_message(chat_id=user_id, text=result)
 
 
 class BanFromTicketHandler(BaseCallbackHandler):
