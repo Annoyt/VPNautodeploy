@@ -64,6 +64,8 @@ class SubscriptionService:
     """Builds sing-box JSON config and resolves tokens to users."""
 
     TOKEN_LEN = 32
+    # What derive_token makes: lower-case hex, TOKEN_LEN long.
+    _TOKEN_RE = re.compile(r'[0-9a-f]{%d}' % TOKEN_LEN)
 
     def __init__(self, config: Settings):
         self.config = config
@@ -86,8 +88,13 @@ class SubscriptionService:
         """Linear scan ``users`` to find the row whose UUID hashes to
         ``token``. Returns the ``User`` or ``None``. Constant-time
         comparison so we don't leak the right token via timing.
+
+        Only a token derive_token could have made gets that far: anything
+        else never matches, and needs no scan of every user. compare_digest
+        also raises on a str with a non-ASCII character, which made such a
+        token a 500 on /sub, /open, /app and the app's SOS instead of a 404.
         """
-        if not token or len(token) != self.TOKEN_LEN:
+        if not isinstance(token, str) or not self._TOKEN_RE.fullmatch(token):
             return None
         try:
             users = db.get_all_users()

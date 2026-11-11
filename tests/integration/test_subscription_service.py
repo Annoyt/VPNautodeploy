@@ -249,6 +249,32 @@ class TestSubscriptionService:
         result = service.find_user_by_token(db, 'a' * 32)
         assert result is None
 
+    @pytest.mark.parametrize('token', [
+        'т' * 32,                # non-ASCII: compare_digest raised on it (a 500)
+        'a' * 31 + '\udcff',     # a surrogate, what undecodable bytes turn into
+        'g' * 32,                # not hex
+        'A' * 32,                # derive_token makes lower case only
+        'a' * 32 + '\n',         # one character more, a newline
+        None,                    # no token at all
+    ])
+    def test_find_user_by_token_refuses_what_derive_token_never_makes(
+            self, mock_config_minimal, sample_user_ru, token):
+        """Refused without raising, and without a scan of every user."""
+        service = SubscriptionService(mock_config_minimal)
+        db = Mock()
+        db.get_all_users = Mock(return_value=[sample_user_ru])
+        assert service.find_user_by_token(db, token) is None
+        db.get_all_users.assert_not_called()
+
+    def test_find_user_by_token_is_exact(self, mock_config_minimal, sample_user_ru):
+        service = SubscriptionService(mock_config_minimal)
+        db = Mock()
+        db.get_all_users = Mock(return_value=[sample_user_ru])
+        token = service.derive_token(sample_user_ru.uuid)
+        assert token.upper() != token
+        assert service.find_user_by_token(db, token.upper()) is None
+        assert service.find_user_by_token(db, token) is sample_user_ru
+
     # ===== Sing-box Config: Protocol Outbound Tests =====
 
     def test_reality_outbound_full_config(self, mock_config_full, sample_user_ru):

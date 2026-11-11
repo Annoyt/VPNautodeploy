@@ -146,7 +146,10 @@ sync_users() {
   [ "$(docker inspect -f '{{.State.Running}}' "$NAME" 2>/dev/null)" = "true" ] \
     || { echo "container $NAME not running — skip"; exit 0; }
   local json
-  json="$(curl -fsS --max-time 20 -H "X-DPI-Token: ${DPI_REPORT_TOKEN}" "${BOT_URL%/}/api/ssh/users")" \
+  # The token goes through stdin, not argv: /proc/<pid>/cmdline is
+  # readable by every local user (printf is a builtin, so not even there).
+  json="$(printf 'X-DPI-Token: %s\n' "$DPI_REPORT_TOKEN" \
+          | curl -fsS --max-time 20 -H @- "${BOT_URL%/}/api/ssh/users")" \
     || { echo "bot unreachable — users unchanged"; exit 0; }
   # The plan as shell lines: "user<TAB>hash", validated (names n + 12 hex, hashes $6$).
   local plan

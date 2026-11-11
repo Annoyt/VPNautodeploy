@@ -12,8 +12,9 @@ and the caller's environment is no source for them — and the flows around it
 are as before: setup writes what --print-config / --print-entrypoint print,
 the timer runs a root-owned copy, --sync applies the bot's list, leaves the
 users alone when the bot does not answer, and does not apply a list that
-suddenly reads empty unless forced from the command line. One test feeds the
-sync the body the real endpoint answers on a real sqlite.
+suddenly reads empty unless forced from the command line. The token reaches
+curl through stdin, never argv. One test feeds the sync the body the real
+endpoint answers on a real sqlite.
 """
 
 import json
@@ -87,8 +88,10 @@ import json, os, sys
 from pathlib import Path
 st = Path(os.environ['FAKE_STATE'])
 args = sys.argv[1:]
+header = sys.stdin.read() if '@-' in args else ''
 with open(st / 'calls.log', 'a') as f:
     f.write(json.dumps(['curl'] + args) + '\n')
+(st / 'curl_header').write_text(header)
 if (st / 'curl_fail').exists():
     print('curl: (7) Failed to connect', file=sys.stderr)
     sys.exit(7)
@@ -199,6 +202,9 @@ class Env:
     def curl_calls(self):
         return [c for c in self.calls() if c[0] == 'curl']
 
+    def curl_header(self):
+        return (self.state / 'curl_header').read_text()
+
     def reset_calls(self):
         (self.state / 'calls.log').unlink(missing_ok=True)
 
@@ -250,7 +256,7 @@ class TestTheEnvFileIsData:
         curl = env.curl_calls()
         assert len(curl) == 1                       # setup's sync, through the copy
         assert curl[0][-1] == url + '/api/ssh/users'
-        assert f'X-DPI-Token: {token}' in curl[0]
+        assert env.curl_header() == f'X-DPI-Token: {token}\n'
         assert f'{port}:22' in env.start_args()
         assert f'ufw allow {port}/tcp' in r.stdout
         r = env.run('--sync')
@@ -298,7 +304,7 @@ class TestTheEnvFileIsData:
         assert r.returncode == 0, r.stderr
         curl = env.curl_calls()[-1]
         assert curl[-1] == 'https://dash.example.com:9443/api/ssh/users'
-        assert f'X-DPI-Token: {TOKEN}' in curl
+        assert env.curl_header() == f'X-DPI-Token: {TOKEN}\n'
         assert '23000:22' in env.start_args()
         assert 'ufw allow 23000/tcp' in r.stdout
 
@@ -398,6 +404,15 @@ class TestSync:
         assert set_up.applied()[-1] == plan(N1, N2)
         assert (set_up.dir / 'users.plan').read_text() == plan(N1, N2)
         assert 'users synced (2)' in r.stdout
+
+    def test_the_token_goes_through_stdin(self, set_up):
+        # argv is readable by every local user (/proc/<pid>/cmdline), and the
+        # same token also opens /api/xhr/users (uuids are VLESS credentials)
+        assert set_up.run('--sync').returncode == 0
+        [curl] = set_up.curl_calls()
+        assert not any(TOKEN in a for a in curl)
+        assert curl[curl.index('-H') + 1] == '@-'
+        assert set_up.curl_header() == f'X-DPI-Token: {TOKEN}\n'
 
     def test_malformed_entries_are_skipped(self, set_up):
         set_up.touch('answer', json.dumps({'ok': True, 'users': [
