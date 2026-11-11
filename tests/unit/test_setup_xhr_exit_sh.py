@@ -1,28 +1,37 @@
 """scripts/setup_xhr_exit.sh — the xhr server on exit (VLESS + XHTTP +
 Reality, an xray of its own) and its 2-minute ``--sync`` against the bot's
-``GET /api/xhr/users`` (bot/services/xhr_exit.py).
+``GET /api/xhr/users`` (bot/services/xhr_exit.py) and the panel.
 
-The script runs as root on exit against docker, systemd and the bot; here
-it runs for real (bash, python3, flock, cmp, sort) with ``docker`` /
-``curl`` / ``systemctl`` / ``ss`` / ``openssl`` / ``id`` / ``chown`` /
-``ip`` replaced by fakes that keep their state in files. What is pinned:
-the dest and image checks refuse before anything is written, the keys are
+The script runs as root on exit against docker, systemd, the bot and the
+panel's x-ui.db; here it runs for real (bash, python3, flock, cmp, sort)
+with ``docker`` / ``curl`` / ``systemctl`` / ``ss`` / ``openssl`` / ``id``
+/ ``chown`` / ``ip`` replaced by fakes that keep their state in files, and
+x-ui.db a real sqlite with the fork's tables. What is pinned: the dest,
+image and panel checks refuse before anything is written, the keys are
 generated once and stay root-only, the config carries the PROXY-protocol
-requirement and the egress guards, an unchanged list touches nothing, a
-changed one is checked before the live config moves, a container that
-does not come back is rolled back, a list that suddenly reads empty is not
-applied by the timer, a bot that does not answer leaves the users as they
-are, a bot that hands out other keys fails loudly, the token never reaches
-argv, and the 3x-ui container is never touched. One test feeds the script
-the body the real endpoint answers on a real sqlite.
+requirement, the egress guards and per-user counters, an unchanged list
+touches nothing, a changed one is checked before the live config moves, a
+container that does not come back is rolled back, a list that suddenly
+reads empty is not applied by the timer, a bot that does not answer leaves
+the users as they are, a bot that hands out other keys fails loudly, the
+token never reaches argv, and the 3x-ui container is never touched.
+Traffic: the counters are read and reset before anything can recreate the
+container (and once more right before), kept in a root-only pending file
+until the panel's row takes them, added exactly once, never lost to a
+locked panel or a damaged file; the panel keeps out whom it switched off,
+read-only, and a read that fails changes nothing. One test feeds the
+script the body the real endpoint answers on a real sqlite.
 """
 
 import asyncio
+import contextlib
 import fcntl
+import hashlib
 import json
 import os
 import shutil
 import socket
+import sqlite3
 import subprocess
 import threading
 import time
@@ -46,6 +55,16 @@ TOKEN = 'tok-123'
 
 U1 = '8c2f6a3e-1d4b-4c5e-9f7a-2b3c4d5e6f70'
 U2 = '0f9e8d7c-6b5a-4c3d-8e2f-1a0b9c8d7e6f'
+# Uuids the panel has no client for.
+U3 = '5b1d3c2a-9e8f-4a7b-8c6d-0e1f2a3b4c5d'
+U4 = '2c4e6a8b-0d1f-4e3a-9b5c-7d9e1f3a5b7c'
+GB = 1024 ** 3
+DAY_MS = 86400 * 1000
+
+
+def _label(uuid):  # what xray names and counts a user under
+    return 'n' + hashlib.sha256(uuid.encode()).hexdigest()[:12]
+
 
 FAKE_DOCKER = r'''#!/usr/bin/env python3
 import json, os, sys
@@ -98,6 +117,7 @@ elif cmd == 'run' and '-d' in args:
     (st / f'started_{n}.args').write_text(json.dumps(args))
     (st / 'xhr_exists').touch()
     (st / 'restarts').write_text('0')
+    (st / 'counters').unlink(missing_ok=True)    # a new xray counts from zero
     fails = st / 'start_fails'
     if fails.exists() and int(fails.read_text()) > 0:
         fails.write_text(str(int(fails.read_text()) - 1))
@@ -105,9 +125,35 @@ elif cmd == 'run' and '-d' in args:
     else:
         (st / 'xhr_running').touch()
     print('0123abcd')
+elif cmd == 'exec':
+    # `xray api statsquery` inside the container, as xray 26.6.22 answers it
+    if args[1] != 'xhr-exit' or not flag('xhr_running'):
+        print(f'Error response from daemon: container {args[1]} is not running',
+              file=sys.stderr)
+        sys.exit(1)
+    if args[2:5] != ['xray', 'api', 'statsquery']:
+        sys.exit(f'fake docker: unexpected exec {args}')
+    if flag('stats_fail'):
+        print('failed to dial 127.0.0.1:10085', file=sys.stderr)
+        sys.exit(1)
+    if flag('stats_answer'):
+        print(text('stats_answer'))
+        sys.exit(0)
+    counters = json.loads(text('counters', '{}'))
+    stat = []
+    for lab in sorted(counters):
+        for way in ('uplink', 'downlink'):
+            s = {'name': f'user>>>{lab}>>>traffic>>>{way}'}
+            if counters[lab].get(way):
+                s['value'] = counters[lab][way]     # a zero value is left out
+            stat.append(s)
+    print(json.dumps({'stat': stat} if stat else {}, indent=4))
+    if '-reset' in args:
+        (st / 'counters').write_text(json.dumps({lab: {} for lab in counters}))
 elif cmd == 'rm':
     (st / 'xhr_exists').unlink(missing_ok=True)
     (st / 'xhr_running').unlink(missing_ok=True)
+    (st / 'counters').unlink(missing_ok=True)    # the counters go with it
 elif cmd == 'logs':
     print('fake xhr-exit log line')
 else:
@@ -123,6 +169,18 @@ header = sys.stdin.read() if '@-' in args else ''
 with open(st / 'calls.log', 'a') as f:
     f.write(json.dumps(['curl'] + args) + '\n')
 (st / 'curl_header').write_text(header)
+# Traffic that arrives while the bot answers (after the run's first read).
+during = st / 'traffic_during_fetch'
+if during.exists():
+    counters = json.loads((st / 'counters').read_text()) if (st / 'counters').exists() else {}
+    for lab, ways in json.loads(during.read_text()).items():
+        for way, n in ways.items():
+            counters.setdefault(lab, {})[way] = counters.get(lab, {}).get(way, 0) + n
+    (st / 'counters').write_text(json.dumps(counters))
+    during.unlink()
+# xray's API stops answering while the bot answers.
+if (st / 'stats_fail_during_fetch').exists():
+    (st / 'stats_fail').touch()
 if (st / 'curl_fail').exists():
     sys.stdout.write('000')
     sys.exit(7)
@@ -184,6 +242,92 @@ def answer(users, *, pbk=PUB, sid=SID, sni='dl.google.com', path='/xhr', in_casc
                        'users': [{'uuid': u} for u in users]})
 
 
+PANEL_TABLES = '''
+CREATE TABLE inbounds (id INTEGER PRIMARY KEY AUTOINCREMENT, up INTEGER DEFAULT 0,
+    down INTEGER DEFAULT 0, total INTEGER DEFAULT 0, remark TEXT, enable NUMERIC,
+    expiry_time INTEGER, listen TEXT, port INTEGER, protocol TEXT, settings TEXT,
+    stream_settings TEXT, tag TEXT UNIQUE, sniffing TEXT);
+CREATE TABLE client_inbounds (client_id INTEGER, inbound_id INTEGER, flow_override TEXT);
+CREATE TABLE client_traffics (id INTEGER PRIMARY KEY AUTOINCREMENT, inbound_id INTEGER,
+    enable NUMERIC, email TEXT, up INTEGER, down INTEGER, all_time INTEGER DEFAULT 0,
+    expiry_time INTEGER, total INTEGER, reset INTEGER DEFAULT 0,
+    last_online INTEGER DEFAULT 0,
+    CONSTRAINT uni_client_traffics_email UNIQUE (email));
+'''
+CLIENTS_TABLE = '''
+CREATE TABLE clients (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT, uuid TEXT,
+    password TEXT, flow TEXT, total_gb INTEGER, expiry_time INTEGER, enable NUMERIC,
+    CONSTRAINT uni_clients_email UNIQUE (email));
+'''
+
+
+class Panel:
+    """exit's x-ui.db, in the part the script reads and writes: the fork's
+    relational ``clients`` (one row per email: uuid), ``client_traffics``
+    (UNIQUE(email): the accounting row, the gate xray and hy2 obey) and each
+    inbound's ``settings`` JSON (``clients[].id`` / ``email``; it lags behind
+    the relational table). ``relational=False`` is a classic panel."""
+
+    def __init__(self, path: Path, relational=True):
+        self.path = path
+        with self._db() as c:
+            c.executescript(PANEL_TABLES + (CLIENTS_TABLE if relational else ''))
+            c.execute("INSERT INTO inbounds (id, protocol, port, tag, settings) VALUES "
+                      "(1, 'vless', 443, 'inbound-443', ?)", (json.dumps({'clients': []}),))
+        self.relational = relational
+
+    def _db(self):
+        conn = sqlite3.connect(self.path)
+        conn.row_factory = sqlite3.Row
+        return _Closing(conn)
+
+    def add(self, uuid, email, *, enable=1, up=0, down=0, total=100 * GB, expiry=0,
+            relational=True, in_settings=True, traffic_row=True):
+        with self._db() as c:
+            if relational and self.relational:
+                c.execute('INSERT INTO clients (email, uuid, flow, total_gb, expiry_time, enable)'
+                          ' VALUES (?, ?, ?, ?, ?, ?)',
+                          (email, uuid, 'xtls-rprx-vision', total, expiry, enable))
+            if traffic_row:
+                c.execute('INSERT INTO client_traffics (inbound_id, enable, email, up, down, total,'
+                          ' expiry_time) VALUES (1, ?, ?, ?, ?, ?, ?)',
+                          (enable, email, up, down, total, expiry))
+            if in_settings:
+                s = json.loads(c.execute('SELECT settings FROM inbounds WHERE id = 1')
+                               .fetchone()[0])
+                s['clients'].append({'id': uuid, 'email': email, 'flow': 'xtls-rprx-vision',
+                                     'enable': bool(enable), 'totalGB': total,
+                                     'expiryTime': expiry})
+                c.execute('UPDATE inbounds SET settings = ? WHERE id = 1', (json.dumps(s),))
+
+    def set(self, email, **cols):  # client_traffics columns; expiry = expiry_time
+        cols = {('expiry_time' if k == 'expiry' else k): v for k, v in cols.items()}
+        with self._db() as c:
+            c.execute('UPDATE client_traffics SET ' + ', '.join(f'{k} = ?' for k in cols)
+                      + ' WHERE email = ?', (*cols.values(), email))
+
+    def row(self, email):
+        with self._db() as c:
+            r = c.execute('SELECT enable, up, down, total, expiry_time, last_online'
+                          ' FROM client_traffics WHERE email = ?', (email,)).fetchone()
+        return dict(r) if r else None
+
+
+class _Closing:
+    """A sqlite connection that commits and closes on leaving the block."""
+
+    def __init__(self, conn):
+        self.conn = conn
+
+    def __enter__(self):
+        return self.conn
+
+    def __exit__(self, kind, *_):
+        if kind is None:
+            self.conn.commit()
+        self.conn.close()
+
+
 class Env:
     def __init__(self, root: Path):
         self.root = root
@@ -194,6 +338,7 @@ class Env:
         self.units = root / 'units'
         self.sbin = root / 'sbin'
         self.copy = self.sbin / 'xhr-exit-sync'
+        self.pending_path = self.dir / 'traffic.pending'
         for d in (self.bin, self.state, self.units, self.sbin):
             d.mkdir()
         for name, body in (('docker', FAKE_DOCKER), ('curl', FAKE_CURL), ('ss', FAKE_SS),
@@ -203,6 +348,9 @@ class Env:
             p = self.bin / name
             p.write_text(body)
             p.chmod(0o755)
+        self.panel = Panel(root / 'x-ui.db')
+        self.panel.add(U1, 'u1@x')
+        self.panel.add(U2, 'u2@x')
         self.touch('cert_hex', '12f2')    # 4850 bytes
         self.touch('alpn', 'h2')
         self.write_env()
@@ -210,7 +358,8 @@ class Env:
 
     def write_env(self, **over):
         values = dict(BOT_URL='https://dash.example.com:9443', DPI_REPORT_TOKEN=TOKEN,
-                      XHR_SNI='dl.google.com', XHR_EXIT_PUBLIC_IP='198.51.100.4')
+                      XHR_SNI='dl.google.com', XHR_EXIT_PUBLIC_IP='198.51.100.4',
+                      XUI_DB_PATH=str(self.panel.path))
         values.update(over)
         self.env_file.write_text(''.join(f'{k}={v}\n' for k, v in values.items() if v is not None))
 
@@ -221,14 +370,34 @@ class Env:
         p = self.state / name
         p.write_text(text) if text is not None else p.touch()
 
+    def traffic(self, uuid, up=0, down=0):
+        """Bytes xray counts for this user (its label), on top of what it has."""
+        counters = self.counters()
+        ways = counters.setdefault(_label(uuid), {})
+        for way, n in (('uplink', up), ('downlink', down)):
+            if n:
+                ways[way] = ways.get(way, 0) + n
+        self.touch('counters', json.dumps(counters))
+
+    def counters(self):
+        p = self.state / 'counters'
+        return json.loads(p.read_text()) if p.exists() else {}
+
+    def pending(self):
+        return json.loads(self.pending_path.read_text()) if self.pending_path.exists() else {}
+
+    def write_pending(self, entries):
+        self.pending_path.write_text(json.dumps(entries))
+        self.pending_path.chmod(0o600)
+
     def env(self, **extra):
         env = {k: v for k, v in os.environ.items()
-               if not (k.startswith('XHR_') or k in ('BOT_URL', 'DPI_REPORT_TOKEN'))}
+               if not (k.startswith('XHR_') or k in ('BOT_URL', 'DPI_REPORT_TOKEN', 'XUI_DB_PATH'))}
         env.update(PATH=f'{self.bin}:{env["PATH"]}', FAKE_STATE=str(self.state),
                    FAKE_PRIV=PRIV, FAKE_PUB=PUB,
                    XHR_EXIT_DIR=str(self.dir), XHR_EXIT_ENV=str(self.env_file),
                    XHR_EXIT_UNIT_DIR=str(self.units), XHR_EXIT_BIN=str(self.copy),
-                   XHR_EXIT_SETTLE_S='0', **extra)
+                   XHR_EXIT_SETTLE_S='0', XHR_EXIT_DB_TIMEOUT_S='1', **extra)
         return env
 
     def run(self, *args, script=SCRIPT, **extra):
@@ -294,7 +463,8 @@ class TestSetup:
         keys = (env.dir / 'keys.env').read_text()
         assert keys == f'PRIVATE_KEY={PRIV}\nPUBLIC_KEY={PUB}\nSHORT_ID={SID}\n'
         assert (env.dir / 'server.env').read_text() == (
-            f'PORT=8446\nSNI=dl.google.com\nXPATH=/xhr\nIMAGE={IMAGE}\nMEMORY=128m\n')
+            f'PORT=8446\nSNI=dl.google.com\nXPATH=/xhr\nIMAGE={IMAGE}\nMEMORY=128m\n'
+            f'XUI_DB={env.panel.path}\n')
         inbound = env.config()['inbounds'][0]
         assert (inbound['protocol'], inbound['port'], inbound['listen']) == ('vless', 8446, '0.0.0.0')
         assert inbound['settings'] == {'clients': [{'id': U1, 'email': _label(U1), 'flow': ''}],
@@ -347,7 +517,8 @@ class TestSetup:
         assert '--network' not in args and '--privileged' not in args
         assert args[-4:] == [IMAGE, 'run', '-c', '/etc/xray/config.json']
 
-    def test_never_touches_the_panel(self, env):
+    def test_never_touches_the_panels_container(self, env):
+        # of the panel, only its database's traffic counters (TestTraffic)
         assert env.run().returncode == 0
         assert env.run('--sync').returncode == 0
         assert env.run('--remove').returncode == 0
@@ -470,6 +641,11 @@ class TestSetup:
         (dict(XHR_PATH='/xhr?a=1'), 'odd characters in XHR_PATH'),
         (dict(XHR_EXIT_MEMORY='lots'), 'XHR_EXIT_MEMORY like 128m'),
         (dict(DPI_REPORT_TOKEN='tok"en'), 'odd characters in DPI_REPORT_TOKEN'),
+        (dict(XHR_EXIT_PORT='10085'), "the port of xray's own API"),
+        (dict(XUI_DB_PATH='x-ui.db'), 'XUI_DB_PATH must be an absolute path'),
+        # a "?" would make the rest of the path an sqlite URI parameter
+        (dict(XUI_DB_PATH='/tmp/x-ui.db?mode=rwc'), 'odd characters in XUI_DB_PATH'),
+        (dict(XUI_DB_PATH='/tmp/x ui.db'), 'odd characters in XUI_DB_PATH'),
     ])
     def test_bad_settings(self, env, over, message):
         env.write_env(**over)
@@ -497,6 +673,7 @@ class TestSetup:
     def test_quotes_and_export_in_the_env_file(self, env):
         env.env_file.write_text('# xhr-exit\nexport BOT_URL="https://dash.example.com:9443"\n'
                                 f"DPI_REPORT_TOKEN='{TOKEN}'\n  XHR_SNI=ignored.example.com\n"
+                                f'XUI_DB_PATH="{env.panel.path}"\n'
                                 'XHR_SNI=dl.google.com\nXHR_EXIT_PUBLIC_IP=198.51.100.4')
         r = env.run()
         assert r.returncode == 0, r.stderr
@@ -549,6 +726,9 @@ class TestRender:
             assert net in private['ip'], net
         assert {'type': 'field', 'outboundTag': 'block', 'protocol': ['bittorrent']} in rules
         assert {'type': 'field', 'outboundTag': 'block', 'port': '25'} in rules
+        # xray's API, by its port: a name that passes the address check may
+        # point at loopback when dialed, and the API resets the counters
+        assert {'type': 'field', 'outboundTag': 'block', 'port': '10085'} in rules
         assert cfg['outbounds'] == [
             {'tag': 'direct', 'protocol': 'freedom', 'settings': {'domainStrategy': 'UseIPv4'}},
             {'tag': 'block', 'protocol': 'blackhole'}]
@@ -854,9 +1034,534 @@ class TestPrintAndRemove:
         assert 'switch xhr off in the cascade' in r.stdout
 
 
-def _label(uuid):
-    import hashlib
-    return 'n' + hashlib.sha256(uuid.encode()).hexdigest()[:12]
+# ------------------------------------------------------------- traffic ---
+
+def _now_ms():
+    return int(time.time() * 1000)
+
+
+def _used(env, email):
+    row = env.panel.row(email)
+    return row['up'], row['down']
+
+
+@contextlib.contextmanager
+def _write_lock(path):
+    """Another writer holds the panel's database (the panel saving its own
+    traffic): readers go on, a second writer waits and gives up."""
+    conn = sqlite3.connect(path, isolation_level=None)
+    conn.execute('BEGIN IMMEDIATE')
+    try:
+        yield
+    finally:
+        conn.execute('ROLLBACK')
+        conn.close()
+
+
+def _docker_order(env, *subs):
+    return [c[1] for c in env.calls() if c[:1] == ['docker'] and c[1] in subs]
+
+
+class TestTraffic:
+    """xhr bytes count against the user's quota in the panel."""
+
+    def test_xray_counts_each_users_bytes(self, set_up):
+        cfg = set_up.config()
+        assert cfg['stats'] == {}
+        assert cfg['api'] == {'tag': 'api', 'listen': '127.0.0.1:10085',
+                              'services': ['StatsService']}
+        assert cfg['policy'] == {'levels': {'0': {'statsUserUplink': True,
+                                                  'statsUserDownlink': True}}}
+
+    def test_the_bytes_land_on_the_users_row(self, set_up):
+        before = _now_ms()
+        set_up.traffic(U1, up=1500, down=72000)
+        r = set_up.run('--sync')
+        assert r.returncode == 0, r.stderr
+        assert r.stdout == '' and r.stderr == ''           # a quiet run all the same
+        assert _used(set_up, 'u1@x') == (1500, 72000)       # uplink is what the user sent
+        assert set_up.panel.row('u1@x')['last_online'] >= before
+        assert _used(set_up, 'u2@x') == (0, 0)
+        assert not set_up.pending_path.exists()
+        assert set_up.docker_calls('exec') == [[
+            'docker', 'exec', 'xhr-exit', 'xray', 'api', 'statsquery',
+            '-s', '127.0.0.1:10085', '-pattern', 'user>>>', '-reset']]
+        assert set_up.counters() == {_label(U1): {}}         # reset in xray
+
+    def test_added_once(self, set_up):
+        set_up.traffic(U1, up=100, down=1000)
+        assert set_up.run('--sync').returncode == 0
+        assert set_up.run('--sync').returncode == 0         # nothing new, nothing added
+        set_up.traffic(U1, up=1, down=10)
+        assert set_up.run('--sync').returncode == 0
+        assert _used(set_up, 'u1@x') == (101, 1010)
+
+    def test_added_to_what_the_panel_counted(self, set_up):
+        set_up.panel.set('u1@x', up=5 * GB, down=7 * GB)
+        set_up.traffic(U1, up=3, down=4)
+        set_up.traffic(U2, down=9)
+        assert set_up.run('--sync').returncode == 0
+        assert _used(set_up, 'u1@x') == (5 * GB + 3, 7 * GB + 4)
+        assert _used(set_up, 'u2@x') == (0, 9)
+
+    def test_last_online_never_goes_back(self, set_up):
+        later = _now_ms() + 3600 * 1000
+        set_up.panel.set('u1@x', last_online=later)
+        set_up.panel.set('u2@x', last_online=None)
+        before = _now_ms()
+        set_up.traffic(U1, up=3)
+        set_up.traffic(U2, up=3)
+        assert set_up.run('--sync').returncode == 0
+        assert set_up.panel.row('u1@x')['last_online'] == later
+        assert set_up.panel.row('u2@x')['last_online'] >= before
+
+    def test_a_locked_panel_keeps_the_bytes_for_the_next_run(self, set_up):
+        set_up.traffic(U1, up=100, down=1000)
+        with _write_lock(set_up.panel.path):
+            r = set_up.run('--sync')
+        assert r.returncode != 0
+        assert 'could not add xhr traffic to the panel (database is locked)' in r.stderr
+        pending = set_up.pending()
+        assert {k: (v['up'], v['down']) for k, v in pending.items()} == {_label(U1): (100, 1000)}
+        assert set_up.pending_path.stat().st_mode & 0o777 == 0o600
+        assert set_up.counters() == {_label(U1): {}}         # out of xray: the file has them
+        assert _used(set_up, 'u1@x') == (0, 0)
+        r = set_up.run('--sync')
+        assert r.returncode == 0, r.stderr
+        assert _used(set_up, 'u1@x') == (100, 1000)         # once
+        assert not set_up.pending_path.exists()
+
+    def test_runs_add_up_while_the_panel_is_locked(self, set_up):
+        with _write_lock(set_up.panel.path):
+            for n in (1, 2, 3):
+                set_up.traffic(U1, up=n, down=10 * n)
+                assert set_up.run('--sync').returncode != 0
+        entry = set_up.pending()[_label(U1)]
+        assert (entry['up'], entry['down']) == (6, 60)
+        assert entry['since'] < entry['at']           # the first read, the last one
+        assert set_up.run('--sync').returncode == 0
+        assert _used(set_up, 'u1@x') == (6, 60)
+
+    def test_bytes_the_panel_has_no_client_for_wait(self, set_up):
+        set_up.traffic(U3, up=10, down=20)
+        set_up.traffic(U1, up=1, down=2)
+        r = set_up.run('--sync')
+        assert r.returncode == 0, r.stderr
+        assert _used(set_up, 'u1@x') == (1, 2)                # the others go in
+        assert set(set_up.pending()) == {_label(U3)}
+        set_up.panel.add(U3, 'back@x')                        # a lost client, put back
+        assert set_up.run('--sync').returncode == 0
+        assert _used(set_up, 'back@x') == (10, 20)
+        assert not set_up.pending_path.exists()
+
+    def test_a_client_without_an_accounting_row_waits_too(self, set_up):
+        set_up.panel.add(U3, 'norow@x', traffic_row=False)
+        set_up.traffic(U3, up=10)
+        assert set_up.run('--sync').returncode == 0
+        assert set(set_up.pending()) == {_label(U3)}
+
+    def test_what_no_client_takes_in_31_days_is_dropped(self, set_up):
+        now = _now_ms()
+        old, young = now - 31 * DAY_MS - DAY_MS // 2, now - 30 * DAY_MS - DAY_MS // 2
+        set_up.write_pending({
+            # counted from the first bytes no client took, however recent the last
+            _label(U3): dict(up=5, down=6, at=now - DAY_MS, since=old),   # dropped
+            _label(U4): dict(up=1, down=1, at=young, since=young),        # kept
+            _label(U1): dict(up=7, down=8, at=old, since=old),            # old, but taken
+        })
+        r = set_up.run('--sync')
+        assert r.returncode == 0, r.stderr
+        assert r.stdout.count('dropped') == 1
+        assert f'dropped 11 byte(s) of xhr traffic of {_label(U3)}' in r.stdout
+        assert set(set_up.pending()) == {_label(U4)}
+        assert _used(set_up, 'u1@x') == (7, 8)
+
+    def test_a_panel_that_lists_no_clients_drops_nothing(self, set_up):
+        old = _now_ms() - 40 * DAY_MS
+        set_up.write_pending({_label(U3): dict(up=5, down=6, at=old, since=old)})
+        with set_up.panel._db() as c:
+            c.execute('DELETE FROM clients')
+            c.execute("UPDATE inbounds SET settings = '{\"clients\": []}'")
+        r = set_up.run('--sync')
+        assert r.returncode != 0 and 'the panel lists no clients' in r.stderr
+        assert set(set_up.pending()) == {_label(U3)}
+
+    @pytest.mark.parametrize('damage', [
+        '{"half": ',
+        '[]',
+        '{"nzz": {"up": 1, "down": 1, "at": 1, "since": 1}}',
+        json.dumps({_label(U1): {'up': -1, 'down': 1, 'at': 1, 'since': 1}}),
+        json.dumps({_label(U1): {'up': 1, 'down': 1, 'at': 1}}),
+    ])
+    def test_a_damaged_pending_file_is_never_overwritten(self, set_up, damage):
+        set_up.write_pending({})
+        set_up.pending_path.write_text(damage)
+        set_up.traffic(U1, up=10, down=20)
+        set_up.users([U1, U2])
+        r = set_up.run('--sync')
+        assert r.returncode != 0 and 'traffic.pending is damaged' in r.stderr
+        assert set_up.pending_path.read_text() == damage
+        assert not set_up.docker_calls('exec')                 # the counters stay in xray
+        assert set_up.counters() == {_label(U1): {'uplink': 10, 'downlink': 20}}
+        assert 'not recreated' in r.stderr                     # and so does the container
+        assert _ids(set_up.config()) == [U1] and not set_up.docker_calls('rm')
+
+    def test_counters_are_read_before_a_recreation(self, set_up):
+        set_up.traffic(U1, up=10, down=20)
+        set_up.users([U1, U2])
+        r = set_up.run('--sync')
+        assert r.returncode == 0, r.stderr
+        assert _docker_order(set_up, 'exec', 'rm')[0] == 'exec'
+        assert _used(set_up, 'u1@x') == (10, 20)
+
+    def test_and_once_more_right_before_it(self, set_up):
+        # bytes that arrive while the bot answers: the read right before the
+        # recreation has them, and they go in within the same run
+        set_up.traffic(U1, up=10, down=20)
+        set_up.touch('traffic_during_fetch',
+                     json.dumps({_label(U1): {'uplink': 5, 'downlink': 6}}))
+        set_up.users([U1, U2])
+        r = set_up.run('--sync')
+        assert r.returncode == 0, r.stderr
+        assert _used(set_up, 'u1@x') == (15, 26)
+        assert not set_up.pending_path.exists()
+        # read, xray -test, read, the old one gone, the new one
+        assert _docker_order(set_up, 'exec', 'rm', 'run') == ['exec', 'run', 'exec', 'rm', 'run']
+
+    def test_no_recreation_while_the_counters_do_not_answer(self, set_up):
+        set_up.touch('stats_fail')
+        set_up.traffic(U1, up=10, down=20)
+        set_up.users([U1, U2])
+        r = set_up.run('--sync')
+        assert r.returncode != 0
+        assert ('could not read the xhr traffic counters (failed to dial 127.0.0.1:10085)'
+                in r.stderr)
+        assert 'xhr-exit not recreated' in r.stderr
+        assert _ids(set_up.config()) == [U1]
+        assert not set_up.docker_calls('rm') and not set_up.docker_calls('run')
+        assert not (set_up.dir / 'config.json.new').exists()
+        (set_up.state / 'stats_fail').unlink()                # they answer again
+        r = set_up.run('--sync')
+        assert r.returncode == 0, r.stderr
+        assert _ids(set_up.config()) == sorted([U1, U2])
+        assert _used(set_up, 'u1@x') == (10, 20)              # nothing lost
+
+    def test_a_last_read_that_fails_recreates_but_is_loud(self, set_up):
+        # the first read got the bytes; the one right before the recreation
+        # fails: the list moves all the same, and the run says what it cost
+        set_up.traffic(U1, up=10, down=20)
+        set_up.touch('stats_fail_during_fetch')
+        set_up.users([U1, U2])
+        r = set_up.run('--sync')
+        assert r.returncode != 0
+        assert 'recreating xhr-exit all the same' in r.stderr
+        assert _ids(set_up.config()) == sorted([U1, U2])
+        assert _used(set_up, 'u1@x') == (10, 20)
+
+    def test_a_read_that_fails_is_loud_with_nothing_to_change(self, set_up):
+        set_up.touch('stats_fail')
+        r = set_up.run('--sync')
+        assert r.returncode != 0 and 'could not read the xhr traffic counters' in r.stderr
+        assert not set_up.docker_calls('run')
+
+    def test_an_older_config_without_counters_is_replaced(self, set_up):
+        live = set_up.dir / 'config.json'
+        cfg = json.loads(live.read_text())
+        for key in ('stats', 'api', 'policy'):
+            del cfg[key]
+        live.chmod(0o600)
+        live.write_text(json.dumps(cfg))
+        set_up.touch('stats_fail')                  # such a container has no API to ask
+        r = set_up.run('--sync')
+        assert r.returncode == 0, r.stderr
+        assert not set_up.docker_calls('exec')
+        assert set_up.config()['api']['services'] == ['StatsService']
+        assert len(set_up.starts()) == 2
+
+    def test_a_stopped_container_has_nothing_to_read(self, set_up):
+        (set_up.state / 'xhr_running').unlink()
+        r = set_up.run('--sync')
+        assert r.returncode == 0, r.stderr
+        assert not set_up.docker_calls('exec')
+        assert (set_up.state / 'xhr_running').exists()
+
+    def test_setup_recreates_even_when_the_counters_do_not_answer(self, set_up):
+        set_up.touch('stats_fail')
+        r = set_up.run()
+        assert r.returncode != 0
+        assert 'recreating xhr-exit all the same' in r.stderr
+        assert len(set_up.starts()) == 2
+        assert (set_up.units / 'xhr-exit-sync.timer').exists()
+
+    def test_an_unreadable_answer_goes_to_the_journal(self, set_up):
+        set_up.touch('stats_answer', 'Xray: something else entirely')
+        r = set_up.run('--sync')
+        assert r.returncode != 0
+        assert 'unreadable xhr traffic counters' in r.stderr
+        assert 'something else entirely' in r.stderr
+        assert not set_up.pending_path.exists()
+
+    def test_values_as_numbers_or_strings_and_other_names(self, set_up):
+        lab = _label(U1)
+        set_up.touch('stats_answer', json.dumps({'stat': [
+            {'name': f'user>>>{lab}>>>traffic>>>uplink', 'value': '1500'},   # protobuf JSON
+            {'name': f'user>>>{lab}>>>traffic>>>downlink', 'value': 2500},
+            {'name': f'user>>>{lab}>>>online>>>count', 'value': 9},
+            {'name': 'inbound>>>xhr-in>>>traffic>>>uplink', 'value': 7},
+            {'name': f'user>>>{_label(U2)}>>>traffic>>>uplink'},              # zero: left out
+            {'name': 'user>>>someone@else>>>traffic>>>uplink', 'value': 3},
+        ]}))
+        r = set_up.run('--sync')
+        assert r.returncode == 0, r.stderr
+        assert 'not counted: someone@else' in r.stderr
+        assert _used(set_up, 'u1@x') == (1500, 2500)
+        assert _used(set_up, 'u2@x') == (0, 0)
+        assert not set_up.pending_path.exists()
+
+    @pytest.mark.parametrize('value', [-1, 1.5, True, '12a'])
+    def test_odd_values_are_refused(self, set_up, value):
+        set_up.touch('stats_answer', json.dumps({'stat': [
+            {'name': f'user>>>{_label(U1)}>>>traffic>>>uplink', 'value': value}]}))
+        r = set_up.run('--sync')
+        assert r.returncode != 0 and 'unreadable xhr traffic counters' in r.stderr
+        assert _used(set_up, 'u1@x') == (0, 0)
+
+    def test_remove_counts_the_last_bytes(self, set_up):
+        set_up.traffic(U1, up=10, down=20)
+        r = set_up.run('--remove')
+        assert r.returncode == 0, r.stderr
+        assert _used(set_up, 'u1@x') == (10, 20)
+        assert _docker_order(set_up, 'exec', 'rm') == ['exec', 'rm']
+
+    def test_remove_keeps_what_the_panel_does_not_take(self, set_up):
+        set_up.traffic(U1, up=10, down=20)
+        with _write_lock(set_up.panel.path):
+            r = set_up.run('--remove')
+        assert r.returncode != 0
+        assert f'kept in {set_up.pending_path} (a setup run adds it)' in r.stderr
+        assert not (set_up.state / 'xhr_exists').exists()     # removed all the same
+        assert not (set_up.units / 'xhr-exit-sync.timer').exists()
+        assert set_up.run().returncode == 0                   # a setup run adds it
+        assert _used(set_up, 'u1@x') == (10, 20)
+
+
+class TestPanelGate:
+    """The panel has the last word on who uses xhr."""
+
+    @pytest.fixture
+    def both(self, set_up):
+        set_up.users([U1, U2])
+        assert set_up.run('--sync').returncode == 0
+        set_up.reset_calls()
+        return set_up
+
+    @pytest.mark.parametrize('cols,why', [
+        (dict(enable=0), 'switched off'),
+        (dict(enable='false'), 'switched off'),
+        (dict(up=60 * GB, down=40 * GB), 'over quota'),         # exactly the quota
+        (dict(down=100 * GB + 1), 'over quota'),
+        (dict(expiry='past'), 'expired'),
+    ])
+    def test_the_panel_keeps_out_whom_it_switched_off(self, both, cols, why):
+        cols = {k: (_now_ms() - DAY_MS if v == 'past' else v) for k, v in cols.items()}
+        both.panel.set('u2@x', **cols)
+        r = both.run('--sync')
+        assert r.returncode == 0, r.stderr
+        assert _ids(both.config()) == [U1]
+        assert f'(+0 -1); off in the panel: {_label(U2)} ({why})' in r.stdout
+
+    @pytest.mark.parametrize('cols', [
+        dict(up=50 * GB, down=50 * GB - 1),                     # a byte short of it
+        dict(total=0, up=500 * GB),                             # 0: no limit
+        dict(expiry='future'),
+        dict(expiry=0),
+        dict(expiry=-3 * DAY_MS),                               # negative: from first use
+        dict(enable=None),
+    ])
+    def test_the_panel_lets_in(self, both, cols):
+        cols = {k: (_now_ms() + DAY_MS if v == 'future' else v) for k, v in cols.items()}
+        both.panel.set('u2@x', **cols)
+        r = both.run('--sync')
+        assert r.returncode == 0, r.stderr
+        assert r.stdout == ''
+        assert _ids(both.config()) == sorted([U1, U2])
+
+    def test_back_once_the_panel_lets_in_again(self, both):
+        both.panel.set('u2@x', up=100 * GB)
+        assert both.run('--sync').returncode == 0
+        assert _ids(both.config()) == [U1]
+        both.panel.set('u2@x', up=0)                            # the monthly reset
+        r = both.run('--sync')
+        assert r.returncode == 0, r.stderr
+        assert _ids(both.config()) == sorted([U1, U2])
+        assert '2 user(s) (+1 -0)' in r.stdout
+
+    def test_xhrs_own_bytes_count_in_the_same_run(self, both):
+        both.panel.set('u2@x', up=100 * GB - 1000)
+        both.traffic(U2, down=1000)
+        r = both.run('--sync')
+        assert r.returncode == 0, r.stderr
+        assert _ids(both.config()) == [U1]
+        assert f'{_label(U2)} (over quota)' in r.stdout
+
+    def test_a_user_the_panel_has_no_client_for(self, set_up):
+        set_up.users([U1, U2, U3])
+        r = set_up.run('--sync')
+        assert r.returncode == 0, r.stderr
+        assert _ids(set_up.config()) == sorted([U1, U2])
+        assert f'(+1 -0); off in the panel: {_label(U3)} (no client in the panel)' in r.stdout
+
+    def test_none_of_them_in_the_panel_changes_nothing(self, set_up):
+        set_up.users([U3, U4])
+        r = set_up.run('--sync')
+        assert r.returncode != 0
+        assert ('none of the 2 listed user(s) has a client in the panel: users unchanged'
+                in r.stderr)
+        assert _ids(set_up.config()) == [U1]
+        assert not set_up.docker_calls('run')
+
+    def test_everyone_switched_off_is_applied(self, both):
+        # a bot that lists nobody waits for a hand run; a panel that says no does not
+        both.panel.set('u1@x', enable=0)
+        both.panel.set('u2@x', expiry=_now_ms() - DAY_MS)
+        r = both.run('--sync')
+        assert r.returncode == 0, r.stderr
+        assert _ids(both.config()) == []
+
+    def test_the_bot_silent_the_panel_still_decides(self, both):
+        both.touch('curl_fail')
+        both.panel.set('u2@x', enable=0)
+        r = both.run('--sync')
+        assert r.returncode == 0, r.stderr
+        assert _ids(both.config()) == [U1]
+
+    @pytest.mark.parametrize('damage', ['missing', 'not a database', 'no client_traffics'])
+    def test_a_panel_that_cannot_be_read_changes_nothing(self, set_up, damage):
+        set_up.users([U1, U2])                    # a change the panel cannot confirm
+        set_up.traffic(U1, up=7)
+        db = set_up.panel.path
+        if damage == 'missing':
+            db.unlink()
+        elif damage == 'not a database':
+            db.write_text('not sqlite\n' * 100)
+        else:
+            with set_up.panel._db() as c:
+                c.execute('DROP TABLE client_traffics')
+        r = set_up.run('--sync')
+        assert r.returncode != 0
+        assert f'could not read the panel {db} (' in r.stderr and 'users unchanged' in r.stderr
+        assert _ids(set_up.config()) == [U1]
+        assert not set_up.docker_calls('run')
+        assert set_up.pending()[_label(U1)]['up'] == 7          # kept for the panel
+        if damage == 'missing':
+            assert not db.exists()                # neither the write nor the read creates it
+
+    def test_the_gate_only_reads(self, both):
+        # a writer holding the panel does not stop it, and it writes nothing
+        both.panel.set('u2@x', enable=0)
+        before = both.panel.path.read_bytes()
+        with _write_lock(both.panel.path):
+            r = both.run('--sync')
+        assert r.returncode == 0, r.stderr
+        assert _ids(both.config()) == [U1]
+        assert both.panel.path.read_bytes() == before
+
+
+class TestPanelSources:
+    """uuid → email: the fork's relational table first, each inbound's
+    settings for what it lacks."""
+
+    def _use(self, env, panel):
+        env.panel = panel
+        env.write_env()
+        assert env.run().returncode == 0
+        env.traffic(U1, up=4, down=5)
+        r = env.run('--sync')
+        assert r.returncode == 0, r.stderr
+        assert _ids(env.config()) == [U1]
+
+    def test_the_relational_table_alone(self, env, tmp_path):
+        p = Panel(tmp_path / 'fork.db')
+        p.add(U1, 'u1@fork', in_settings=False)          # the settings lag behind
+        self._use(env, p)
+        assert p.row('u1@fork')['up'] == 4
+
+    def test_the_inbound_settings_alone(self, env, tmp_path):
+        p = Panel(tmp_path / 'classic.db', relational=False)
+        p.add(U1, 'u1@classic')
+        self._use(env, p)
+        assert p.row('u1@classic')['up'] == 4
+
+    def test_the_relational_record_wins(self, env, tmp_path):
+        p = Panel(tmp_path / 'fork.db')
+        p.add(U1, 'u1@fork', in_settings=False)
+        p.add(U1, 'stale@settings', relational=False)    # an old email for that uuid
+        self._use(env, p)
+        assert p.row('u1@fork')['up'] == 4 and p.row('stale@settings')['up'] == 0
+
+    def test_upper_case_uuids_in_the_panel(self, env, tmp_path):
+        p = Panel(tmp_path / 'fork.db')
+        p.add(U1.upper(), 'u1@fork')
+        self._use(env, p)
+        assert p.row('u1@fork')['down'] == 5
+
+
+class TestPanelCheck:
+    """Setup refuses a database it could not count xhr traffic in."""
+
+    def test_setup_says_where_the_traffic_goes(self, env):
+        r = env.run()
+        assert r.returncode == 0, r.stderr
+        assert f'panel {env.panel.path}: 2 client(s), xhr traffic is counted there' in r.stdout
+
+    @pytest.mark.parametrize('damage,message', [
+        ('missing', 'not found'),
+        ('not a database', 'could not read'),
+        ('no last_online', 'has no client_traffics(last_online)'),
+        ('no clients', 'lists no clients'),
+    ])
+    def test_setup_refuses(self, env, tmp_path, damage, message):
+        db = tmp_path / 'other.db'
+        if damage == 'not a database':
+            db.write_text('not sqlite\n' * 100)
+        elif damage == 'no last_online':
+            with _Closing(sqlite3.connect(db)) as c:
+                c.executescript(CLIENTS_TABLE + 'CREATE TABLE client_traffics (id INTEGER,'
+                                ' email TEXT, enable NUMERIC, up INTEGER, down INTEGER,'
+                                ' total INTEGER, expiry_time INTEGER);')
+                c.execute("INSERT INTO clients (email, uuid) VALUES ('u1@x', ?)", (U1,))
+        elif damage == 'no clients':
+            Panel(db)
+        env.write_env(XUI_DB_PATH=str(db))
+        r = env.run()
+        assert r.returncode != 0 and message in r.stderr
+        assert not (env.dir / 'keys.env').exists() and not (env.dir / 'config.json').exists()
+        if damage == 'missing':
+            assert not db.exists()
+
+    def test_the_default_path_is_the_3x_ui_volume(self, env):
+        env.write_env(XUI_DB_PATH=None)
+        r = env.run()
+        assert r.returncode != 0
+        assert '/var/lib/docker/volumes/vpn-bot_3xui-data/_data/x-ui.db not found' in r.stderr
+
+    def test_sync_counts_where_setup_checked(self, set_up, tmp_path):
+        other = Panel(tmp_path / 'other.db')
+        other.add(U1, 'u1@other')
+        set_up.write_env(XUI_DB_PATH=str(other.path))        # an edit after setup
+        set_up.traffic(U1, up=4)
+        assert set_up.run('--sync').returncode == 0
+        assert set_up.panel.row('u1@x')['up'] == 4 and other.row('u1@other')['up'] == 0
+
+    def test_a_server_env_from_before_the_metering(self, set_up):
+        s = set_up.dir / 'server.env'
+        s.write_text(''.join(f'{ln}\n' for ln in s.read_text().splitlines()
+                             if not ln.startswith('XUI_DB=')))
+        r = set_up.run('--sync')
+        assert r.returncode != 0
+        assert ('could not read the panel /var/lib/docker/volumes/vpn-bot_3xui-data/_data/x-ui.db'
+                in r.stderr)
+
 
 
 # ------------------------------------------------- the bot's own answer ---
@@ -986,7 +1691,9 @@ def test_stand_the_scripts_server_behind_haproxy_in_mihomo(env, tmp_path):
     26.6.22, behind haproxy 2.8 configured from the lines the script printed,
     and the bot's own Clash proxy in mihomo 1.19.33 gets through. A lapsed
     payer's uuid, a connection without haproxy's PROXY header, and a private
-    address through the tunnel do not."""
+    address through the tunnel do not. xray counts the payer's bytes, and
+    the script's own sync reads them from the real container (real docker),
+    resets them and adds them to the payer's row in the panel's x-ui.db."""
     if shutil.which('curl') is None:
         pytest.skip('curl is not installed')
     if not all(_have(i) for i in (IMAGE, MIHOMO, HAPROXY)):
@@ -1124,6 +1831,25 @@ def test_stand_the_scripts_server_behind_haproxy_in_mihomo(env, tmp_path):
         assert _delay(ctl, 'u1-xhr', private, 5000) != 200      # ...but not through xhr
         assert _docker('inspect', '-f', '{{.State.Running}} {{.RestartCount}}',
                        'e-xhr-exit') == 'true 0'
+
+        # xray counted the payer's bytes both ways...
+        def counted():
+            stat = json.loads(_docker('exec', 'e-xhr-exit', 'xray', 'api', 'statsquery',
+                                      '-s', '127.0.0.1:10085',
+                                      '-pattern', f'user>>>{_label(U1)}>>>') or '{}')
+            return {s['name'].rsplit('>>>', 1)[1]: int(s.get('value', 0))
+                    for s in stat.get('stat', [])}
+        moved = counted()
+        assert moved['uplink'] > 0 and moved['downlink'] > 0, moved
+        # ...and the script's own sync (real docker, real xray) reads and resets
+        # them, and adds them to the payer's row in the panel
+        (env.bin / 'docker').unlink()
+        r = env.run('--sync', XHR_EXIT_NAME='e-xhr-exit')
+        assert r.returncode == 0, r.stderr
+        assert r.stdout == ''                                   # nothing else to do
+        assert _used(env, 'u1@x') == (moved['uplink'], moved['downlink'])
+        assert counted() == {'uplink': 0, 'downlink': 0}
+        assert not env.pending_path.exists()
     finally:
         for name in names:
             _docker('rm', '-f', name, check=False)
