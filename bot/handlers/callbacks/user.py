@@ -16,6 +16,7 @@ from bot.services.lockdown import (
     apply_lockdown_order, front_evidence_enabled, fronted_passes, is_lockdown_active,
     load_lockdown_order,
 )
+from bot.services import probe_rules as _probe_rules
 from bot.services.notifications import NotificationService
 from bot.services.vpn import VPNService
 from bot.services.account_verification import AccountVerificationService
@@ -916,8 +917,10 @@ class MyKeyAnswerHandler(BaseCallbackHandler):
     # them on (the dashboard editor): until then they are listed disabled.
     # XHTTP (E3) needs its server on exit (scripts/setup_xhr_exit.sh) and
     # an haproxy route on entry first — an automatic "enabled" on deploy
-    # would hand out a server nobody runs.
-    OPT_IN_PROTOCOLS = ('xhr',)
+    # would hand out a server nobody runs. Defined in probe_rules, whose
+    # operator_disabled (the pager, DPIMonitor, the healthcheck script) must
+    # say "off" exactly when this editor does.
+    OPT_IN_PROTOCOLS = _probe_rules.OPT_IN_PROTOCOLS
     SETTING_KEY = 'cascade_protocol_order'
     COUNTRY_SETTING_KEY = 'cascade_by_country'
     ASN_SETTING_KEY = 'cascade_by_asn'

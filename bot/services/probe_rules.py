@@ -59,6 +59,14 @@ VERDICT_DEGRADED = 'degraded'
 VERDICT_OK = 'ok'
 VERDICT_THIN = 'thin'
 
+# Protocols that join the cascade only when the operator switches them on in
+# the dashboard editor: until then the editor lists them disabled and no
+# profile carries them. XHTTP (E3) needs its server on exit and an haproxy
+# route on entry first — an automatic "enabled" on deploy would hand out a
+# server nobody runs. The ONE definition: the editor
+# (``MyKeyAnswerHandler.OPT_IN_PROTOCOLS``) is this tuple.
+OPT_IN_PROTOCOLS = ('xhr',)
+
 
 def is_alive(status, latency) -> bool:
     """The tunnel carried something: the probe succeeded, or failed AFTER a
@@ -111,13 +119,22 @@ def degraded_threshold_text() -> str:
 
 
 def operator_disabled(cascade_setting) -> frozenset:
-    """Protocols the operator switched off in the cascade editor
+    """Protocols that are off in the cascade editor
     (``app_settings.cascade_protocol_order`` = ``[{name, enabled}, …]``,
-    JSON text or already parsed). The pager and the monitor leave them
-    alone (B4, problem 7): Turbo has been off since 2026-09-21 while its
-    instance and probe stay up, and its dark probe used to page critical
-    and wake the agent every two hours. A bare list of names (the legacy
-    format) means everything is on; anything unreadable disables nothing.
+    JSON text or already parsed) — the editor's own answer
+    (``MyKeyAnswerHandler.get_cascade_config``). The pager and the monitor
+    leave them alone (B4, problem 7): Turbo has been off since 2026-09-21
+    while its instance and probe stay up, and its dark probe used to page
+    critical and wake the agent every two hours.
+
+    * A name counts by its first entry; a bare name (the legacy format) is on.
+    * An opt-in protocol (``OPT_IN_PROTOCOLS``) is off until an entry
+      switches it on — whatever the rest of the setting says, missing or
+      unreadable included. Its server lists nobody until then, so its probe
+      is dark by construction (2026-11-12: prod's saved list predates xhr,
+      and xhr's dark probe would have paged critical and been demoted).
+    * Otherwise an unreadable setting disables nothing: a broken read never
+      silences a protocol users are handed.
     """
     import json
     data = cascade_setting
@@ -125,14 +142,19 @@ def operator_disabled(cascade_setting) -> frozenset:
         try:
             data = json.loads(data)
         except (TypeError, ValueError):
-            return frozenset()
-    if not isinstance(data, list):
-        return frozenset()
-    off = set()
-    for item in data:
-        if isinstance(item, dict) and isinstance(item.get('name'), str):
-            if not bool(item.get('enabled', True)):
-                off.add(item['name'])
+            data = None
+    enabled = {}
+    if isinstance(data, list):
+        for item in data:
+            if isinstance(item, str):
+                name, on = item, True
+            elif isinstance(item, dict) and isinstance(item.get('name'), str):
+                name, on = item['name'], bool(item.get('enabled', True))
+            else:
+                continue
+            enabled.setdefault(name, on)
+    off = {name for name, on in enabled.items() if not on}
+    off.update(name for name in OPT_IN_PROTOCOLS if not enabled.get(name, False))
     return frozenset(off)
 
 
