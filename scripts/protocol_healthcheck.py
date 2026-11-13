@@ -348,6 +348,18 @@ try:
 except Exception as ex:
     guard["error"] = str(ex)[:200]
 out["guard"] = guard
+# The servers setup_ssh_exit.sh / setup_xhr_exit.sh run (AGENTS.md 51): raw
+# answers only, judged on entry (exit_servers()).
+srv = {}
+rc, o, e = sh("cat /proc/uptime", 5)
+srv["uptime"] = o.strip()[:60] if rc == 0 else None
+for name in ("ssh-exit", "xhr-exit"):
+    rc, o, e = sh("docker inspect -f '{{.State.Status}} {{.State.Restarting}}' " + name, 10)
+    ins = {"rc": rc, "out": o.strip()[:120], "err": e.strip()[:160]}
+    rc, o, e = sh("systemctl show " + name + "-sync.service " + name + "-sync.timer -p Id "
+                  "-p LoadState -p ActiveState -p Result -p ExecMainExitTimestampMonotonic", 10)
+    srv[name] = {"inspect": ins, "show_rc": rc, "show": o[:1500], "show_err": e.strip()[:160]}
+out["exit_servers"] = srv
 print(json.dumps(out))
 '''
 
@@ -558,7 +570,7 @@ def parse_exit_json(text: str) -> dict:
     base = {'ok': False, 'error': None, 'services': {}, 'runtime': {}, 'config': {},
             'accepted': {}, 'last_accepted': {}, 'nat_prerouting': [],
             'hy2_connections_1h': {}, 'cert_lines': [], 'cert_sni': None,
-            'free_ram_mb': None, 'errors': {}, 'guard': {}}
+            'free_ram_mb': None, 'errors': {}, 'guard': {}, 'exit_servers': {}}
     text = (text or '').strip()
     # ssh banners / MOTD may precede the blob: take the last line that parses.
     candidate = None
@@ -1273,10 +1285,149 @@ def exit_guard(c: dict) -> Tuple[List[dict], List[str]]:
     return findings, unjudged
 
 
+# The servers scripts/setup_ssh_exit.sh and setup_xhr_exit.sh run on exit
+# (AGENTS.md §51): container name → the cascade protocol it serves (None =
+# not a cascade protocol: SSH is only in the emergency profiles). Each has a
+# root timer that syncs its users from the bot every 2 min (OnUnitActiveSec).
+EXIT_SERVERS = {'ssh-exit': None, 'xhr-exit': 'xhr'}
+EXIT_SYNC_STALE_S = 10 * 60          # five missed syncs
+
+
+def parse_systemctl_show(text) -> Dict[str, Dict[str, str]]:
+    """``{Id: {property: value}}`` from ``systemctl show`` of several units
+    (one blank-line separated block per unit)."""
+    units: Dict[str, Dict[str, str]] = {}
+    cur: Dict[str, str] = {}
+    for line in str(text or '').splitlines() + ['']:
+        line = line.strip()
+        if not line:
+            if cur.get('Id'):
+                units[cur['Id']] = cur
+            cur = {}
+            continue
+        key, sep, value = line.partition('=')
+        if sep:
+            cur[key] = value
+    return units
+
+
+def _exit_server_state(name: str, info: dict, uptime_s: Optional[float]):
+    """``(container, sync)`` for one server: each a finding title (str), ''
+    for "fine", or None for "could not look". Pure."""
+    ins = info.get('inspect') if isinstance(info.get('inspect'), dict) else {}
+    units = parse_systemctl_show(info.get('show')) if info.get('show_rc') == 0 else {}
+    svc, timer = units.get(f'{name}-sync.service'), units.get(f'{name}-sync.timer')
+    sync_installed = None
+    if svc and timer:
+        sync_installed = not (svc.get('LoadState') == 'not-found'
+                              and timer.get('LoadState') == 'not-found')
+    # --- the container
+    if ins.get('rc') == 0:
+        status, _, restarting = str(ins.get('out') or '').partition(' ')
+        if status == 'running':
+            container = ''
+        elif status:
+            container = (f'контейнер {name} на exit: {status}'
+                         + (' (перезапускается по кругу)' if restarting.strip() == 'true' else ''))
+        else:
+            container = None
+    elif 'No such object' in str(ins.get('err') or ''):
+        if sync_installed is False:
+            return '', ''                      # never installed on this exit
+        container = (f'контейнера {name} на exit нет, а его синхронизация стоит'
+                     if sync_installed else None)
+    else:
+        container = None
+    # --- its user sync
+    if sync_installed is None:
+        sync = None
+    elif not sync_installed:
+        sync = f'у {name} на exit нет таймера синхронизации юзеров'
+    elif timer.get('ActiveState') != 'active':
+        sync = f'таймер {name}-sync на exit: {timer.get("ActiveState") or "?"}'
+    elif svc.get('ActiveState') in ('activating', 'deactivating', 'reloading'):
+        sync = None                            # mid-run: no finished result to read
+    elif svc.get('ActiveState') == 'failed' or svc.get('Result') != 'success':
+        sync = f'синхронизация юзеров {name} падает ({svc.get("Result") or "?"})'
+    elif uptime_s is None:
+        sync = None
+    else:
+        try:
+            exited = int(svc.get('ExecMainExitTimestampMonotonic') or 0) / 1e6
+        except ValueError:
+            return container, None
+        age = uptime_s - exited               # exited 0 = not once since boot
+        if age > EXIT_SYNC_STALE_S:
+            sync = (f'синхронизация юзеров {name} не отрабатывала {_humanize(age / 60)}'
+                    if exited else f'синхронизация юзеров {name} не запускалась с загрузки exit')
+        else:
+            sync = ''
+    return container, sync
+
+
+def exit_servers(c: dict, off) -> Tuple[List[dict], List[str]]:
+    """(findings, unjudged keys) for the servers in ``EXIT_SERVERS``: the
+    container (``exit_server:<name>``) and its user sync (``exit_sync:<name>``).
+    ``off`` = the protocols switched off in the cascade, or None when layer A
+    could not read it. A server whose protocol is switched off serves nobody
+    on purpose: nothing to say. One that was never installed (no container,
+    no sync unit) neither. xhr-exit down while xhr is on is critical: every
+    xhr user is cut off; the rest is warn (SSH is only the emergency path, a
+    stuck sync only freezes the user list)."""
+    keys = [k for name in EXIT_SERVERS for k in (f'exit_server:{name}', f'exit_sync:{name}')]
+    srv = c.get('exit_servers')
+    if not isinstance(srv, dict):
+        return [], keys                        # a collector without these facts
+    try:
+        uptime_s: Optional[float] = float(str(srv.get('uptime') or '').split()[0])
+    except (ValueError, IndexError):
+        uptime_s = None
+    findings: List[dict] = []
+    unjudged: List[str] = []
+    for name, proto in EXIT_SERVERS.items():
+        server_key, sync_key = f'exit_server:{name}', f'exit_sync:{name}'
+        if proto is not None:
+            if off is None:
+                unjudged += [server_key, sync_key]   # whether it matters is unknown
+                continue
+            if proto in off:
+                continue
+        info = srv.get(name)
+        if not isinstance(info, dict):
+            unjudged += [server_key, sync_key]
+            continue
+        container, sync = _exit_server_state(name, info, uptime_s)
+        if container is None:
+            unjudged.append(server_key)
+        elif container:
+            findings.append({'key': server_key, 'layer': 'c',
+                             'severity': 'critical' if proto else 'warn',
+                             'title': container,
+                             'next': f"ssh exit-node 'docker ps -a --filter name={name}; "
+                                     f"docker logs --tail 40 {name}'"})
+        if sync is None:
+            unjudged.append(sync_key)
+        elif sync:
+            findings.append({'key': sync_key, 'layer': 'c', 'severity': 'warn',
+                             'title': sync,
+                             'next': f"ssh exit-node 'systemctl status {name}-sync.timer "
+                                     f"{name}-sync.service --no-pager; "
+                                     f"journalctl -u {name}-sync -n 40 --no-pager'"})
+    return findings, unjudged
+
+
+def _cascade_off(layers: dict):
+    """The protocols switched off in the cascade, or None without layer A."""
+    a = layers.get('a') or {}
+    return probe_rules.operator_disabled(a.get('cascade_order')) if a.get('ok') else None
+
+
 def unjudged_for(layers: dict) -> List[str]:
     """Finding keys this run could not look at, while their layer did look."""
     c = layers.get('c') or {}
-    return exit_guard(c)[1] if c.get('ok') else []
+    if not c.get('ok'):
+        return []
+    return exit_guard(c)[1] + exit_servers(c, _cascade_off(layers))[1]
 
 
 # Findings (IMPROVEMENT_PLAN F, D1): facts that break users BEFORE the probes
@@ -1333,6 +1484,7 @@ def findings_for(layers: dict) -> List[dict]:
                                 'title': f'{tag}: нет REDIRECT {", ".join(missing)} на exit (порт-хоп)',
                                 'next': "ssh exit-node \"iptables -t nat -S PREROUTING | grep -E '8400|8402'\""})
         out.extend(exit_guard(c)[0])
+        out.extend(exit_servers(c, _cascade_off(layers))[0])
     if b.get('ok'):
         dnat = parse_dnat_rules(b.get('nat_prerouting'))
         for tag, rules in ENTRY_DNAT_FOR.items():

@@ -540,7 +540,10 @@ class TestFindings:
     def test_the_report_lists_unjudged_keys_and_shows_findings(self):
         c = layer_c(hy=facts(HY_CONFIG), turbo_facts={'config': '/x', 'error': 'denied'})
         report = hc.assess({'a': {'ok': False}, 'b': {'ok': False}, 'c': c})
-        assert report['unjudged'] == ['hy2_acl:hysteria-turbo']
+        # this layer C carries no exit_servers facts: those keys are unjudged
+        # too (TestExitServers in test_protocol_healthcheck.py)
+        assert [k for k in report['unjudged']
+                if not k.startswith(('exit_server:', 'exit_sync:'))] == ['hy2_acl:hysteria-turbo']
         text = hc.render_human(report)
         assert 'НАХОДКИ' in text and 'hy2_acl:hysteria' in text and 'exit_guard_unreadable' in text
 

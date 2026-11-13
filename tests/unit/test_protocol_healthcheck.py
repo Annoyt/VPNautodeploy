@@ -1164,3 +1164,283 @@ class TestRendering:
         assert hc._humanize(125) == '2ч 05мин'
         assert hc._humanize(3 * 1440 + 18 * 60 + 3) == '3д 18ч'
         assert hc._humanize(float('inf')) == '—'
+
+
+# ---------------------------------------------------------------------------
+# the servers setup_ssh_exit.sh / setup_xhr_exit.sh run on exit (§51)
+# ---------------------------------------------------------------------------
+
+UPTIME_S = 4245375.46        # exit's /proc/uptime on 2026-11-13
+
+
+def sync_show(name, *, result='success', exit_ago_s=62.3, svc_load='loaded',
+              svc_active='inactive', timer_load='loaded', timer_active='active'):
+    """``systemctl show <name>-sync.service <name>-sync.timer`` as systemd 257
+    on exit prints it (2026-11-13), the values swapped in."""
+    exit_us = 0 if exit_ago_s is None else int((UPTIME_S - exit_ago_s) * 1e6)
+    return (f'Result={result}\nExecMainExitTimestampMonotonic={exit_us}\nExecMainStatus=0\n'
+            f'Id={name}-sync.service\nLoadState={svc_load}\nActiveState={svc_active}\n'
+            'SubState=dead\n\n'
+            'NextElapseUSecMonotonic=1month 2w 4d 16h 47min 10.881367s\n'
+            'LastTriggerUSecMonotonic=1month 2w 4d 16h 45min 10.877418s\n'
+            f'Result=success\nId={name}-sync.timer\nLoadState={timer_load}\n'
+            f'ActiveState={timer_active}\nSubState=waiting\n')
+
+
+def server(name, *, status='running', restarting='false', missing=False, inspect_rc=0,
+           show_rc=0, **show_kw):
+    if missing:
+        ins = {'rc': 1, 'out': '', 'err': f'Error: No such object: {name}'}
+    elif inspect_rc != 0:
+        ins = {'rc': inspect_rc, 'out': '', 'err': 'Cannot connect to the Docker daemon'}
+    else:
+        ins = {'rc': 0, 'out': f'{status} {restarting}', 'err': ''}
+    return {'inspect': ins, 'show_rc': show_rc,
+            'show': sync_show(name, **show_kw) if show_rc == 0 else '',
+            'show_err': '' if show_rc == 0 else 'Failed to connect to bus'}
+
+
+def servers_c(uptime=f'{UPTIME_S} 3391637.91', **over):
+    srv = {'uptime': uptime, 'ssh-exit': server('ssh-exit'), 'xhr-exit': server('xhr-exit')}
+    srv.update({k.replace('_', '-'): v for k, v in over.items()})
+    return {'ok': True, 'exit_servers': srv}
+
+
+def servers_found(c, off=frozenset()):
+    findings, unjudged = hc.exit_servers(c, off)
+    return {f['key']: f for f in findings}, unjudged
+
+
+ALL_SERVER_KEYS = ['exit_server:ssh-exit', 'exit_sync:ssh-exit',
+                   'exit_server:xhr-exit', 'exit_sync:xhr-exit']
+
+
+class TestExitServers:
+    """ssh-exit (the paid users' SSH emergency path) and xhr-exit (VLESS +
+    XHTTP + Reality), each a container plus a root timer that syncs its users
+    from the bot every 2 min. Until 2026-11-13 nothing watched either."""
+
+    def test_healthy_servers_give_nothing(self):
+        assert hc.exit_servers(servers_c(), frozenset()) == ([], [])
+
+    def test_a_stopped_xhr_exit_is_critical_while_xhr_is_on(self):
+        got, unjudged = servers_found(servers_c(xhr_exit=server('xhr-exit', status='exited')))
+        assert list(got) == ['exit_server:xhr-exit'] and not unjudged
+        f = got['exit_server:xhr-exit']
+        assert (f['severity'], f['layer']) == ('critical', 'c')
+        assert f['title'] == 'контейнер xhr-exit на exit: exited'
+        assert f['next'] == ("ssh exit-node 'docker ps -a --filter name=xhr-exit; "
+                             "docker logs --tail 40 xhr-exit'")
+
+    def test_xhr_switched_off_says_nothing_about_xhr_exit(self):
+        c = servers_c(xhr_exit=server('xhr-exit', status='exited', result='exit-code'))
+        assert hc.exit_servers(c, frozenset({'xhr'})) == ([], [])
+
+    def test_without_layer_a_whether_xhr_exit_matters_is_unknown(self):
+        c = servers_c(xhr_exit=server('xhr-exit', status='exited'),
+                      ssh_exit=server('ssh-exit', status='exited'))
+        got, unjudged = servers_found(c, off=None)
+        assert list(got) == ['exit_server:ssh-exit']
+        assert unjudged == ['exit_server:xhr-exit', 'exit_sync:xhr-exit']
+
+    def test_a_stopped_ssh_exit_is_a_warning(self):
+        got, _ = servers_found(servers_c(ssh_exit=server('ssh-exit', status='exited')))
+        assert got['exit_server:ssh-exit']['severity'] == 'warn'
+
+    def test_a_crash_loop_is_named(self):
+        got, _ = servers_found(servers_c(
+            ssh_exit=server('ssh-exit', status='restarting', restarting='true')))
+        assert got['exit_server:ssh-exit']['title'] == (
+            'контейнер ssh-exit на exit: restarting (перезапускается по кругу)')
+
+    def test_never_installed_is_silent(self):
+        c = servers_c(ssh_exit=server('ssh-exit', missing=True, svc_load='not-found',
+                                      timer_load='not-found', timer_active='inactive',
+                                      exit_ago_s=None))
+        assert hc.exit_servers(c, frozenset()) == ([], [])
+
+    def test_a_removed_container_whose_sync_is_still_installed(self):
+        got, _ = servers_found(servers_c(ssh_exit=server('ssh-exit', missing=True)))
+        assert got['exit_server:ssh-exit']['title'] == (
+            'контейнера ssh-exit на exit нет, а его синхронизация стоит')
+
+    def test_a_container_without_its_sync(self):
+        got, _ = servers_found(servers_c(ssh_exit=server(
+            'ssh-exit', svc_load='not-found', timer_load='not-found', timer_active='inactive')))
+        assert list(got) == ['exit_sync:ssh-exit']
+        assert got['exit_sync:ssh-exit']['title'] == 'у ssh-exit на exit нет таймера синхронизации юзеров'
+
+    def test_a_stopped_timer(self):
+        got, _ = servers_found(servers_c(ssh_exit=server('ssh-exit', timer_active='inactive')))
+        f = got['exit_sync:ssh-exit']
+        assert (f['title'], f['severity']) == ('таймер ssh-exit-sync на exit: inactive', 'warn')
+        assert f['next'] == ("ssh exit-node 'systemctl status ssh-exit-sync.timer "
+                             "ssh-exit-sync.service --no-pager; "
+                             "journalctl -u ssh-exit-sync -n 40 --no-pager'")
+
+    def test_a_failing_sync(self):
+        got, _ = servers_found(servers_c(
+            xhr_exit=server('xhr-exit', svc_active='failed', result='exit-code')))
+        f = got['exit_sync:xhr-exit']
+        assert (f['title'], f['severity']) == ('синхронизация юзеров xhr-exit падает (exit-code)', 'warn')
+
+    def test_a_result_other_than_success_is_a_failure_too(self):
+        got, _ = servers_found(servers_c(ssh_exit=server('ssh-exit', result='timeout')))
+        assert got['exit_sync:ssh-exit']['title'] == 'синхронизация юзеров ssh-exit падает (timeout)'
+
+    def test_a_sync_in_progress_is_not_judged(self):
+        # systemd zeroes the exit time and the result while a run is going
+        got, unjudged = servers_found(servers_c(
+            ssh_exit=server('ssh-exit', svc_active='activating', exit_ago_s=None)))
+        assert not got and unjudged == ['exit_sync:ssh-exit']
+
+    @pytest.mark.parametrize('ago,stale', [(9 * 60, False), (11 * 60, True)])
+    def test_a_sync_that_stopped_running(self, ago, stale):
+        got, _ = servers_found(servers_c(ssh_exit=server('ssh-exit', exit_ago_s=ago)))
+        if stale:
+            assert got['exit_sync:ssh-exit']['title'] == (
+                'синхронизация юзеров ssh-exit не отрабатывала 11 мин')
+        else:
+            assert not got
+
+    @pytest.mark.parametrize('uptime_s,stale', [(5 * 60, False), (20 * 60, True)])
+    def test_a_sync_that_never_ran_since_boot(self, uptime_s, stale):
+        got, _ = servers_found(servers_c(uptime=f'{uptime_s} 1.0',
+                                         ssh_exit=server('ssh-exit', exit_ago_s=None)))
+        assert ('exit_sync:ssh-exit' in got) is stale
+        if stale:
+            assert got['exit_sync:ssh-exit']['title'] == (
+                'синхронизация юзеров ssh-exit не запускалась с загрузки exit')
+
+    def test_unreadable_answers_are_not_judged(self):
+        got, unjudged = servers_found(servers_c(
+            ssh_exit=server('ssh-exit', inspect_rc=-1, show_rc=1)))
+        assert not got and unjudged == ['exit_server:ssh-exit', 'exit_sync:ssh-exit']
+
+    def test_without_the_uptime_a_failure_still_shows_but_not_the_age(self):
+        got, unjudged = servers_found(servers_c(
+            uptime=None, ssh_exit=server('ssh-exit', svc_active='failed', result='exit-code')))
+        assert list(got) == ['exit_sync:ssh-exit']
+        assert unjudged == ['exit_sync:xhr-exit']
+
+    def test_a_collector_without_the_facts_judges_nothing(self):
+        assert hc.exit_servers({'ok': True}, frozenset()) == ([], ALL_SERVER_KEYS)
+        assert hc.exit_servers(hc.parse_exit_json('{}'), frozenset()) == ([], ALL_SERVER_KEYS)
+
+    def test_the_parser_keeps_the_facts(self):
+        srv = servers_c()['exit_servers']
+        assert hc.parse_exit_json(json.dumps({'exit_servers': srv}))['exit_servers'] == srv
+
+    def test_parse_systemctl_show(self):
+        units = hc.parse_systemctl_show(sync_show('ssh-exit'))
+        assert set(units) == {'ssh-exit-sync.service', 'ssh-exit-sync.timer'}
+        assert units['ssh-exit-sync.timer']['ActiveState'] == 'active'
+        assert units['ssh-exit-sync.service']['ExecMainExitTimestampMonotonic'] == str(
+            int((UPTIME_S - 62.3) * 1e6))
+
+    def test_findings_and_unjudged_keys_reach_the_report(self):
+        a = with_cascade(layer_a(), cascade(extra=('xhr',)))           # xhr switched on
+        c = layer_c()
+        c.update(servers_c(xhr_exit=server('xhr-exit', status='exited'),
+                           ssh_exit=server('ssh-exit', svc_active='activating', exit_ago_s=None)))
+        report = hc.assess(layers(a=a, c=c), now=NOW)
+        assert 'exit_server:xhr-exit' in [f['key'] for f in report['findings']]
+        assert 'exit_sync:ssh-exit' in report['unjudged']
+        assert 'exit_server:xhr-exit' not in report['unjudged']
+        assert ' [critical] exit_server:xhr-exit: контейнер xhr-exit на exit: exited' in (
+            hc.render_human(report))
+
+    def test_a_failed_layer_a_leaves_xhr_exit_unjudged(self):
+        c = layer_c()
+        c.update(servers_c(xhr_exit=server('xhr-exit', status='exited')))
+        report = hc.assess(layers(a=layer_a(ok=False, error='db locked', probes={}), c=c), now=NOW)
+        assert 'exit_server:xhr-exit' in report['unjudged']
+        assert 'exit_server:xhr-exit' not in [f['key'] for f in report['findings']]
+
+    def test_a_failed_layer_c_lists_nothing(self):
+        report = hc.assess(layers(c=layer_c(ok=False, error='ssh: timeout')), now=NOW)
+        assert not [k for k in report['unjudged'] if k.startswith('exit_')]
+        assert not [f for f in report['findings'] if f['key'].startswith('exit_')]
+
+
+# What the layer-C script runs on exit, end to end: every command it calls is
+# a fake first in PATH that only prints canned text, so nothing touches this
+# machine (power commands are tripwires that log and fail).
+FAKE_DOCKER = r'''#!/bin/sh
+if [ "$1" = inspect ] && [ "$2" = -f ] && [ "$3" = '{{.State.Status}} {{.State.Restarting}}' ]; then
+  case "$4" in
+    ssh-exit) echo "running false" ;;
+    xhr-exit) echo "exited false" ;;
+    *) echo "Error: No such object: $4" >&2; exit 1 ;;
+  esac
+  exit 0
+fi
+exit 1
+'''
+# Prints only the properties asked for, in blank-line separated blocks, as
+# systemctl does: a property the script forgets to ask for is missing here too.
+FAKE_SYSTEMCTL = r'''#!/bin/sh
+case "$1" in
+  is-active) echo active ;;
+  show)
+    shift
+    props=""; units=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -p) props="$props $2"; shift 2 ;;
+        *) units="$units $1"; shift ;;
+      esac
+    done
+    up=$(cut -d' ' -f1 /proc/uptime | cut -d. -f1)
+    first=1
+    for u in $units; do
+      [ $first -eq 1 ] || echo
+      first=0
+      for p in $props; do
+        case "$p" in
+          Id) echo "Id=$u" ;;
+          LoadState) echo "LoadState=loaded" ;;
+          Result) echo "Result=success" ;;
+          ActiveState) case "$u" in
+            *.timer) echo "ActiveState=active" ;;
+            *) echo "ActiveState=inactive" ;;
+          esac ;;
+          ExecMainExitTimestampMonotonic) case "$u" in
+            *.service) echo "ExecMainExitTimestampMonotonic=$((up - 60))000000" ;;
+          esac ;;
+        esac
+      done
+    done ;;
+  *) exit 1 ;;
+esac
+'''
+FAKE_FAIL = '#!/bin/sh\nexit 1\n'
+FAKE_TRIPWIRE = '#!/bin/sh\necho "$(basename "$0") $*" >> "$FAKE_STATE/tripwire.log"\nexit 1\n'
+
+
+class TestExitServersOnExit:
+
+    def test_the_remote_script_collects_what_exit_servers_reads(self, tmp_path):
+        import subprocess
+        import sys
+        fakebin = tmp_path / 'bin'
+        fakebin.mkdir()
+        fakes = {'docker': FAKE_DOCKER, 'systemctl': FAKE_SYSTEMCTL}
+        for name in ('iptables', 'journalctl', 'openssl', 'free', 'ss'):
+            fakes[name] = FAKE_FAIL
+        for name in ('reboot', 'shutdown', 'poweroff', 'halt', 'init', 'telinit'):
+            fakes[name] = FAKE_TRIPWIRE
+        for name, body in fakes.items():
+            path = fakebin / name
+            path.write_text(body)
+            path.chmod(0o755)
+        src = hc.GUARD_HELPERS + hc.REMOTE_C % {'sni': 'www.bing.com'}
+        p = subprocess.run([sys.executable, '-c', src], capture_output=True, text=True, timeout=120,
+                           env={'PATH': f'{fakebin}:/usr/bin:/bin', 'FAKE_STATE': str(tmp_path)})
+        assert not (tmp_path / 'tripwire.log').exists()
+        c = hc.parse_exit_json(p.stdout)
+        assert c['ok'], (p.stdout[-300:], p.stderr[-300:])
+        findings, unjudged = hc.exit_servers(c, frozenset())
+        assert [(f['key'], f['title']) for f in findings] == [
+            ('exit_server:xhr-exit', 'контейнер xhr-exit на exit: exited')]
+        assert unjudged == []
