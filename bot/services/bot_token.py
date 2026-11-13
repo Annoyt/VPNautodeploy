@@ -52,7 +52,11 @@ from bot.utils.token_envelope import ChallengeStore, EnvelopeError
 
 logger = logging.getLogger(__name__)
 
-TOKEN_CHECK_TIMEOUT_S = 8
+# The bot's own client waits 10 s and tries 3 times. On 2026-11-11 a single
+# 8-s try failed while the bot itself was fine: exit's tinyproxy reaches
+# api.telegram.org over IPv6 first, and that connect sometimes hangs.
+TOKEN_CHECK_TIMEOUT_S = 10
+TOKEN_CHECK_ATTEMPTS = 2  # per proxy
 # Short: after a revoke the status should say so within seconds.
 STATUS_CACHE_S = 15
 RESTART_DELAY_S = 1.5
@@ -76,19 +80,23 @@ def _proxy_label(entry: Optional[str]) -> str:
     return entry.split('@')[-1]
 
 
-def check_token(token: str, *, timeout: float = TOKEN_CHECK_TIMEOUT_S) -> TokenCheck:
-    """getMe with ``token``, through each TG_PROXY_URLS entry once.
+def check_token(token: str, *, timeout: float = TOKEN_CHECK_TIMEOUT_S,
+                attempts: int = TOKEN_CHECK_ATTEMPTS) -> TokenCheck:
+    """getMe with ``token`` through the TG_PROXY_URLS entries, in order.
 
-    The bot's own client retries with growing pauses and feeds the outage
-    alert; a check from the dashboard must do neither. A request error is
-    reported by its type only: requests puts the URL, and the token in it,
-    into its messages.
+    Each entry gets ``attempts`` tries; an answer from Telegram (ok, or 401 /
+    404 for a bad token) ends the check at once. The bot's own client also
+    feeds the outage alert; a check from the dashboard must not. "unreachable"
+    names every entry with its last error, not only the last entry tried: on
+    2026-11-11 it named the dead DE proxy while the exit one had only been
+    slow. A request error is reported by its type only: requests puts the
+    URL, and the token in it, into its messages.
     """
     pool = [p.strip() for p in os.environ.get('TG_PROXY_URLS', '').split(',')
             if p.strip()]
     entries = pool or [None]  # None: requests' own HTTPS_PROXY, as the client
     url = f'https://api.telegram.org/bot{token}/getMe'
-    last = 'нет ответа'
+    failures = []
     session = requests.Session()
     if pool:
         session.trust_env = False
@@ -98,32 +106,35 @@ def check_token(token: str, *, timeout: float = TOKEN_CHECK_TIMEOUT_S) -> TokenC
             if entry is not None:
                 kwargs['proxies'] = ({} if entry == 'direct'
                                      else {'http': entry, 'https': entry})
-            try:
-                r = session.get(url, **kwargs)
-            except requests.RequestException as e:
-                last = f'{type(e).__name__} через {_proxy_label(entry)}'
-                continue
-            try:
-                body = r.json()
-            except ValueError:
-                body = {}
-            if not isinstance(body, dict):
-                body = {}
-            if (r.status_code == 200 and body.get('ok') is True
-                    and isinstance(body.get('result'), dict)):
-                res = body['result']
-                return TokenCheck('ok', {
-                    'id': res.get('id'),
-                    'username': str(res.get('username') or ''),
-                    'first_name': str(res.get('first_name') or ''),
-                })
-            description = str(body.get('description') or f'HTTP {r.status_code}')[:160]
-            if r.status_code in (401, 404):
-                return TokenCheck('rejected', detail=description)
-            last = f'{description} через {_proxy_label(entry)}'
+            why = 'нет ответа'
+            for _ in range(max(1, attempts)):
+                try:
+                    r = session.get(url, **kwargs)
+                except requests.RequestException as e:
+                    why = type(e).__name__
+                    continue
+                try:
+                    body = r.json()
+                except ValueError:
+                    body = {}
+                if not isinstance(body, dict):
+                    body = {}
+                if (r.status_code == 200 and body.get('ok') is True
+                        and isinstance(body.get('result'), dict)):
+                    res = body['result']
+                    return TokenCheck('ok', {
+                        'id': res.get('id'),
+                        'username': str(res.get('username') or ''),
+                        'first_name': str(res.get('first_name') or ''),
+                    })
+                description = str(body.get('description') or f'HTTP {r.status_code}')[:160]
+                if r.status_code in (401, 404):
+                    return TokenCheck('rejected', detail=description)
+                why = description
+            failures.append(f'{why} через {_proxy_label(entry)}')
     finally:
         session.close()
-    return TokenCheck('unreachable', detail=last)
+    return TokenCheck('unreachable', detail='; '.join(failures) or 'нет ответа')
 
 
 def _str_attr(config, name: str, default: str = '') -> str:
@@ -169,7 +180,11 @@ class BotTokenChanger:
         cached = self._status_cache
         if cached and cached[1] == sha and time.monotonic() - cached[0] < STATUS_CACHE_S:
             return cached[2]
-        check = self._check(token)
+        # One try per proxy: the status runs on asyncio's default pool, which
+        # /sub's lookups share (AGENTS.md §24), and every visit to the
+        # Settings tab asks again. apply() gets the retries: there a false
+        # "unreachable" blocks the change.
+        check = self._check(token, attempts=1)
         self._status_cache = (time.monotonic(), sha, check)
         return check
 

@@ -974,7 +974,7 @@ The owner asked to change the Telegram bot token from the dashboard. The case it
 - **The change** (`POST /api/admin/bot_token/challenge`, then `/apply`, both admin + rate limit; `GET /api/admin/bot_token` is the status and never carries a token):
   1. The page seals the token (below).
   2. The bot checks the format and the bot id.
-  3. getMe through each `TG_PROXY_URLS` entry once (`check_token`: no retries, no outage bookkeeping, errors by type only — requests' messages carry the URL and the token).
+  3. getMe through the `TG_PROXY_URLS` entries in order, two tries of 10 s each (`check_token`; no outage bookkeeping). "Unreachable" names every entry with its last error, by type only: requests' messages carry the URL and the token. The status (`GET`) asks once per entry: it shares asyncio's default pool with /sub. Until 2026-11-13 it was one 8-s try per entry and only the last entry's error: exit's tinyproxy, which reaches api.telegram.org over IPv6 first, hung once, and the dashboard blamed the dead DE proxy.
   4. The subscription key must be pinned.
   5. The file is written, `admin_actions('<admin>', 'bot_token_set', 'bot:<id>')`, and a restart in place: after 1.5 s SIGTERM to itself (the `docker stop` shutdown), then `main` execs the same command (`sys.orig_argv`) — no dependency on the container's restart policy; if the shutdown hangs 45 s, it execs anyway.
 
