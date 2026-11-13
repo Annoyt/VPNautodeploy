@@ -740,7 +740,7 @@ The probes saw only what the entry datacenter sees, and the readers of the probe
 - **The prober** (B1, `health_checker.py`):
   - The ten targets are `probe_rules.PROBE_TARGETS`. vk.com (418 to every probe) and sberbank.ru (a chain from the Russian national CA) never passed through the exit, so 8/10 was the norm; they are replaced by discord.com and x.com, and the norm is 10/10.
   - Every request of a run starts at once (one connection per target), so `TIMEOUT_SEC` is each request's own. Before, five connections served ten requests and the wait counted inside the 10 s: a path answering in 6 s read as 2/10, i.e. degraded.
-  - **Bulk probe:** after the HEADs, one download of 128 KB per protocol (`BULK_URL`, Cloudflare's speed endpoint) into the new table `outbound_bulk` (`ok` / `partial` / `timeout` / `error` / `proxy_down`), never into `outbound_health`, whose ten rows a run the thresholds count. A HEAD cannot show the freeze after ~16 KB reported on Russian networks; `partial` is that signature. `/protocols` prints it when it is not `ok`. No alert yet: there is no calibration.
+  - **Bulk probe:** after the HEADs, one download of 128 KB per protocol (`BULK_URL`, Cloudflare's speed endpoint) into the new table `outbound_bulk` (`ok` / `partial` / `timeout` / `error` / `proxy_down`), never into `outbound_health`, whose ten rows a run the thresholds count. A HEAD cannot show the freeze after ~16 KB reported on Russian networks; `partial` is that signature. `/protocols` prints it when it is not `ok`. No pager alert; since 2026-11-13 DPIMonitor acts on it (`probe_bulk`, §55).
 - **The DE reserve is probed** (B6): tag `de` (`probe_rules.RESERVE_TAG`), sidecar port 18086, wherever `FALLBACK_NODE_HOST` + `FALLBACK_NODE_PBK` are set.
   - `gen_probe_config.py` builds the paid users' DE outbound for the probe user and provisions it on the reserve's panel first (`ensure_client`).
   - The pager pages it as «Резерв DE не отвечает». It never counts in "every protocol dark at once" (exit down leaves it alive by design), and DPIMonitor never demotes it.
@@ -931,7 +931,12 @@ Checked because the panel xray's API (3x-ui's `api` inbound, `127.0.0.1:62789` i
   - A unit counts as stopped only when systemd says `inactive` or `failed`; any other answer (a bus error) leaves its key unjudged.
   - Tests: `tests/unit/test_healthcheck_exit_guard.py` (the helpers on sample text, both verdicts, the findings, the unjudged keys) and `TestHealthcheckAlerts::test_a_key_the_run_could_not_look_at_keeps_its_alert`. 46 mutants killed, run on a copy with a positional restore and a hash check.
 - **Logs** (read-only, 2026-11-11): today's access.log has no user request to `:62789` or `localhost`. error.log since 2026-08-19 has 125 freedom blocks, all to 10.58.x.x:443 (sites whose names resolve to private addresses), none to loopback. error.log is 2.4 GB and is never rotated.
-- **The DE reserve** (x-ui 2.8.11, host install, unreachable since 2026-11-05): its xray runs on the host network. Its API and every service on that host's loopback (the musicbot) are guarded only by freedom's default rule, and by nothing if its xray predates PR #5947. When the node is back, check its xray version and add the port rule there too.
+- **The DE reserve** (x-ui 2.8.11, host install, its xray on the host network): fixed 2026-11-13. It ran xray 26.2.6, older than PR #5947, so a DE user reached `localhost:11111` (HTTP 200), the musicbot's Bot API on `127.0.0.1:8081` and the xray API.
+  - Now xray 26.6.22, the exit's version: the official release zip, its sha256 checked against the digest GitHub publishes, `xray run -test` on the live config first.
+  - The port rule `62789,11111,8081` sits second in the template. A name that points at any other loopback or private port is stopped by freedom's default rule (checked: `localhost:2026` hangs, the panel's public address answers).
+  - The panel's API there, from vpn-bot with `FallbackNodeService`'s session: POST `/sub/panel/xray/` reads the template, POST `/sub/panel/xray/update` (form `xraySetting` + `outboundTestUrl`) writes, POST `/sub/panel/api/server/restartXrayService` restarts xray.
+  - Backups on DE: `/root/nekovpn-backups/*-20261113-132354`, including the old binary `xray-linux-amd64-26.2.6`.
+  - When x-ui on DE swaps xray, check that the rule is still second and the version is between 26.4.15 (PR #5947) and 26.7.10: mihomo, the NekoVPN app's core, keeps no Reality compatibility with xray 26.7.11 and later.
 
 ### 53. TLS on the exit → entry hop: the bot's own HTTPS listener, pinned on exit (2026-11-11)
 
@@ -984,3 +989,30 @@ The owner asked to change the Telegram bot token from the dashboard. The case it
 - **The page seals the token** (`bot/utils/token_envelope.py` ↔ `app.js sealBotToken`): exit's Caddy reaches entry:8080 over plain HTTP (`reverse_proxy 130.49.146.10:8080`), so whatever the dashboard posts crosses the public internet in the clear. ffdhe2048 Diffie-Hellman (RFC 7919; the test derives the prime from its formula), HKDF-SHA256, an HMAC-SHA256 keystream and tag; one-time shares, 10 min, refused when reused. Stdlib only (`cryptography` stays dev-only). It stops someone who records that hop, not someone who can change it — they could swap the share or the page's JavaScript, which crosses the same hop. **The hop itself is a known gap:** every dashboard response (users, contact emails), admin link and /sub profile crosses it unencrypted; TLS between exit and entry would close it for all of them.
 - **Deploy:** the bot (`deploy_to_entry.sh`; the first start pins the key); the Hermes guard (`deploy_hermes_host.sh`) and the skills (`deploy_hermes_skills.sh`) for their parts. Never print `secrets/` (hermes/AGENTS.md, the skills).
 - **Tests:** `tests/integration/test_bot_token_change.py` (real sqlite and `Settings`; a restart = a new process on the same data dir), `tests/unit/test_token_envelope.py`, `TestBotTokenOverride` in `tests/unit/test_hermes_model_guard.py`, `TestBotTokenSettings` in tests/e2e (Chromium's WebCrypto seals, the bot opens).
+
+### 55. ws through Cloudflare freezes from Russian networks; DPIMonitor `probe_bulk` (2026-11-13)
+
+The bulk probe (§48) has read ws `partial` in every run since it began: 210 of 210 by 2026-11-13. Each run got 4–14 KB of the 128 KB download, then 20 s of silence, while ws's HEADs read 30/30.
+
+- **Where it breaks: the client's own leg to Cloudflare, from a Russian network.**
+  - From entry (a Russian VPS), a plain `curl` of a 50 KB file through `sub.nekoweather.xyz:2096` stops at 20–26 KB.
+  - The same file comes whole to the DE node in 0.14 s.
+  - The ws tunnel run from DE (DE → Cloudflare → entry:2053 → exit) moves 1 MB in 1.7 s. So Cloudflare's leg to entry and the DNAT to exit are fine.
+- **What is cut is our domain, not Cloudflare.**
+  - From entry, these all download whole: `speed.cloudflare.com` pinned to the very address `cdn.nekoweather.xyz` resolves to (104.21.6.133), unpkg, jsDelivr, the npm registry, developers.cloudflare.com.
+  - Either our zone is listed, or every little-known name behind Cloudflare is. Telling the two apart needs a fresh hostname.
+- **TLS fragmentation does not help.** A ClientHello cut into 40-byte TCP segments froze at the same ~25 KB, so the sing-box profile's `tls.fragment` does not save Hiddify or Karing users.
+- **Why nothing saw it:** every HEAD, client health check and `p-ws` telemetry row stays far below the threshold.
+  - A Clash client's Cascade (fallback on gstatic) takes ws as alive.
+  - Hiddify's balancer sends ws a share of flows: three AS41330 users split their connections about evenly between ws and the others (11-11…11-13).
+  - Lockdown puts ws first.
+- **What still works:** profiles are below the threshold (the probe account's Clash profile is 9.5 KB), so the Cloudflare mirror still serves them (`hop_tls.py verify`). Rule-sets come from `WEBAPP_URL` (exit, no Cloudflare).
+- **Operator action, 2026-11-13:** ws demoted by hand (`cascade_manual`, by `owner`, until 2026-11-20 14:10 UTC). It is last for everyone, out of sing-box `auto`, and hidden in Hiddify.
+- **`probe_bulk`** (`bot/services/dpi_monitor.py`, ranked right after `probe_degraded`):
+  - Fires on a switched-on cascade protocol when all of its newest `BULK_RUNS` (3) downloads are `partial` or `timeout`, its HEAD window is judged, and another cascade protocol's newest download passed. That last check is the control: if everything freezes, the cause is the download target or exit's egress, and nothing moves.
+  - Demotes globally after the usual 2 evaluations.
+  - Restores when its own newest download has passed for 6 evaluations (the C5 back-off applies). `error`, `proxy_down` or no rows give no verdict, and the demotion waits.
+  - Never vetoed by users' connection counts (C7): the freeze comes after the handshake, so connections look normal.
+  - Stale probes freeze it, as they freeze R1 and R2.
+- **The structural fix** is a second front (plan B2/B3): a hostname or CDN that Russian DPI does not cut.
+- **Tests:** `TestProbeBulk` in `tests/integration/test_dpi_monitor.py` (real sqlite, 16 cases). 20 mutants killed, restored by positional replacement with a hash check.

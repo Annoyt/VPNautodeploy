@@ -379,6 +379,191 @@ class TestProbeDegraded:
             (f'asn:{MEGAFON}:reality', 'reality_asn')]
 
 
+# ---- probe BULK: the download behind the HEADs -------------------------------
+
+def seed_bulk(db, protocol, statuses, *, now, got=12 * 1024, minutes_ago_start=4):
+    """One outbound_bulk row per run, ``statuses`` newest first —
+    HealthChecker's shape ('T'-isoformat ts, 128 KB when it passed)."""
+    with db._connect() as conn:
+        for run, status in enumerate(statuses):
+            ts = (now - timedelta(minutes=minutes_ago_start + run * 15)).isoformat()
+            passed = status == 'ok'
+            conn.execute(
+                "INSERT INTO outbound_bulk (ts, outbound_tag, status, bytes,"
+                " duration_ms, error_msg) VALUES (?,?,?,?,?,?)",
+                (ts, protocol, status, 131072 if passed else got,
+                 400 if passed else 20000, None if passed else status),
+            )
+        conn.commit()
+
+
+def bulk_world(db, now, *, frozen=(), rows=None, protocols=PROTOCOLS, dark=()):
+    """Healthy HEADs (7/10 a run) plus three downloads per protocol:
+    ``frozen`` ones stop short every run, ``rows`` overrides a protocol's
+    statuses (newest first), the rest pass."""
+    probe_world(db, now, dark=dark, protocols=protocols)
+    clear(db, 'outbound_bulk')
+    rows = rows or {}
+    for p in protocols:
+        if p in rows:
+            seed_bulk(db, p, rows[p], now=now)
+        else:
+            seed_bulk(db, p, ['partial'] * 3 if p in frozen else ['ok'] * 3, now=now)
+
+
+class TestProbeBulk:
+    """2026-11-13: ws through our Cloudflare domain froze after 4–14 KB of
+    every 128 KB download (210 runs of 210) while its HEADs read 30/30 —
+    the pager, the client checks and DPIMonitor all called it alive."""
+
+    def test_frozen_download_is_demoted_globally_with_its_own_reason(self, monitor, db, bot):
+        changes = ticks(monitor, 2, before=lambda now: bulk_world(db, now, frozen=('ws',)))
+        assert changes[0] == []
+        assert [(c.key, c.action, c.reason) for c in changes[1]] == [
+            ('global:ws', 'demote', 'probe_bulk')]
+        ev = changes[1][0].evidence
+        assert 'ws' in ev and 'замерзает 3 прогона' in ev and '12 КБ' in ev
+        assert 'через hy2, hy2t, reality, stls проходит' in ev
+        assert auto(db)['global']['ws']['reason'] == 'probe_bulk'
+        assert MyKeyAnswerHandler.get_cascade_order(db, user=paid()) == (
+            'hy2t', 'stls', 'hy2', 'reality', 'ws')
+        text = bot.send_message.call_args.kwargs['text']
+        assert 'ws' in text and 'замерзает 3 прогона' in text and '(BULK)' in text
+
+    def test_timeouts_count_as_frozen_too(self, monitor, db):
+        changes = ticks(monitor, 2, before=lambda now: bulk_world(
+            db, now, rows={'ws': ['timeout', 'partial', 'timeout']}))
+        assert [(c.key, c.reason) for c in changes[1]] == [('global:ws', 'probe_bulk')]
+
+    def test_two_frozen_runs_are_not_enough(self, monitor, db):
+        changes = ticks(monitor, 3, before=lambda now: bulk_world(
+            db, now, rows={'ws': ['partial', 'partial', 'ok']}))
+        assert changes == [[], [], []]
+        assert 'global:ws' not in mon_state(db)['targets']
+
+    def test_only_two_rows_in_the_window_give_no_verdict(self, monitor, db):
+        changes = ticks(monitor, 3, before=lambda now: bulk_world(
+            db, now, rows={'ws': ['partial', 'partial']}))
+        assert changes == [[], [], []]
+
+    def test_errors_and_a_dead_sidecar_are_not_a_freeze(self, monitor, db):
+        for statuses in (['error'] * 3, ['proxy_down'] * 3, ['partial', 'error', 'partial']):
+            clear(db, 'admin_actions')
+            changes = ticks(monitor, 2, before=lambda now: bulk_world(db, now, rows={'ws': statuses}))
+            assert changes == [[], []], statuses
+
+    def test_every_protocol_frozen_is_the_download_target_nothing_moves(self, monitor, db):
+        """No control: speed.cloudflare.com or exit's egress, not the protocols."""
+        changes = ticks(monitor, 3, before=lambda now: bulk_world(db, now, frozen=PROTOCOLS))
+        assert changes == [[], [], []]
+        assert auto(db) == {'asn': {}, 'global': {}}
+
+    def test_a_switched_off_protocol_is_no_control(self, monitor, db):
+        """hy2t off in the cascade: its downloads are not read at all."""
+        db.set_setting('cascade_protocol_order', json.dumps([
+            {'name': 'hy2t', 'enabled': False}, {'name': 'stls', 'enabled': True},
+            {'name': 'ws', 'enabled': True}, {'name': 'hy2', 'enabled': True},
+            {'name': 'reality', 'enabled': True}]))
+        frozen = ('stls', 'ws', 'hy2', 'reality')
+        changes = ticks(monitor, 3, before=lambda now: bulk_world(db, now, frozen=frozen))
+        assert changes == [[], [], []]
+
+    def test_a_dark_protocol_stays_r1s(self, monitor, db):
+        changes = ticks(monitor, 2, before=lambda now: bulk_world(
+            db, now, frozen=('ws',), dark=('ws',)))
+        assert [(c.key, c.reason) for c in changes[1]] == [('global:ws', 'probe_dark')]
+
+    def test_without_a_judged_head_window_nothing_fires(self, monitor, db):
+        def before(now):
+            bulk_world(db, now, frozen=('ws',))
+            with db._connect() as c:
+                c.execute("DELETE FROM outbound_health WHERE outbound_tag = 'ws'")
+                c.commit()
+        assert ticks(monitor, 3, before=before) == [[], [], []]
+
+    def test_downloads_older_than_the_window_are_ignored(self, monitor, db):
+        def before(now):
+            probe_world(db, now)
+            clear(db, 'outbound_bulk')
+            for p in PROTOCOLS:
+                seed_bulk(db, p, ['ok'] * 3 if p != 'ws' else ['partial'] * 3,
+                          now=now, minutes_ago_start=4 if p != 'ws' else 3 * 60 + 5)
+        assert ticks(monitor, 3, before=before) == [[], [], []]
+
+    def test_restored_after_six_passing_evaluations_a_freeze_resets_the_streak(self, monitor, db):
+        world = {'ws': ['partial'] * 3}
+        before = lambda now: bulk_world(db, now, rows={'ws': world['ws']})
+        changes = ticks(monitor, 2, before=before)
+        assert [c.action for c in changes[1]] == ['demote']
+
+        world['ws'] = ['ok', 'partial', 'partial']           # passed once
+        ticks(monitor, 3, start=T0 + 2 * STEP, before=before)
+        assert mon_state(db)['targets']['global:ws']['good'] == 3
+        world['ws'] = ['partial', 'ok', 'partial']           # froze again
+        ticks(monitor, 1, start=T0 + 5 * STEP, before=before)
+        assert mon_state(db)['targets']['global:ws']['good'] == 0
+        assert 'ws' in auto(db)['global']
+
+        world['ws'] = ['ok', 'ok', 'ok']
+        good = ticks(monitor, 6, start=T0 + 6 * STEP, before=before)
+        assert good[:5] == [[]] * 5
+        assert [(c.protocol, c.action, c.reason) for c in good[5]] == [
+            ('ws', 'restore', 'probe_bulk')]
+        assert auto(db) == {'asn': {}, 'global': {}}
+
+    def test_a_demotion_whose_downloads_vanish_waits(self, monitor, db):
+        """No rows (or only errors) is no verdict: the good streak does not
+        count, the protocol stays where the rule put it."""
+        ticks(monitor, 2, before=lambda now: bulk_world(db, now, frozen=('ws',)))
+        assert 'ws' in auto(db)['global']
+        for statuses in ([], ['error'], ['proxy_down']):
+            def before(now, statuses=statuses):
+                bulk_world(db, now)
+                with db._connect() as c:
+                    c.execute("DELETE FROM outbound_bulk WHERE outbound_tag = 'ws'")
+                    c.commit()
+                if statuses:
+                    seed_bulk(db, 'ws', statuses, now=now)
+            changes = ticks(monitor, 7, start=T0 + 5 * STEP, before=before)
+            assert changes == [[]] * 7, statuses
+            assert 'ws' in auto(db)['global']
+            assert mon_state(db)['targets']['global:ws']['good'] == 0
+
+    def test_stale_probes_freeze_a_bulk_demotion(self, monitor, db):
+        ticks(monitor, 2, before=lambda now: bulk_world(db, now, frozen=('ws',)))
+        later = T0 + 20 * STEP                     # newest rows 3 h+ old by now
+        assert ticks(monitor, 7, start=later) == [[]] * 7
+        assert auto(db)['global']['ws']['reason'] == 'probe_bulk'
+
+    def test_stale_probes_keep_a_half_built_streak(self, monitor, db):
+        """One frozen evaluation, then the probes stall: the bad streak
+        waits instead of breaking, so the next frozen run demotes."""
+        assert ticks(monitor, 1, before=lambda now: bulk_world(db, now, frozen=('ws',))) == [[]]
+        stalled = T0 + 6 * STEP                  # the newest rows are an hour old
+        assert ticks(monitor, 1, start=stalled) == [[]]
+        assert mon_state(db)['targets']['global:ws']['bad'] == 1
+        back = ticks(monitor, 1, start=stalled + STEP,
+                     before=lambda now: bulk_world(db, now, frozen=('ws',)))
+        assert [(c.key, c.reason) for c in back[0]] == [('global:ws', 'probe_bulk')]
+
+    def test_degraded_outranks_bulk_under_the_cap(self, monitor, db):
+        def before(now):
+            bulk_world(db, now, frozen=('ws', 'hy2'))
+            with db._connect() as c:      # stls DEGRADED: alive, 1/10 ok a run
+                c.execute("DELETE FROM outbound_health WHERE outbound_tag = 'stls'")
+                c.commit()
+            seed_probe(db, 'stls', now=now, ok_per_run=1, status='error', latency_ms=800)
+        changes = ticks(monitor, 3, before=before)
+        assert [(c.key, c.reason) for c in changes[1]] == [
+            ('global:stls', 'probe_degraded'), ('global:hy2', 'probe_bulk')]
+        assert [(c.key, c.reason) for c in changes[2]] == [('global:ws', 'probe_bulk')]
+
+    def test_cascade_shows_the_reason(self, monitor, db):
+        ticks(monitor, 2, before=lambda now: bulk_world(db, now, frozen=('ws',)))
+        assert dm.RULE_TITLES_RU['probe_bulk'] == 'пробы: большая загрузка замерзает (BULK)'
+        assert 'замерзает' in auto(db)['global']['ws']['evidence']
+
+
 # ---- R3: Reality handshake failures per ASN ---------------------------------
 
 class TestRealityAsn:
