@@ -787,7 +787,7 @@ class TokenStack:
         self.server.bot_token = self._changer()
         self.base = serve_in_thread(self.server, name='e2e-bot-token')
 
-    def _check(self, token):
+    def _check(self, token, **kw):
         self.calls.append(token)
         if token in self.answers:
             return self.answers[token]

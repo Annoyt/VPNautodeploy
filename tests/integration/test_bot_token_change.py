@@ -52,9 +52,11 @@ class FakeTelegram:
     def __init__(self):
         self.answers = {}
         self.calls = []
+        self.kwargs = []
 
-    def __call__(self, token):
+    def __call__(self, token, **kw):
         self.calls.append(token)
+        self.kwargs.append(kw)
         if token in self.answers:
             return self.answers[token]
         return bt.TokenCheck('ok', {'id': ss.bot_id_of(token), 'username': 'nekotest_bot',
@@ -64,6 +66,15 @@ class FakeTelegram:
 @pytest.fixture
 def telegram():
     return FakeTelegram()
+
+
+@pytest.fixture(autouse=True)
+def fresh_admin_rate_limit(monkeypatch):
+    """The admin limiter is one per process, 60 a minute per address, and
+    every request here comes from 127.0.0.1: without a fresh one the file's
+    own requests add up and a late test gets 429."""
+    from bot.utils import rate_limit
+    monkeypatch.setattr(rate_limit, '_admin_rate_limiter', rate_limit.RateLimiter())
 
 
 @pytest.fixture
@@ -353,6 +364,18 @@ class TestStatus:
         assert telegram.calls == [OLD]
 
     @pytest.mark.asyncio
+    async def test_the_status_asks_once_and_the_change_retries(self, data, telegram):
+        """The status shares asyncio's default pool with /sub: a dead
+        Telegram must not hold a thread for every retry. The change keeps
+        check_token's retries."""
+        p = Process(telegram)
+        await p.request('GET', '/api/admin/bot_token', auth=p.link())
+        status, _, _ = await p.change(NEW)
+        assert status == 200
+        assert telegram.calls == [OLD, NEW]
+        assert telegram.kwargs == [{'attempts': 1}, {}]
+
+    @pytest.mark.asyncio
     async def test_link_for_a_mini_app_survives_the_revoke(self, data, telegram):
         p = Process(telegram)
         _, view, _ = await p.request('GET', '/api/admin/bot_token', auth=p.link(),
@@ -584,18 +607,33 @@ class TestCheckToken:
     OK = {'ok': True, 'result': {'id': BOT_ID, 'is_bot': True, 'username': 'nekotest_bot',
                                  'first_name': 'Neko'}}
 
+    def labels(self, session):
+        return [(kw.get('proxies') or {}).get('https', 'env').split('@')[-1]
+                for _, kw in session.made[0].calls]
+
+    def test_a_slow_first_try_is_retried_on_the_same_proxy(self, session, monkeypatch):
+        """2026-11-11: exit's tinyproxy hung once on IPv6, the next try went
+        through. One try per proxy called the token unreachable."""
+        import requests
+        monkeypatch.setenv('TG_PROXY_URLS', 'http://u:p@exit:8888,http://u:p@de:8888')
+        session.script = [requests.ReadTimeout('slow'), FakeResponse(200, self.OK)]
+        assert bt.check_token(NEW).status == 'ok'
+        assert self.labels(session) == ['exit:8888', 'exit:8888']
+
     def test_tries_the_pool_in_order(self, session, monkeypatch):
         import requests
         monkeypatch.setenv('TG_PROXY_URLS', 'http://u:p@exit:8888,http://u:p@de:8888')
         session.script = [requests.ConnectionError(f'https://api.telegram.org/bot{NEW}/getMe'),
+                          requests.ConnectionError('again'),
                           FakeResponse(200, self.OK)]
         check = bt.check_token(NEW)
         assert check.status == 'ok' and check.bot['username'] == 'nekotest_bot'
         s = session.made[0]
         assert s.trust_env is False
         assert [kw['proxies'] for _, kw in s.calls] == [
-            {'http': 'http://u:p@exit:8888', 'https': 'http://u:p@exit:8888'},
+            {'http': 'http://u:p@exit:8888', 'https': 'http://u:p@exit:8888'}] * 2 + [
             {'http': 'http://u:p@de:8888', 'https': 'http://u:p@de:8888'}]
+        assert all(kw['timeout'] == bt.TOKEN_CHECK_TIMEOUT_S == 10 for _, kw in s.calls)
 
     @pytest.mark.parametrize('status', [401, 404])
     def test_telegram_says_no(self, session, monkeypatch, status):
@@ -605,15 +643,18 @@ class TestCheckToken:
         assert (check.status, check.detail) == ('rejected', 'Unauthorized')
         assert len(session.made[0].calls) == 1    # an answer, not a proxy problem
 
-    def test_unreachable_never_quotes_the_token(self, session, monkeypatch):
+    def test_unreachable_names_every_proxy_and_never_the_token(self, session, monkeypatch):
         import requests
         monkeypatch.setenv('TG_PROXY_URLS', 'http://u:secretpw@exit:8888,http://u:secretpw@de:8888')
-        session.script = [FakeResponse(429, {'ok': False, 'description': 'Too Many Requests'}),
-                          requests.ReadTimeout(f'https://api.telegram.org/bot{NEW}/getMe')]
+        session.script = [requests.ReadTimeout(f'https://api.telegram.org/bot{NEW}/getMe'),
+                          FakeResponse(429, {'ok': False, 'description': 'Too Many Requests'}),
+                          requests.exceptions.ProxyError(f'https://api.telegram.org/bot{NEW}/getMe'),
+                          requests.exceptions.ProxyError('again')]
         check = bt.check_token(NEW)
         assert check.status == 'unreachable'
-        assert check.detail == 'ReadTimeout через de:8888'
+        assert check.detail == 'Too Many Requests через exit:8888; ProxyError через de:8888'
         assert NEW not in check.detail and 'secretpw' not in check.detail
+        assert self.labels(session) == ['exit:8888', 'exit:8888', 'de:8888', 'de:8888']
 
     def test_no_pool_means_the_environment_proxy(self, session, monkeypatch):
         monkeypatch.delenv('TG_PROXY_URLS', raising=False)
@@ -624,6 +665,7 @@ class TestCheckToken:
 
     def test_direct_entry(self, session, monkeypatch):
         monkeypatch.setenv('TG_PROXY_URLS', 'direct')
-        session.script = [FakeResponse(502, ValueError('html')), ]
+        session.script = [FakeResponse(502, ValueError('html')), FakeResponse(502, ValueError('html'))]
         check = bt.check_token(NEW)
-        assert check.status == 'unreachable' and session.made[0].calls[0][1]['proxies'] == {}
+        assert (check.status, check.detail) == ('unreachable', 'HTTP 502 через direct')
+        assert [kw['proxies'] for _, kw in session.made[0].calls] == [{}, {}]
