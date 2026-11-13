@@ -33,6 +33,9 @@ probe pipeline is stale, and nothing else proved a failure. A 2 is never a pass:
 WHICH layer failed, then use the fallback below. A BROKEN panel audit on a probed inbound is exit 1 on its own
 (that protocol is marked DEGRADED and the flow/password-wipe suspect is printed) — the audit is an EARLIER
 signal than the probes, which run from a single client out of ~80.
+A protocol the admin switched off in the cascade (hy2t, and xhr until it is switched on) is `OFF`: its facts are
+listed, but it is outside the exit code and the verdict (the ИТОГ ends with «выключены в каскаде: …»). Nothing to
+fix there unless the admin asks — xhr's probe is dark by design while it is off.
 
 Why this comes before the port/process checks: during the **4-day Reality outage of 2026-09-01..04** `ss`,
 `iptables`, `docker ps`, `systemctl` and the xray logs were green the entire time. The failure was a per-client

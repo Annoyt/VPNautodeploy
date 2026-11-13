@@ -217,6 +217,55 @@ class TestSharedRules:
             # the script adds its early sign (a newest run with no ok) on top
             assert script_says in (expect, 'degraded')
 
+    def test_every_reader_leaves_a_switched_off_protocol_alone(self, db):
+        """Prod, 2026-11-13: the saved cascade predates xhr, the xhr server
+        lists nobody, so its probe is dark by construction. The pager, the
+        monitor, /protocols and the script all call it off; switched on,
+        all four judge it. (#56 fixed the first two; the card still said
+        «лежит» and the script's ИТОГ «xhr DOWN».)"""
+        from bot.handlers.admin.ops import _format_off_line, read_probe_state
+        from scripts import protocol_healthcheck as hc
+        tags = ('reality', 'hy2', 'ws', 'stls', 'hy2t')
+        set_cascade(db)                                     # saved before xhr existed
+        for tag in tags:
+            seed_window(db, tag, 8)
+        seed_window(db, 'xhr', 0, alive_fail=False)
+        cfg = SimpleNamespace(HY2T_PORT='', FALLBACK_NODE_HOST='', FALLBACK_NODE_PBK='')
+
+        def readers():
+            now = datetime.utcnow()
+            probes = {}
+            with db._connect() as conn:
+                for tag in tags + ('xhr',):
+                    rows = [[r[0], r[1], r[2]] for r in conn.execute(
+                        "SELECT ts, status, latency_ms FROM outbound_health "
+                        "WHERE outbound_tag = ? ORDER BY ts DESC", (tag,)).fetchall()]
+                    alive = [r[0] for r in rows if pr.is_alive(r[1], r[2])]
+                    probes[tag] = {'rows': rows, 'last_alive': alive[0] if alive else None}
+            layer_a = {'ok': True, 'probes': probes,
+                       'newest_ts': max(p['rows'][0][0] for p in probes.values()),
+                       'audit': {'rc': 0, 'lines': ['OK: 81 client records on 4 inbounds']},
+                       'cascade_order': db.get_setting('cascade_protocol_order')}
+            report = hc.assess({'a': layer_a, 'b': {'ok': False}, 'c': {'ok': False}}, now=now)
+            return (pager(db), DPIMonitor(db, Mock(), None).collect_signals()['probe'],
+                    read_probe_state(db, cfg, now, window_h=3, runs=3), report)
+
+        alerts, mon, card, report = readers()
+        assert not any(k.startswith('protocol_down:xhr') for k in alerts)
+        assert 'xhr' not in mon['measured']
+        assert 'xhr' in card['disabled']
+        assert _format_off_line('xhr', card['per_tag']['xhr']).startswith('⏸ <b>xhr</b> — выключен')
+        assert report['protocols']['xhr']['state'] == 'OFF' and report['exit_code'] == 0
+        assert report['verdict'].endswith('; выключены в каскаде: xhr')
+
+        db.set_setting('cascade_protocol_order', json.dumps(
+            [{'name': n, 'enabled': True} for n in tags + ('xhr',)]))
+        alerts, mon, card, report = readers()
+        assert 'protocol_down:xhr' in alerts
+        assert 'xhr' in mon['dark']
+        assert 'xhr' not in card['disabled']
+        assert report['protocols']['xhr']['state'] == 'DOWN' and report['exit_code'] == 1
+
 
 # ------------------------------------------------------------ B4 / B6 --------
 
