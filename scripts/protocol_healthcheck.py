@@ -60,6 +60,17 @@ source and the evidence says "no probe coverage". Either way a definite
 layer-C failure (daemon not active, entry DNAT :8402 gone) is DOWN —
 probe coverage adds a signal, it never removes one.
 
+PROTOCOLS SWITCHED OFF IN THE CASCADE ARE "OFF"
+-----------------------------------------------
+``probe_rules.operator_disabled`` — the pager's, the monitor's and
+/protocols' rule, i.e. the cascade editor's own answer: hy2t since
+2026-09-21, and an opt-in protocol (xhr) until the operator switches it
+on (its server lists nobody until then, so its probe is dark by
+construction). Such a protocol keeps its facts as evidence, but its state
+is OFF: outside the exit code, the ИТОГ line and "every protocol dark".
+Answers through it still prove the channel up, as for the pager. Without
+layer A the cascade is unknown and nothing is OFF.
+
 HOW TO RUN (as root on the ENTRY host; plain python3, no bot imports)
 ---------------------------------------------------------------------
     python3 /opt/vpn-bot/scripts/protocol_healthcheck.py          # human report (RU)
@@ -69,7 +80,8 @@ From the dev box:  ssh entry 'python3 /opt/vpn-bot/scripts/protocol_healthcheck.
 
 EXIT CODES
 ----------
-    0  every protocol OK
+    0  every protocol OK (protocols switched off in the cascade — OFF — do
+       not count, here or below)
     1  at least one protocol DEGRADED or DOWN (see ПОДОЗРЕВАЕМЫЕ for the
        ranked suspects, each with the concrete next command). DEGRADED
        also covers: the newest probe run fully dark while older runs were
@@ -181,7 +193,8 @@ TIMEOUT_A = 50
 TIMEOUT_B = 20
 TIMEOUT_C = 45
 
-STATE_ORDER = {'DOWN': 3, 'DEGRADED': 2, 'UNKNOWN': 1, 'OK': 0}
+# OFF = switched off in the cascade: outside every verdict (see the docstring).
+STATE_ORDER = {'DOWN': 3, 'DEGRADED': 2, 'UNKNOWN': 1, 'OK': 0, 'OFF': -1}
 
 
 # ---------------------------------------------------------------------------
@@ -1374,6 +1387,7 @@ def assess(layers: dict, now: Optional[datetime] = None) -> dict:
     stale_min = _minutes_since(newest, now) if newest else float('inf')
     pipeline_stale = a_ok and (not newest or stale_min > PROBE_STALE_MIN)
 
+    probe_state: Dict[str, str] = {}      # the probe verdict alone, before layer C / audit
     for tag in probed:
         if not a_ok:
             protocols[tag] = {'state': 'UNKNOWN', 'down_for': None, 'ok_rate': None,
@@ -1386,6 +1400,7 @@ def assess(layers: dict, now: Optional[datetime] = None) -> dict:
         else:
             protocols[tag] = _probe_verdict(tag, probes, now)
         protocols[tag]['probe_coverage'] = True
+        probe_state[tag] = protocols[tag]['state']
 
     if pipeline_stale:
         suspects.append({'rank': 1, 'protocol': '*',
@@ -1518,13 +1533,30 @@ def assess(layers: dict, now: Optional[datetime] = None) -> dict:
                 protocols[tag]['evidence'].append(f'entry: контейнер probe-proxy {cont.get("probe-proxy")} — '
                                                   'пробы слепы независимо от протокола')
 
+    # --- protocols switched off in the cascade (see the docstring) ----------
+    off = probe_rules.operator_disabled(a.get('cascade_order')) if a_ok else frozenset()
+    for tag in sorted(off):
+        p = protocols.get(tag)
+        if not p:
+            continue
+        p['evidence'].insert(0, f'выключен оператором в каскаде — вне вердикта '
+                                f'(сам по себе был бы {p["state"]})')
+        p['state'] = 'OFF'
+        p['down_for'] = None
+        p.pop('degraded_reason', None)
+    # Answers through a switched-off protocol still prove the channel up (the
+    # pager agrees); the DE reserve does not: it is meant to outlive exit.
+    alive_switched_off = any(probe_state.get(t) in ('OK', 'DEGRADED')
+                             for t in off if t != probe_rules.RESERVE_TAG)
+
     # --- suspects ---------------------------------------------------------------
     states = {t: protocols[t]['state'] for t in REPORT_ORDER if t in protocols}
     # The DE reserve is meant to outlive exit: alive while every cascade
     # protocol is dark it is that same upstream incident (the pager agrees).
-    cascade_probed = [t for t in probed if t != probe_rules.RESERVE_TAG]
+    cascade_probed = [t for t in probed if t != probe_rules.RESERVE_TAG and t not in off]
     probed_down = [t for t in cascade_probed if states.get(t) == 'DOWN']
-    all_dark = len(probed_down) == len(cascade_probed)
+    all_dark = (len(cascade_probed) >= 2 and len(probed_down) == len(cascade_probed)
+                and not alive_switched_off)
 
     if all_dark:
         pp = (b.get('containers') or {}).get('probe-proxy')
@@ -1716,8 +1748,9 @@ def exit_code_for(states: Dict[str, str]) -> int:
     are blind, a dead hysteria-turbo is still a fact. 0 requires EVERY
     protocol to be OK; any UNKNOWN (layer A failed, stale pipeline, exit
     unreachable for hy2t) is 2, because "we could not look" must never
-    read as a pass — that is precisely how four days went by."""
-    vals = [states.get(t) for t in REPORT_ORDER if t in states]
+    read as a pass — that is precisely how four days went by. OFF
+    (switched off in the cascade) is left out."""
+    vals = [states.get(t) for t in REPORT_ORDER if t in states and states.get(t) != 'OFF']
     if any(v in ('DOWN', 'DEGRADED') for v in vals):
         return 1
     if vals and all(v == 'OK' for v in vals):
@@ -1726,15 +1759,20 @@ def exit_code_for(states: Dict[str, str]) -> int:
 
 
 def _verdict_line(protocols, states, all_dark, pipeline_stale, a_ok, stale_min) -> str:
+    switched_off = [t for t in REPORT_ORDER if states.get(t) == 'OFF']
+    off_tail = f'; выключены в каскаде: {", ".join(switched_off)}' if switched_off else ''
     if all_dark:
-        return 'ИТОГ: ВСЕ протоколы DOWN — общий канал (probe-proxy / entry→exit / exit), не отдельный inbound'
+        return ('ИТОГ: ВСЕ протоколы DOWN — общий канал (probe-proxy / entry→exit / exit), '
+                'не отдельный inbound' + off_tail)
     if pipeline_stale:
         return f'ИТОГ: пробы не пишутся {_humanize(stale_min)} — состояние протоколов НЕИЗВЕСТНО'
     if not a_ok:
         bad = [f'{t} {states[t]}' for t in REPORT_ORDER if states.get(t) in ('DOWN', 'DEGRADED')]
         return 'ИТОГ: слой A недоступен, вердикт по пробам невозможен' + (
             f'; по exit: {", ".join(bad)}' if bad else '')
-    present = [t for t in REPORT_ORDER if t in states]
+    present = [t for t in REPORT_ORDER if t in states and states[t] != 'OFF']
+    if not present:
+        return f'ИТОГ: вердикта нет — все протоколы выключены в каскаде ({", ".join(switched_off)})'
     bad = []
     for t in present:
         st = states.get(t)
@@ -1750,10 +1788,10 @@ def _verdict_line(protocols, states, all_dark, pipeline_stale, a_ok, stale_min) 
                           if protocols[t].get('probe_coverage'))
         unprobed = [t for t in present if not protocols[t].get('probe_coverage')]
         tail = f'; {", ".join(unprobed)} active, без проб' if unprobed else ''
-        return f'ИТОГ: все протоколы OK ({rates}{tail})'
+        return f'ИТОГ: все протоколы OK ({rates}{tail}){off_tail}'
     rest_ok = [t for t in present if states.get(t) == 'OK']
     tail = 'остальные OK' if len(rest_ok) == len(present) - len(bad) and rest_ok else 'остальных OK нет'
-    return f'ИТОГ: {", ".join(bad)}, {tail}'
+    return f'ИТОГ: {", ".join(bad)}, {tail}{off_tail}'
 
 
 # ---------------------------------------------------------------------------

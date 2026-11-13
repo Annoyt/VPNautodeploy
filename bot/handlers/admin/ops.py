@@ -148,6 +148,18 @@ def _format_probe_line(tag: str, info: Optional[dict], now: datetime,
     return f"🟢 <b>{tag}</b> — {rate}{bulk}"
 
 
+def _format_off_line(tag: str, info: Optional[dict]) -> str:
+    """A protocol switched off in the cascade (``probe_rules.operator_disabled``,
+    the pager's and the monitor's rule): no verdict, nothing pages, so no
+    red line either. The newest run stays as a fact. An opt-in protocol
+    nobody switched on (xhr) is dark by construction: its server lists
+    nobody until it is on."""
+    if not info:
+        return f"⏸ <b>{tag}</b> — выключен в каскаде, проб нет"
+    return (f"⏸ <b>{tag}</b> — выключен в каскаде, алертов нет; "
+            f"последний прогон {info['last_ok']}/{info['last_n']} ok")
+
+
 def _bulk_note(bulk) -> str:
     """The newest bulk probe (B1) in a few words: nothing when it passed,
     "128 КБ за 0,4 с" style is noise on a green card."""
@@ -172,6 +184,8 @@ def read_probe_state(db, config, now: datetime, *, window_h: int,
     protocol with NO rows at all still gets a line, plus whatever
     else has rows in the window — a tag added to the checker shows
     up here without a code change. Shared by /protocols and /sos.
+    ``disabled`` = the protocols switched off in the cascade
+    (``probe_rules.operator_disabled``, the pager's rule).
     """
     try:
         from bot.services.health_checker import HealthChecker as _HC
@@ -231,7 +245,16 @@ def read_probe_state(db, config, now: datetime, *, window_h: int,
                 bulk = None
             info['bulk'] = tuple(bulk) if bulk else None
             per_tag[tag] = info
-    return {'newest': newest, 'tags': tags, 'per_tag': per_tag}
+        # Read in the same connection as the rows, as the pager does.
+        try:
+            row = conn.execute(
+                "SELECT value FROM app_settings WHERE key = 'cascade_protocol_order'"
+            ).fetchone()
+            cascade = row[0] if row else None
+        except Exception:       # unreadable: only the opt-in protocols are off
+            cascade = None
+    return {'newest': newest, 'tags': tags, 'per_tag': per_tag,
+            'disabled': probe_rules.operator_disabled(cascade)}
 
 
 # ----- /cascade helpers -----
@@ -722,7 +745,11 @@ class AdminOpsMixin(AdminHandlerBase):
             lines.append("⚠️ outbound_health недоступна — состояние проб неизвестно")
         else:
             lines.extend(self._probe_header_lines(probes['newest'], now))
+            disabled = probes.get('disabled') or frozenset()
             for tag in probes['tags']:
+                if tag in disabled:
+                    lines.append(_format_off_line(tag, probes['per_tag'].get(tag)))
+                    continue
                 lines.append(_format_probe_line(
                     tag, probes['per_tag'].get(tag), now,
                     window_h=self.PROTO_WINDOW_H,
@@ -735,7 +762,8 @@ class AdminOpsMixin(AdminHandlerBase):
                 # row in the window — say so instead of showing a blank.
                 # When it IS expected, the loop above already rendered a
                 # real line (grey "нет проб" until the first run writes).
-                lines.append("⚪ <b>hy2t</b>: без проб, см. /ai")
+                lines.append(_format_off_line('hy2t', None) if 'hy2t' in disabled
+                             else "⚪ <b>hy2t</b>: без проб, см. /ai")
         hy2 = self._hy2_sessions_line(now)
         if hy2:
             lines.append(hy2)

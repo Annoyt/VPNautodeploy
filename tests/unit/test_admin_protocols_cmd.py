@@ -15,6 +15,7 @@ subprocess; it is stubbed at ``subprocess.run`` so no test ever talks
 to a panel, and one test asserts the exact command shape instead.
 """
 
+import json
 import sqlite3
 import subprocess
 import threading
@@ -263,6 +264,75 @@ class TestHy2tLine:
         text = run(handler)['text']
         assert 'outbound_health недоступна' in text
         assert '<b>hy2t</b>' not in text
+
+
+def switch(db, **enabled):
+    """The cascade setting with these protocols on or off (``xhr=True``)."""
+    db.set_setting('cascade_protocol_order', json.dumps(
+        [{'name': n, 'enabled': on} for n, on in enabled.items()]))
+
+
+class TestSwitchedOff:
+    """A protocol switched off in the cascade gets a ⏸ line, never a red
+    one: the pager does not page it and the monitor does not demote it
+    (probe_rules.operator_disabled). Prod on 2026-11-13: xhr never switched
+    on, so its server lists nobody and its probe is dark."""
+
+    def test_an_opt_in_protocol_nobody_switched_on_is_paused(self, handler, db):
+        for p in PROTOCOLS:
+            seed(db, p, runs=3, ok_per_run=7)
+        seed(db, 'xhr', runs=3, ok_per_run=0)
+        text = run(handler)['text']
+        assert line_for(text, 'xhr') == (
+            '⏸ <b>xhr</b> — выключен в каскаде, алертов нет; последний прогон 0/10 ok')
+        assert '🔴' not in text
+
+    def test_switched_on_it_is_judged(self, handler, db):
+        switch(db, xhr=True)
+        for p in PROTOCOLS:
+            seed(db, p, runs=3, ok_per_run=7)
+        seed(db, 'xhr', runs=3, ok_per_run=0)
+        assert line_for(run(handler)['text'], 'xhr').startswith('🔴')
+
+    def test_turbo_switched_off_without_rows(self, handler, db):
+        switch(db, hy2t=False)
+        for p in PROTOCOLS:
+            seed(db, p, runs=3, ok_per_run=7)
+        text = run(handler)['text']
+        assert '⏸ <b>hy2t</b> — выключен в каскаде, проб нет' in text
+        assert 'без проб, см. /ai' not in text
+        assert text.count('<b>hy2t</b>') == 1
+
+    def test_turbo_switched_off_and_expected_by_config(self, handler, db):
+        handler.config.HY2T_PORT = '8402'
+        switch(db, hy2t=False)
+        for p in PROTOCOLS:
+            seed(db, p, runs=3, ok_per_run=7)
+        assert line_for(run(handler)['text'], 'hy2t') == '⏸ <b>hy2t</b> — выключен в каскаде, проб нет'
+
+    def test_turbo_switched_off_with_rows_shows_its_last_run(self, handler, db):
+        switch(db, hy2t=False)
+        for p in PROTOCOLS + ['hy2t']:
+            seed(db, p, runs=3, ok_per_run=7)
+        assert line_for(run(handler)['text'], 'hy2t') == (
+            '⏸ <b>hy2t</b> — выключен в каскаде, алертов нет; последний прогон 7/10 ok')
+
+    def test_the_off_line_counts_ok_not_alive(self, handler, db):
+        switch(db, hy2t=False)
+        for p in PROTOCOLS:
+            seed(db, p, runs=3, ok_per_run=7)
+        seed(db, 'hy2t', runs=3, ok_per_run=7, status='error', latency_ms=900)
+        assert line_for(run(handler)['text'], 'hy2t').endswith('последний прогон 7/10 ok')
+
+    def test_an_unreadable_cascade_switches_off_only_the_opt_in_ones(self, handler, db):
+        db.set_setting('cascade_protocol_order', '{bad')
+        for p in PROTOCOLS:
+            seed(db, p, runs=3, ok_per_run=7)
+        seed(db, 'hy2t', runs=3, ok_per_run=0)
+        seed(db, 'xhr', runs=3, ok_per_run=0)
+        text = run(handler)['text']
+        assert line_for(text, 'hy2t').startswith('🔴')
+        assert line_for(text, 'xhr').startswith('⏸')
 
 
 class TestPanelAudit:

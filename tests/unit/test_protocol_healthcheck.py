@@ -857,9 +857,134 @@ class TestExitCodes:
         ({t: 'UNKNOWN' for t in hc.PROTOCOLS}, 2),
         ({**{t: 'OK' for t in hc.PROTOCOLS}, 'hy2t': 'UNKNOWN'}, 2),
         ({}, 2),
+        # OFF (switched off in the cascade) is left out
+        ({**{t: 'OK' for t in hc.PROTOCOLS}, 'hy2t': 'OFF', 'xhr': 'OFF'}, 0),
+        ({**{t: 'OK' for t in hc.PROTOCOLS}, 'xhr': 'OFF', 'ws': 'DOWN'}, 1),
+        ({t: 'OFF' for t in hc.PROTOCOLS}, 2),
     ])
     def test_mapping(self, states, code):
         assert hc.exit_code_for(states) == code
+
+
+# ---------------------------------------------------------------------------
+# protocols switched off in the cascade
+# ---------------------------------------------------------------------------
+
+def cascade(*off, extra=()):
+    """The setting as the editor saves it: the five protocols of 2026-09,
+    ``off`` disabled (a name outside the five is appended disabled),
+    ``extra`` (xhr) appended enabled."""
+    base = ['hy2t', 'stls', 'ws', 'hy2', 'reality']
+    names = base + [n for n in off if n not in base]
+    return json.dumps([{'name': n, 'enabled': n not in off} for n in names]
+                      + [{'name': n, 'enabled': True} for n in extra])
+
+
+def with_cascade(a, setting):
+    a['cascade_order'] = setting
+    return a
+
+
+class TestSwitchedOff:
+    """A protocol switched off in the cascade (probe_rules.operator_disabled,
+    the pager's rule) is OFF: outside the exit code, the ИТОГ line and
+    "every protocol dark". Prod on 2026-11-13: hy2t off since 2026-09-21,
+    xhr never switched on — its server lists nobody, its probe is dark."""
+
+    def _probes(self, dark=(), alive=()):
+        probes = {t: {'rows': rows(), 'last_alive': (NOW - timedelta(minutes=5)).isoformat()}
+                  for t in hc.PROBED}
+        for t in alive:
+            probes[t] = {'rows': rows(), 'last_alive': (NOW - timedelta(minutes=5)).isoformat()}
+        for t in dark:
+            probes[t] = {'rows': dark_rows(), 'last_alive': None}
+        return probes
+
+    def test_xhr_nobody_switched_on_is_off_and_the_run_is_green(self):
+        a = with_cascade(layer_a(probes=self._probes(dark=('xhr',))), cascade('hy2t'))
+        report = hc.assess(layers(a=a), now=NOW)
+        assert states_of(report)['xhr'] == 'OFF' and states_of(report)['hy2t'] == 'OFF'
+        assert report['exit_code'] == 0
+        assert report['verdict'].startswith('ИТОГ: все протоколы OK (reality ')
+        assert report['verdict'].endswith('; выключены в каскаде: hy2t, xhr')
+        assert not report['suspects']
+        assert report['protocols']['xhr']['down_for'] is None
+
+    def test_switched_on_xhr_is_judged(self):
+        a = with_cascade(layer_a(probes=self._probes(dark=('xhr',))), cascade('hy2t', extra=('xhr',)))
+        report = hc.assess(layers(a=a), now=NOW)
+        assert states_of(report)['xhr'] == 'DOWN'
+        assert report['exit_code'] == 1
+        assert report['verdict'].startswith('ИТОГ: xhr DOWN')
+        assert report['verdict'].endswith('остальные OK; выключены в каскаде: hy2t')
+
+    def test_turbo_switched_off_with_a_dead_daemon_is_not_down(self):
+        c = layer_c(turbo='inactive')
+        off = hc.assess(layers(a=with_cascade(layer_a(), cascade('hy2t')), c=c), now=NOW)
+        assert states_of(off)['hy2t'] == 'OFF' and off['exit_code'] == 0
+        assert not [s for s in off['suspects'] if s['protocol'] == 'hy2t']
+        assert any('exit: hysteria-turbo inactive' in e for e in off['protocols']['hy2t']['evidence'])
+        on = hc.assess(layers(a=with_cascade(layer_a(), cascade()), c=c), now=NOW)
+        assert states_of(on)['hy2t'] == 'DOWN' and on['exit_code'] == 1
+
+    def test_switched_off_and_alive_rules_out_all_dark(self):
+        # ws and stls are off but answer: the channel is up, so reality and
+        # hy2 dark are two inbounds, not one upstream incident (the pager's rule)
+        a = with_cascade(layer_a(probes=self._probes(dark=('reality', 'hy2'))), cascade('ws', 'stls'))
+        report = hc.assess(layers(a=a), now=NOW)
+        assert report['verdict'].startswith('ИТОГ: reality DOWN')
+        assert 'hy2 DOWN' in report['verdict']
+        assert not any(s['title'].startswith('upstream') for s in report['suspects'])
+
+    def test_switched_off_and_degraded_still_proves_the_channel(self):
+        # errors that come back through the tunnel: up, as for the pager
+        probes = self._probes(dark=('reality', 'hy2'))
+        for t in ('ws', 'stls'):
+            probes[t] = {'rows': rows(n_ok=1, n_err_latency=9),
+                         'last_alive': (NOW - timedelta(minutes=5)).isoformat()}
+        report = hc.assess(layers(a=with_cascade(layer_a(probes=probes), cascade('ws', 'stls'))),
+                           now=NOW)
+        assert report['verdict'].startswith('ИТОГ: reality DOWN')
+
+    def test_switched_off_and_dark_too_is_all_dark(self):
+        a = with_cascade(layer_a(probes=self._probes(dark=('reality', 'hy2', 'ws', 'stls'))),
+                         cascade('ws', 'stls'))
+        report = hc.assess(layers(a=a), now=NOW)
+        assert report['verdict'].startswith('ИТОГ: ВСЕ протоколы DOWN')
+        assert report['verdict'].endswith('; выключены в каскаде: ws, stls')
+        assert report['suspects'][0]['title'].startswith('upstream')
+
+    def test_a_switched_off_reserve_does_not_prove_the_channel(self):
+        a = with_cascade(layer_a(probes=self._probes(dark=('reality', 'hy2'), alive=('de',))),
+                         cascade('ws', 'stls', 'de'))
+        a['probes']['ws'] = a['probes']['stls'] = {'rows': dark_rows(), 'last_alive': None}
+        report = hc.assess(layers(a=a), now=NOW)
+        assert report['verdict'].startswith('ИТОГ: ВСЕ протоколы DOWN')
+
+    def test_one_protocol_left_on_and_dark_is_not_all_dark(self):
+        # "every protocol dark at once" needs two, as for the pager
+        a = with_cascade(layer_a(probes=self._probes(dark=('reality', 'hy2', 'ws', 'stls'))),
+                         cascade('hy2', 'ws', 'stls', 'hy2t'))
+        report = hc.assess(layers(a=a), now=NOW)
+        assert report['verdict'].startswith('ИТОГ: reality DOWN')
+
+    def test_everything_switched_off_has_no_verdict(self):
+        a = with_cascade(layer_a(), cascade('hy2t', 'stls', 'ws', 'hy2', 'reality'))
+        report = hc.assess(layers(a=a), now=NOW)
+        assert report['exit_code'] == 2
+        assert report['verdict'].startswith('ИТОГ: вердикта нет — все протоколы выключены')
+
+    def test_without_layer_a_the_cascade_is_not_trusted(self):
+        a = with_cascade(layer_a(ok=False, error='timeout', probes={}), cascade('hy2t'))
+        report = hc.assess(layers(a=a, c=layer_c(turbo='inactive')), now=NOW)
+        assert states_of(report)['hy2t'] == 'DOWN'
+
+    def test_render_names_off_and_keeps_the_facts(self):
+        a = with_cascade(layer_a(probes=self._probes(dark=('xhr',))), cascade('hy2t'))
+        text = hc.render_human(hc.assess(layers(a=a), now=NOW))
+        assert '[xhr] OFF\n  выключен оператором в каскаде — вне вердикта (сам по себе был бы DOWN)' in text
+        assert 'пробы: 0/30 живых' in text
+        assert 'лежит' not in text.split('[xhr] OFF', 1)[1].split('\n', 1)[0]
 
 
 # ---------------------------------------------------------------------------
