@@ -117,13 +117,41 @@ class TestSharedRules:
         assert pr.last_run_dark([('error', 9)] * 9) is None   # no full run yet
 
     @pytest.mark.parametrize('raw,off', [
-        (None, set()), ('', set()), ('{bad', set()), ('42', set()),
-        ('["hy2", "stls"]', set()),                               # legacy: all on
-        ('[{"name": "hy2t", "enabled": false}, {"name": "hy2"}]', {'hy2t'}),
-        ([{'name': 'ws', 'enabled': False}, 'x', {'enabled': False}], {'ws'}),
+        # an opt-in protocol (xhr) is off until an entry switches it on,
+        # unreadable and missing settings included
+        (None, {'xhr'}), ('', {'xhr'}), ('{bad', {'xhr'}), ('42', {'xhr'}), ('[]', {'xhr'}),
+        ('["hy2", "stls"]', {'xhr'}),                             # legacy: listed = on
+        ('[{"name": "hy2t", "enabled": false}, {"name": "hy2"}]', {'hy2t', 'xhr'}),
+        ([{'name': 'ws', 'enabled': False}, 'x', {'enabled': False}], {'ws', 'xhr'}),
+        ('[{"name": "xhr", "enabled": true}]', set()),
+        ('[{"name": "xhr"}, {"name": "hy2t", "enabled": false}]', {'hy2t'}),
+        ('["hy2", "xhr"]', set()),
+        # a name counts by its first entry, as in the editor
+        ('[{"name": "ws", "enabled": true}, {"name": "ws", "enabled": false}]', {'xhr'}),
+        ('[{"name": "xhr", "enabled": false}, {"name": "xhr", "enabled": true}]', {'xhr'}),
     ])
     def test_operator_disabled(self, raw, off):
         assert pr.operator_disabled(raw) == off
+
+    @pytest.mark.parametrize('raw', [
+        None, '', '{bad', '42', '[]', '["zzz"]', '["hy2", "stls"]', '["hy2", "xhr"]',
+        # prod on 2026-11-12: saved before xhr existed
+        '[{"name": "hy2t", "enabled": false}, {"name": "stls", "enabled": true},'
+        ' {"name": "ws", "enabled": true}, {"name": "hy2", "enabled": true},'
+        ' {"name": "reality", "enabled": true}]',
+        '[{"name": "xhr", "enabled": true}, {"name": "ws", "enabled": false}]',
+        '[{"name": "xhr", "enabled": false}]', '[{"name": "xhr"}]',
+        '[{"name": "ws", "enabled": true}, {"name": "ws", "enabled": false}]',
+        '[{"name": "reality", "enabled": false}, "reality", {"name": "zzz", "enabled": false}]',
+    ])
+    def test_off_is_what_the_cascade_editor_shows(self, raw):
+        """The pager, DPIMonitor and the healthcheck script call a protocol
+        off exactly when the editor (and so every profile) does."""
+        from bot.handlers.callbacks.user import MyKeyAnswerHandler as MK
+        editor = MK.get_cascade_config(SimpleNamespace(get_setting=lambda key: raw))
+        editor_off = {c['name'] for c in editor if not c['enabled']}
+        assert pr.operator_disabled(raw) & set(MK.PROTOCOL_METHOD_MAP) == editor_off
+        assert MK.OPT_IN_PROTOCOLS is pr.OPT_IN_PROTOCOLS
 
     def test_the_targets_all_pass_through_a_foreign_exit(self):
         # vk.com answered 418 and sberbank.ru failed TLS (Russian CA) on
@@ -203,6 +231,18 @@ class TestPager:
         set_cascade(db)                                      # switched back on
         assert 'protocol_down:hy2t' in pager(db)
 
+    def test_an_opt_in_protocol_nobody_switched_on_is_not_paged(self, db):
+        # prod, 2026-11-12: the saved cascade predates xhr, the xhr server
+        # lists nobody, and its probe is dark by construction
+        set_cascade(db)
+        for tag in ('reality', 'hy2', 'ws', 'stls', 'hy2t'):
+            seed_window(db, tag, 8)
+        seed_window(db, 'xhr', 0, alive_fail=False)
+        assert not any(k.startswith('protocol_down:xhr') for k in pager(db))
+        db.set_setting('cascade_protocol_order', json.dumps(
+            [{'name': n, 'enabled': True} for n in ('stls', 'ws', 'hy2', 'reality', 'hy2t', 'xhr')]))
+        assert 'protocol_down:xhr' in pager(db)            # switched on: judged
+
     def test_a_switched_off_protocol_that_answers_rules_out_all_dark(self, db):
         # ws and stls are off in the cascade but their probes answer: the
         # channel is up, so reality and hy2 dark are two inbounds, not one
@@ -259,6 +299,17 @@ class TestMonitor:
         seed_window(db, 'ws', 0, alive_fail=False)
         signals = DPIMonitor(db, Mock(), None).collect_signals()['probe']
         assert 'ws' not in signals['dark'] and 'ws' not in signals['measured']
+
+    def test_an_opt_in_protocol_nobody_switched_on_is_not_demoted(self, db):
+        set_cascade(db)                                     # saved before xhr existed
+        for tag in ('reality', 'hy2', 'stls', 'ws'):
+            seed_window(db, tag, 8)
+        seed_window(db, 'xhr', 0, alive_fail=False)
+        signals = DPIMonitor(db, Mock(), None).collect_signals()['probe']
+        assert 'xhr' not in signals['dark'] and 'xhr' not in signals['measured']
+        db.set_setting('cascade_protocol_order', json.dumps(
+            [{'name': n, 'enabled': True} for n in ('stls', 'ws', 'hy2', 'reality', 'xhr')]))
+        assert 'xhr' in DPIMonitor(db, Mock(), None).collect_signals()['probe']['dark']
 
     def test_the_reserve_is_never_a_monitor_signal(self, db):
         seed_window(db, 'de', 0, alive_fail=False)
