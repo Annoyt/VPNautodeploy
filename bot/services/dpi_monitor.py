@@ -34,6 +34,9 @@ Rules (signal → target)
                     3 runs (LIMIT 30 within 3 h, ≥15 samples);
                     alive = latency_ms IS NOT NULL OR status='ok'
   probe_degraded    outbound_health: ok/len < 0.25 over ≥25 samples  <p> globally
+  probe_bulk        outbound_bulk: the newest 3 downloads through    <p> globally
+                    <p> stopped short or timed out while its HEADs
+                    answer and another protocol's newest passed
   client_dark       client_probe 'p-<proto>' (E8) per users.last_asn, <p> @ASN
                     2 h: ≥3 clients up through ANOTHER cascade
                     protocol with no <p> row, 0 clients with one
@@ -51,7 +54,7 @@ Hysteresis
   demote after 2 consecutive bad evaluations (~20 min at the 10-min
   cadence); restore after 6 consecutive good ones (~1 h); at least
   30 min between two changes of the same target; at most 2 changes per
-  run, ranked probe_dark > probe_degraded > client_dark > reality_asn >
+  run, ranked probe_dark > probe_degraded > probe_bulk > client_dark > reality_asn >
   udp_storm_asn > user_reports_asn with restores after demotes (the same
   rank decides which rule owns a target two rules fire on). "good" means
   the RULE that demoted the target is quiet this evaluation (the rule id
@@ -112,18 +115,20 @@ logger = logging.getLogger(__name__)
 # ---- rule ids --------------------------------------------------------------
 RULE_PROBE_DARK = 'probe_dark'
 RULE_PROBE_DEGRADED = 'probe_degraded'
+RULE_PROBE_BULK = 'probe_bulk'
 RULE_CLIENT_DARK_GLOBAL = 'client_dark_global'
 RULE_CLIENT_DARK = 'client_dark'
 RULE_REALITY_ASN = 'reality_asn'
 RULE_UDP_STORM_ASN = 'udp_storm_asn'
 RULE_USER_REPORTS_ASN = 'user_reports_asn'
-# Rank for the per-run cap: DARK > DEGRADED > R6 > R3 > R4 > R5. R6 is the
+# Rank for the per-run cap: DARK > DEGRADED > BULK > R6 > R3 > R4 > R5. R6 is the
 # users' own clients — first-hand per protocol and per network, so it
 # outranks every server-side per-ASN inference, but not the probes (one
 # vantage, every protocol, every 15 min, pinned to the pager's numbers).
 RULES = (
     RULE_PROBE_DARK,
     RULE_PROBE_DEGRADED,
+    RULE_PROBE_BULK,
     RULE_CLIENT_DARK_GLOBAL,
     RULE_CLIENT_DARK,
     RULE_REALITY_ASN,
@@ -131,7 +136,7 @@ RULES = (
     RULE_USER_REPORTS_ASN,
 )
 RULE_RANK = {rule: i for i, rule in enumerate(RULES)}
-PROBE_RULES = frozenset({RULE_PROBE_DARK, RULE_PROBE_DEGRADED})
+PROBE_RULES = frozenset({RULE_PROBE_DARK, RULE_PROBE_DEGRADED, RULE_PROBE_BULK})
 # Which rules go UNKNOWN (frozen) when a collector fails — see Guards.
 COLLECTOR_RULES = {
     'probe': PROBE_RULES,
@@ -146,6 +151,7 @@ COLLECTOR_RULES = {
 RULE_TITLES_RU = {
     RULE_PROBE_DARK: 'пробы: протокол мёртв (DARK)',
     RULE_PROBE_DEGRADED: 'пробы: протокол деградировал (DEGRADED)',
+    RULE_PROBE_BULK: 'пробы: большая загрузка замерзает (BULK)',
     RULE_CLIENT_DARK_GLOBAL: 'клиенты из разных сетей: протокол тёмен',
     RULE_CLIENT_DARK: 'клиенты: протокол тёмен в сети (ASN)',
     RULE_REALITY_ASN: 'Reality: handshake-fail по ASN',
@@ -165,6 +171,21 @@ PROBE_WINDOW_H = _pr.PROBE_WINDOW_H
 PROBE_STALE_MIN = _pr.PROBE_STALE_MIN
 PROBE_DEGRADED_OK_RATIO = _pr.PROBE_DEGRADED_OK_RATIO
 PROBE_DEGRADED_MIN_SAMPLES = _pr.PROBE_DEGRADED_MIN_SAMPLES
+
+# ---- probe BULK: the download behind the HEADs (outbound_bulk, F B1) --------
+# A HEAD needs a few hundred bytes. Russian DPI lets a connection it does not
+# like carry ~16–25 KB and then freezes it: 2026-11-13, ws through our
+# Cloudflare domain gave 4–14 KB of the 128 KB download and then 20 s of
+# silence, 210 runs out of 210, while its HEADs read 30/30 and every client
+# check passed. So a protocol can be "alive" for the pager and dead for every
+# page a user opens. Demoted globally when its newest BULK_RUNS downloads all
+# froze AND another cascade protocol's newest download passed: that control
+# rules out the download target or exit's own egress (then every protocol
+# freezes at once, and nothing moves). Never vetoed by users' connection
+# counts (C7): the freeze comes after the handshake, so connections look normal.
+BULK_RUNS = 3                          # the newest downloads per protocol (~45 min)
+BULK_FROZEN = ('partial', 'timeout')   # stopped short, or nothing by the deadline
+BULK_PASSED = 'ok'
 
 # ---- R6: a protocol dark at an operator, as the users' clients see it ------
 # IMPROVEMENT_PLAN E8. The FlClash profile health-checks every protocol it
@@ -382,6 +403,12 @@ def empty_signals() -> dict:
             'measured': [],
             'all_dark': False,
             'vetoed': {},           # {proto: evidence} — C7
+            # {proto: evidence}: the newest BULK_RUNS downloads froze while
+            # another protocol's passed — what demotes.
+            'bulk_frozen': {},
+            # {proto: status of its newest download} — what a BULK demotion
+            # needs to come back ('ok') or to stay ('partial'/'timeout').
+            'bulk_newest': {},
         },
         'client_dark_global': {},   # {proto: evidence} — C4
         'client_dark': {},          # {asn: {proto: evidence}}
@@ -817,7 +844,42 @@ class DPIMonitor:
         out['all_dark'] = (
             bool(measured) and len(out['dark']) == len(measured) and len(measured) >= 2
         )
+        self._collect_bulk(conn, out, known, cutoff)
         return out
+
+    @staticmethod
+    def _collect_bulk(conn, out: dict, known: set, cutoff: str) -> None:
+        """Fill ``bulk_newest`` / ``bulk_frozen`` (constants block above)
+        from the same window the HEADs are read in."""
+        rows_by_tag = {}
+        for tag in sorted(known):
+            rows = conn.execute(
+                "SELECT status, bytes FROM outbound_bulk "
+                "WHERE outbound_tag = ? AND ts >= ? ORDER BY ts DESC LIMIT ?",
+                (tag, cutoff, BULK_RUNS),
+            ).fetchall()
+            if rows:
+                rows_by_tag[tag] = rows
+        out['bulk_newest'] = {tag: rows[0][0] for tag, rows in rows_by_tag.items()}
+        passed = sorted(tag for tag, status in out['bulk_newest'].items()
+                        if status == BULK_PASSED)
+        for tag, rows in rows_by_tag.items():
+            # Without a judged HEAD window there is no "while it answers".
+            # A dark one may land here too: R1 outranks this rule for the
+            # target (evaluate), so its demotion reads probe_dark.
+            if tag not in out['measured']:
+                continue
+            if len(rows) < BULK_RUNS or any(r[0] not in BULK_FROZEN for r in rows):
+                continue
+            controls = passed      # a frozen protocol's newest is never 'ok'
+            if not controls:
+                continue
+            got = sorted(int(r[1] or 0) // 1024 for r in rows)
+            span = f"{got[0]} КБ" if got[0] == got[-1] else f"{got[0]}–{got[-1]} КБ"
+            out['bulk_frozen'][tag] = (
+                f"bulk-проба: загрузка через {tag} замерзает {len(rows)} прогона подряд "
+                f"({span} и тишина), через {', '.join(controls)} проходит (BULK)"
+            )
 
     @staticmethod
     def _users_connect_normally(conn, proto: str, now: datetime) -> Optional[str]:
@@ -1087,6 +1149,8 @@ class DPIMonitor:
         probe_usable = not probe.get('stale', True)
         dark = probe.get('dark') or {}
         degraded = probe.get('degraded') or {}
+        bulk_frozen = probe.get('bulk_frozen') or {}
+        bulk_newest = probe.get('bulk_newest') or {}
         client_dark = (signals or {}).get('client_dark') or {}
         client_global = (signals or {}).get('client_dark_global') or {}
         client_alive = (signals or {}).get('client_alive') or {}
@@ -1116,6 +1180,8 @@ class DPIMonitor:
                 firing[target_key('global', None, proto)] = (RULE_PROBE_DARK, ev)
             for proto, ev in degraded.items():
                 firing.setdefault(target_key('global', None, proto), (RULE_PROBE_DEGRADED, ev))
+            for proto, ev in bulk_frozen.items():
+                firing.setdefault(target_key('global', None, proto), (RULE_PROBE_BULK, ev))
         for proto, ev in client_global.items():
             firing.setdefault(target_key('global', None, proto), (RULE_CLIENT_DARK_GLOBAL, ev))
         # Per-ASN rules in rank order, each only where no higher-ranked
@@ -1152,6 +1218,14 @@ class DPIMonitor:
             it counted as a good evaluation and came back within the hour
             on no evidence at all (B4, problem 8)."""
             _scope, asn, proto = parse_target_key(key)
+            if rule == RULE_PROBE_BULK:
+                # Its own newest download decides: frozen holds, passed
+                # counts toward the restore, anything else (no rows,
+                # error, proxy_down) is no verdict.
+                newest = bulk_newest.get(proto)
+                if newest in BULK_FROZEN:
+                    return True
+                return False if newest == BULK_PASSED else None
             if rule in PROBE_RULES:
                 if proto not in measured:
                     return None

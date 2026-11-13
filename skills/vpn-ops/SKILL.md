@@ -177,7 +177,7 @@ day to that ASN's users who were using the protocol ("перестал рабо�
    "
    ```
    `cascade_auto` holds every ACTIVE auto-demotion (`global` + per-`asn`) with `since`, `reason` (the rule id:
-   `probe_dark` / `probe_degraded` / `client_dark` / `reality_asn` / `udp_storm_asn` / `user_reports_asn`) and `evidence` (the
+   `probe_dark` / `probe_degraded` / `probe_bulk` / `client_dark` / `reality_asn` / `udp_storm_asn` / `user_reports_asn`) and `evidence` (the
    human line with the numbers);
    `admin_actions` rows by `dpi_monitor` (`cascade_auto_demote` / `cascade_auto_restore`) are the history; the AI
    topic got one message per run that changed something.
