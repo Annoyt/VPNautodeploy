@@ -835,7 +835,7 @@ def _host_key(image, sshd, name):
     return ' '.join((sshd / 'keys' / f'{name}.pub').read_text().split()[:2])
 
 
-def _wait_port(host, port, timeout=15.0):
+def _wait_port(host, port, timeout=40.0):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
@@ -923,10 +923,13 @@ async def test_stand_the_generated_sidecar_config_probes_the_scripts_sshd(tmp_pa
         mih = gen.build_config(cfg, user)
         assert [lst['name'] for lst in mih['listeners']] == ['probe-in-ssh']
         _run_sidecar(tmp_path, mih)
-        if not (_wait_port(MIHOMO_IP, 18088) and _wait_port(WEB_IP, 443)
-                and _wait_port(SSHD_IP, 22)):
-            pytest.skip('the stand network is not reachable from this host: '
-                        + _docker('logs', 'e-probe-mihomo', check=False)[-300:])
+        for name, ip, port in (('e-probe-web', WEB_IP, 443), ('e-probe-sshd', SSHD_IP, 22),
+                               ('e-probe-mihomo', MIHOMO_IP, 18088)):
+            if not _wait_port(ip, port):
+                # a host that cannot route to container addresses (Docker
+                # Desktop): no stand here, rather than a false failure
+                pytest.skip(f'{name} ({ip}:{port}) not reachable from this host: '
+                            + _docker('logs', name, check=False)[-300:])
         res = await checker(cfg)._check_protocol('ssh')
         assert {d: r['status'] for d, r in res.items()} == {
             f'{WEB_IP}/{t}': 'ok' for t in TARGETS}, res
