@@ -19,8 +19,9 @@ improvisation. It reads the THREE signals that actually distinguish
 
   A) the bot's own probe rows (``outbound_health``), recent alerts,
      bot /health, and the panel audit (``verify_panel_client_fields.py``);
-  B) the entry host: shadow-tls / haproxy / probe-proxy up, the UDP
-     DNAT rules that carry Hysteria to exit;
+  B) the entry host: shadow-tls / haproxy / the probe sidecars up
+     (probe-proxy, probe-proxy-mihomo), the UDP DNAT rules that carry
+     Hysteria to exit;
   C) the exit host (ONE ssh round-trip): hysteria daemons, xray RUNTIME
      users per inbound (``xray api inbounduser``) vs config.json, recent
      accepted connections per inbound, hop REDIRECT rules, hysteria
@@ -59,6 +60,17 @@ rows → the pre-2026-09-05 path: layer C (+ entry DNAT) is the only
 source and the evidence says "no probe coverage". Either way a definite
 layer-C failure (daemon not active, entry DNAT :8402 gone) is DOWN —
 probe coverage adds a signal, it never removes one.
+
+THE DE RESERVE AND THE SSH EMERGENCY PATH
+-----------------------------------------
+Probed where the deployment has them (rows decide, as for hy2t): the DE
+reserve (``de``) and the SSH path to the ssh-exit container on exit
+(``ssh``, through the mihomo sidecar since 2026-11-15). Each is judged from
+its own rows and counts in the exit code and the ИТОГ line, but neither is
+a cascade protocol (``probe_rules.NON_CASCADE_TAGS``): neither takes part in
+"every protocol dark", and neither proves the channel up — the reserve is
+meant to outlive exit, the SSH path reaches exit without entry. The pager
+agrees.
 
 PROTOCOLS SWITCHED OFF IN THE CASCADE ARE "OFF"
 -----------------------------------------------
@@ -137,12 +149,19 @@ probe_rules = _load_probe_rules()
 
 PROBED = ['reality', 'hy2', 'ws', 'stls']      # what the probe sidecar ALWAYS speaks
 # Probed only where the deployment has them — decided per run by
-# probed_tags(): hy2t with HY2T_PORT, the DE reserve with FALLBACK_NODE_*.
-PROBED_OPTIONAL = ['hy2t', probe_rules.RESERVE_TAG, 'xhr']
+# probed_tags(): hy2t with HY2T_PORT, the DE reserve with FALLBACK_NODE_*,
+# xhr with XHR_SNI, the SSH emergency path with SSH_EXIT_HOST & co.
+PROBED_OPTIONAL = ['hy2t', probe_rules.RESERVE_TAG, 'xhr', probe_rules.SSH_TAG]
 PROTOCOLS = ['reality', 'hy2', 'hy2t', 'ws', 'stls']   # what we always report on
-# ...plus the DE reserve (B6) where it is probed: it joins the report only
-# with probe rows of its own, judged from them alone (no layer B/C facts).
-REPORT_ORDER = PROTOCOLS + [probe_rules.RESERVE_TAG, 'xhr']
+# ...plus the DE reserve (B6), xhr and the SSH path (E4) where they are
+# probed: each joins the report only with probe rows of its own, judged from
+# them (the DE reserve and the SSH path are no cascade protocols:
+# probe_rules.NON_CASCADE_TAGS, outside "every protocol dark").
+REPORT_ORDER = PROTOCOLS + [probe_rules.RESERVE_TAG, 'xhr', probe_rules.SSH_TAG]
+# The sidecar each probe goes through (layer B inspects both): xhr and the
+# SSH path ride the mihomo one (scripts/gen_probe_config_mihomo.py).
+MIHOMO_SIDECAR = 'probe-proxy-mihomo'
+SIDECAR_FOR = {'xhr': MIHOMO_SIDECAR, probe_rules.SSH_TAG: MIHOMO_SIDECAR}
 
 # One definition with the pager, the monitor and /protocols (probe_rules,
 # IMPROVEMENT_PLAN F, B5). Until 2026-11 this script called a window
@@ -665,7 +684,7 @@ def collect_layer_b() -> dict:
     for unit in ('shadow-tls', 'haproxy'):
         rc, so, se = _run(['systemctl', 'is-active', unit], 10)
         out['services'][unit] = (so.strip().splitlines() or [se.strip() or 'unknown'])[0]
-    for name in ('probe-proxy', BOT_CONTAINER):
+    for name in ('probe-proxy', MIHOMO_SIDECAR, BOT_CONTAINER):
         rc, so, se = _run(['docker', 'inspect', '-f', '{{.State.Status}}', name], 10)
         out['containers'][name] = so.strip() if rc == 0 else f'missing ({se.strip()[:80]})'
     rc, so, se = _run(['iptables', '-t', 'nat', '-S', 'PREROUTING'], 10)
@@ -1680,9 +1699,10 @@ def assess(layers: dict, now: Optional[datetime] = None) -> dict:
             missing = [f'{d}→:{p}' for d, p in ENTRY_DNAT_FOR[tag] if (d, p) not in entry_dnat]
             protocols[tag]['evidence'].append(
                 'entry DNAT: ' + ('все правила на месте' if not missing else 'НЕТ ' + ', '.join(missing)))
-        if cont.get('probe-proxy') != 'running':
-            for tag in probed:
-                protocols[tag]['evidence'].append(f'entry: контейнер probe-proxy {cont.get("probe-proxy")} — '
+        for tag in probed:
+            sidecar = SIDECAR_FOR.get(tag, 'probe-proxy')
+            if sidecar in cont and cont.get(sidecar) != 'running':
+                protocols[tag]['evidence'].append(f'entry: контейнер {sidecar} {cont.get(sidecar)} — '
                                                   'пробы слепы независимо от протокола')
 
     # --- protocols switched off in the cascade (see the docstring) ----------
@@ -1697,15 +1717,18 @@ def assess(layers: dict, now: Optional[datetime] = None) -> dict:
         p['down_for'] = None
         p.pop('degraded_reason', None)
     # Answers through a switched-off protocol still prove the channel up (the
-    # pager agrees); the DE reserve does not: it is meant to outlive exit.
+    # pager agrees); the DE reserve does not (it is meant to outlive exit),
+    # nor the SSH path (it reaches exit without entry): NON_CASCADE_TAGS.
     alive_switched_off = any(probe_state.get(t) in ('OK', 'DEGRADED')
-                             for t in off if t != probe_rules.RESERVE_TAG)
+                             for t in off if t not in probe_rules.NON_CASCADE_TAGS)
 
     # --- suspects ---------------------------------------------------------------
     states = {t: protocols[t]['state'] for t in REPORT_ORDER if t in protocols}
-    # The DE reserve is meant to outlive exit: alive while every cascade
-    # protocol is dark it is that same upstream incident (the pager agrees).
-    cascade_probed = [t for t in probed if t != probe_rules.RESERVE_TAG and t not in off]
+    # The DE reserve is meant to outlive exit, the SSH path skips entry:
+    # alive while every cascade protocol is dark they are that same upstream
+    # incident (the pager agrees).
+    cascade_probed = [t for t in probed
+                      if t not in probe_rules.NON_CASCADE_TAGS and t not in off]
     probed_down = [t for t in cascade_probed if states.get(t) == 'DOWN']
     all_dark = (len(cascade_probed) >= 2 and len(probed_down) == len(cascade_probed)
                 and not alive_switched_off)
@@ -1812,6 +1835,18 @@ def assess(layers: dict, now: Optional[datetime] = None) -> dict:
                               'title': f'{unit} активен, NAT и hop на месте — смотри auth ↔ bot /api/{ "hy2" if tag == "hy2" else "hy2t"}/auth',
                               'next': f"ssh exit-node \"journalctl -u {unit} -n 60 --no-pager | grep -iE 'auth|error|fail' | tail -20\""}]
                 suspects.extend(found)
+
+        if states.get(probe_rules.SSH_TAG) == 'DOWN':
+            # The SSH emergency path (E4): the probe user does not get in or
+            # cannot forward. The findings exit_server:ssh-exit and
+            # exit_sync:ssh-exit name a dead container or a stuck user sync.
+            suspects.append({'rank': 40, 'protocol': probe_rules.SSH_TAG,
+                             'title': 'SSH-выход на exit не пускает пробного пользователя — контейнер ssh-exit, '
+                                      'его синхронизация пользователей, SSH_HOST_KEY / SSH_USER_SECRET в '
+                                      '/opt/vpn-bot/.env на entry против сервера, порт в файрволе exit',
+                             'next': "ssh exit-node 'docker ps -a --filter name=ssh-exit; "
+                                     "docker logs --tail 40 ssh-exit; "
+                                     "journalctl -u ssh-exit-sync -n 20 --no-pager'"})
 
         rows_cmd = ('docker exec vpn-bot python3 -c "import sqlite3; c=sqlite3.connect(\'/var/lib/vpn-bot/bot.db\'); '
                     '[print(r) for r in c.execute(\\"SELECT ts,target_domain,status,latency_ms,error_msg FROM outbound_health '

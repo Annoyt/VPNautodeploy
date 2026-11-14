@@ -313,9 +313,11 @@ services:
     # generator only when HY2T_PORT is set — see HealthChecker.PROBE_PORTS).
 
   # Second probe sidecar on mihomo (IMPROVEMENT_PLAN F, E3): sing-box has no
-  # XHTTP, so VLESS + XHTTP + Reality is probed through the client's own core.
+  # XHTTP, so VLESS + XHTTP + Reality is probed through the client's own core,
+  # and so is the SSH emergency path (E4, since 2026-11-15).
   # Config: scripts/gen_probe_config_mihomo.py > ./probe-proxy-mihomo/config.yaml.
-  # Only needed where XHR_SNI is set; probe-proxy-mihomo:18087.
+  # Needed where XHR_SNI or the SSH path (SSH_EXIT_HOST, SSH_USER_SECRET,
+  # SSH_HOST_KEY) is set; probe-proxy-mihomo:18087 (xhr), :18088 (ssh).
   probe-proxy-mihomo:
     image: metacubex/mihomo:v1.19.33
     container_name: probe-proxy-mihomo
