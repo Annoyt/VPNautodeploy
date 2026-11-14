@@ -267,7 +267,8 @@ def sh(cmd, timeout=15):
         return -1, "", str(e)
 out = {"errors": {}}
 svc = {}
-for u in ("hysteria", "hysteria-turbo", "hy2-traffic-collector", "hy2-traffic-collector-turbo"):
+for u in ("hysteria", "hysteria-turbo", "hy2-traffic-collector", "hy2-traffic-collector-turbo",
+          "hy2-auth-relay"):
     rc, o, e = sh("systemctl is-active " + u, 10)
     svc[u] = (o.strip().splitlines() or [e.strip() or "unknown"])[0]
 out["services"] = svc
@@ -391,6 +392,11 @@ def guard_acl_block(text):
     return out
 
 
+# The auth relay's URL in a hysteria config: http on loopback (AGENTS.md 56).
+GUARD_RELAY_URL = _gre.compile(
+    r"^[^#]*http://(127\.[0-9.]+|\[::1\]|localhost)(:[0-9]+)?/api/hy2t?/auth", _gre.M)
+
+
 def guard_hysteria(unit_text, read):
     """The ACL facts of one hysteria unit: its config path and the `acl`
     block (or, for a JSON config, the `acl` object), plus the rules file the
@@ -408,17 +414,21 @@ def guard_hysteria(unit_text, read):
     except Exception as e:
         return {"config": path, "error": str(e)[:200]}
     fpath = None
+    # whether hysteria asks the auth relay on loopback; only the answer
+    # leaves the host, never the URL
+    relay = bool(GUARD_RELAY_URL.search(text))
     if path.endswith(".json"):
         try:
             acl = _gjson.loads(text).get("acl")
         except Exception as e:
             return {"config": path, "error": "config json: " + str(e)[:160]}
-        info = {"config": path, "acl_json": acl if isinstance(acl, dict) or acl is None else str(acl)[:200]}
+        info = {"config": path, "auth_relay": relay,
+                "acl_json": acl if isinstance(acl, dict) or acl is None else str(acl)[:200]}
         if isinstance(acl, dict) and acl.get("file"):
             fpath = str(acl.get("file"))
     else:
         block = guard_acl_block(text)
-        info = {"config": path, "acl_lines": block[:400]}
+        info = {"config": path, "auth_relay": relay, "acl_lines": block[:400]}
         for line in block:
             m = _gre.match(r"\s+file\s*:\s*(\S+)", line)
             if m:
@@ -883,6 +893,11 @@ HY2_LOOPBACK_TARGETS = ('127.0.0.1', '::1')
 HY2_PRIVATE_TARGETS = ('10.0.0.1', '100.64.0.1', '169.254.169.254', '172.16.0.1',
                        '172.20.0.2', '192.168.0.1', 'fc00::1', 'fe80::1')
 GUARD_KEYS_XRAY = ('xray_api_exposed', 'xray_api_polling')
+# The hy2 auth relay (AGENTS.md §56): while it is down, a hysteria that asks
+# it refuses every new hy2 connection.
+RELAY_UNIT = 'hy2-auth-relay'
+RELAY_KEY = 'hy2_relay'
+UNIT_RUNNING = ('active', 'activating', 'reloading', 'deactivating')
 HY2_ACL_NEXT = ('AGENTS.md §52: в {config} блок acl: inline: с reject(127.0.0.0/8), reject(::1/128) '
                 'и частными сетями, затем systemctl restart {unit}')
 
@@ -1201,12 +1216,42 @@ def hysteria_uncovered(rules, targets) -> List[str]:
     return out
 
 
+def _relay_verdict(services: dict, hysteria: dict):
+    """The hy2 auth relay (AGENTS.md §56): a critical finding when a running
+    hysteria asks it and it is not active; ``'unread'`` when that cannot be
+    told (a hysteria config or a unit state not read); None otherwise."""
+    asking, unread = [], False
+    for unit in HY2_UNITS:
+        state = services.get(unit)
+        if state in ('inactive', 'failed'):
+            continue                           # a stopped hysteria asks nobody
+        asks = (hysteria.get(unit) or {}).get('auth_relay')
+        if state not in UNIT_RUNNING or not isinstance(asks, bool):
+            unread = True
+        elif asks:
+            asking.append(unit)
+    state = services.get(RELAY_UNIT)
+    if state == 'active':
+        return None
+    if asking and state in ('inactive', 'failed', 'activating'):
+        # activating: a Type=simple service is "active" once forked, so this
+        # is its restart loop
+        return {'key': RELAY_KEY, 'severity': 'critical', 'layer': 'c',
+                'title': (f'{RELAY_UNIT} на exit: {state} — {", ".join(asking)} '
+                          'спрашивают его: новые hy2-подключения отклоняются'),
+                'next': f"ssh exit-node 'systemctl status {RELAY_UNIT} --no-pager; "
+                        f"journalctl -u {RELAY_UNIT} -n 30 --no-pager'"}
+    if asking or unread:
+        return 'unread'
+    return None
+
+
 def exit_guard(c: dict) -> Tuple[List[dict], List[str]]:
     """(findings, unjudged keys) from layer C's ``guard`` facts. A key this
     run could not look at is ``unjudged``: the bot keeps its alert as it was
     instead of reading the missing finding as "fixed"."""
     guard = c.get('guard')
-    all_keys = [f'hy2_acl:{u}' for u in HY2_UNITS] + list(GUARD_KEYS_XRAY)
+    all_keys = [f'hy2_acl:{u}' for u in HY2_UNITS] + list(GUARD_KEYS_XRAY) + [RELAY_KEY]
     if not isinstance(guard, dict) or not guard:
         return [], all_keys                    # a collector without the guard
     if guard.get('error'):
@@ -1225,7 +1270,7 @@ def exit_guard(c: dict) -> Tuple[List[dict], List[str]]:
         state = services.get(unit)
         if state in ('inactive', 'failed'):
             continue                           # a stopped hysteria serves nobody
-        if state not in ('active', 'activating', 'reloading', 'deactivating'):
+        if state not in UNIT_RUNNING:
             unjudged.append(f'hy2_acl:{unit}')
             blind.append(f'{unit}: состояние юнита {str(state)[:60]!r}')
             continue
@@ -1250,6 +1295,12 @@ def exit_guard(c: dict) -> Tuple[List[dict], List[str]]:
             findings.append({'key': f'hy2_acl:{unit}', 'severity': 'warn', 'layer': 'c',
                              'title': f"{unit}: ACL не закрывает частные сети ({', '.join(priv)})",
                              'next': nxt})
+    relay = _relay_verdict(services, guard.get('hysteria') or {})
+    if relay == 'unread':
+        unjudged.append(RELAY_KEY)
+        blind.append(f'{RELAY_UNIT}: не понять, спрашивает ли его hysteria и жив ли он')
+    elif relay:
+        findings.append(relay)
     view = guard.get('xray')
     version = parse_xray_version(guard.get('xray_version'))
     if not isinstance(view, dict) or version is None:

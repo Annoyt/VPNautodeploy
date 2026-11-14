@@ -1,0 +1,56 @@
+# hy2 auth relay on EXIT (IMPROVEMENT_PLAN F, A6; AGENTS.md §56,
+# docs/runbooks/hy2_auth_relay.md). Both hysteria instances ask it on
+# 127.0.0.1:9979 instead of the bot; it asks the bot over the pinned hop and,
+# while the bot does not answer, answers from what the bot told it in the last
+# 15 minutes. scripts/install_hy2_auth_relay.sh installs it: a root-owned copy
+# of the script in /usr/local/lib/nekovpn-hy2-relay, never the rsync target
+# (AGENTS.md §36). Re-run the installer after the script changes.
+[Unit]
+Description=hy2 auth relay: hysteria -> bot over the pinned hop, remembered answers while the bot is down
+After=network-online.target
+Wants=network-online.target
+Before=hysteria.service hysteria-turbo.service
+# While it is down, hysteria refuses every new hy2 connection: never stop
+# restarting it.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# BOT_URL, BOT_CA_FILE, DPI_REPORT_TOKEN: the exit reporter's file. The second
+# file holds the relay's own knobs (HY2_RELAY_LISTEN, HY2_RELAY_MEMORY_S), if
+# any. systemd reads both as data; no shell sources them.
+EnvironmentFile=-/etc/exit-dpi.env
+EnvironmentFile=-/etc/hy2-auth-relay.env
+ExecStart=/usr/bin/python3 -I /usr/local/lib/nekovpn-hy2-relay/hy2_auth_relay.py
+Restart=always
+RestartSec=2
+
+# It needs no privilege: a loopback port above 1024, outbound TCP to entry,
+# the pin (0644). Nothing on disk is written.
+DynamicUser=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+UMask=0077
+MemoryMax=64M
+TasksMax=256
+CPUQuota=50%
+
+[Install]
+WantedBy=multi-user.target
