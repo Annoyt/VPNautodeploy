@@ -158,6 +158,9 @@ class TestMemory:
         clock.tick(0.1)
         m.denied('hy2', H, clock())                     # any deny clears the old ones
         assert set(m._entries) == {('hy2', H), ('hy2t', H)}
+        clock.tick(relay.DENY_KEEP_S)
+        m.prune()                                       # ... and so does the prune
+        assert m._entries == {}
 
     def test_a_deny_outlasts_the_answers_and_lists_it_may_contradict(self):
         assert relay.DENY_KEEP_S > max(relay.ANSWER_TIMEOUT_S, relay.KEYS_TIMEOUT_S)
@@ -232,6 +235,8 @@ class TestMemory:
 
     def test_prune_and_counts(self):
         m, clock = self.mem()
+        m.denied('hy2', relay.key_hash('stranger'), clock())
+        assert m.counts() == {'hy2': 0, 'hy2t': 0}      # a deny lets nobody in
         m.allowed('hy2', H, 'u@x', clock())
         clock.tick(600)
         m.allowed('hy2', H2, 'v@x', clock())
@@ -519,12 +524,13 @@ class TestUpstream:
         up.ask('/api/hy2/auth', body())
         assert srv.hits == ['/bot/api/hy2/auth']
 
-    @pytest.mark.parametrize('mode', ['500', 'junk', 'big'])
-    def test_what_is_no_answer(self, tmp_path, bot_factory, mode):
+    @pytest.mark.parametrize('mode, why', [('500', 'HTTP 500'), ('junk', 'HTTP 200'),
+                                           ('big', 'TooBig: more than 4096 bytes')])
+    def test_what_is_no_answer(self, tmp_path, bot_factory, mode, why):
         srv = bot_factory(mode)
         up = self.up(tmp_path, srv.server_address[1])
         assert up.ask('/api/hy2/auth', body()) is None
-        assert up.last_error and up.failed_at is not None
+        assert why in up.last_error and up.failed_at is not None
         assert up.skip_until == float('-inf')          # the bot is there: ask again
 
     def test_another_certificate_is_no_answer(self, tmp_path, bot_factory):

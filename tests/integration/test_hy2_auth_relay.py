@@ -165,12 +165,25 @@ class TestKeyList:
         assert resp.headers['Cache-Control'] == 'no-store'
 
     @pytest.mark.asyncio
-    async def test_a_uuid_two_rows_share_is_left_to_the_live_callback(self, tmp_path):
-        srv, _db = _srv(tmp_path, [('paid', UUID, 'a@x', None), ('banned', UUID, 'b@x', None),
-                                   ('paid', PROBE_UUID, 'c@x', None), ('paid', '', 'e@x', None)])
+    async def test_an_empty_uuid_is_no_key(self, tmp_path):
+        srv, _db = _srv(tmp_path, [('paid', PROBE_UUID, 'c@x', None), ('paid', '', 'e@x', None)])
         _status, keys, _resp = await _keys(srv)
         assert keys['hy2'] == {hy2_keys.key_hash(PROBE_UUID): 'c@x'}
         assert keys['hy2t'] == {hy2_keys.key_hash(PROBE_UUID): 'c@x'}
+
+    def test_a_uuid_two_rows_share_is_left_to_the_live_callback(self, tmp_path):
+        # users.uuid is UNIQUE in today's schema (a second save replaces the
+        # row); a bot.db from before it, or one edited by hand, may not be
+        import sqlite3
+        path = tmp_path / 'old.db'
+        with sqlite3.connect(path) as conn:
+            conn.execute('CREATE TABLE users (chat_id TEXT PRIMARY KEY, uuid TEXT, email TEXT, '
+                         'status TEXT, subscription_expiry TEXT)')
+            conn.executemany('INSERT INTO users VALUES (?, ?, ?, ?, ?)', [
+                ('1', UUID, 'a@x', 'paid', None), ('2', UUID, 'b@x', 'banned', None),
+                ('3', PROBE_UUID, 'c@x', 'paid', None), ('4', None, 'd@x', 'paid', None)])
+        db = SimpleNamespace(_connect=lambda: sqlite3.connect(path))
+        assert hy2_keys.read_rows(db) == [(PROBE_UUID, '3', 'c@x', 'paid', None)]
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize('token', [None, '', 'wrong', TOKEN + 'x', 'тест'])
