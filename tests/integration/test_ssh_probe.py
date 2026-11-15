@@ -13,9 +13,10 @@ Now:
   the listener writes nothing, so the rollout pages nothing; a listener
   whose ssh login fails writes DARK rows (mihomo answers a CONNECT before it
   dials), so a dead path pages;
-* the readers: the pager pages it under its own key and titles and never
-  counts it in "every protocol dark at once"; DPIMonitor never measures or
-  demotes it; /protocols and the healthcheck script show it.
+* the readers: the pager pages it under its own key and titles, as a warn
+  (the dashboard unless ALERT_TG_MIN_SEVERITY=warn), and never counts it in
+  "every protocol dark at once"; DPIMonitor never measures or demotes it;
+  /protocols and the healthcheck script show it.
 
 Level 2: real sqlite (Database in tmp_path), the real checks; the prober runs
 against local stand-ins for the sidecar on 127.0.0.1. The stand at the bottom
@@ -42,7 +43,8 @@ from bot.models.user import User
 from bot.services import probe_rules as pr
 from bot.services import ssh_exit
 from bot.services.agent_client import _detect_skill_domains
-from bot.services.alert_manager import _protocol_agent_prompt, build_default_checks
+from bot.services.alert_manager import (AlertManager, _protocol_agent_prompt,
+                                        build_default_checks)
 from bot.services.dpi_monitor import DPIMonitor
 from bot.services.health_checker import HealthChecker
 from bot.services.subscription import SubscriptionService
@@ -408,7 +410,7 @@ class TestPager:
         alerts, judged = pager_run(db)
         assert list(alerts) == ['protocol_down:ssh']
         alert = alerts['protocol_down:ssh']
-        assert alert.severity == 'critical' and alert.min_cycles == 2
+        assert alert.severity == 'warn' and alert.min_cycles == 2
         assert alert.title.startswith('Аварийный SSH-выход не пускает (лежит ')
         assert 'контейнер ssh-exit' in alert.detail
         assert 'exit_server:ssh-exit, exit_sync:ssh-exit' in alert.detail
@@ -481,6 +483,69 @@ class TestPager:
             seed_window(db, tag, 0, alive_fail=False)
         seed_window(db, 'ssh', 10)
         assert list(pager(db)) == ['protocol_down:all']
+
+
+class TestWhereTheAlertGoes:
+    """A dead SSH path is a warn (owner, 2026-11-15), like the healthcheck's
+    exit_server:ssh-exit: below prod's floor (ALERT_TG_MIN_SEVERITY unset =
+    critical) it stays on the dashboard. A real AlertManager tick on the
+    pager check; the agent turn is captured, not run."""
+
+    @staticmethod
+    def _manager(db, floor):
+        cfg = Mock()
+        cfg.DB_PATH = db.db_path
+        cfg.XUI_DB_PATH = ''
+        cfg.TOPIC_AI = 55
+        cfg.FORUM_GROUP_ID = -100123
+        cfg.SUPER_ADMIN_ID = '1652899'
+        cfg.ALERT_TG_MIN_SEVERITY = floor
+        bot = Mock()
+        mgr = AlertManager(bot, cfg, db=db)
+        mgr.register(next(c for c in build_default_checks(cfg, Mock())
+                          if c.__name__ == 'check_protocol_probe_down'))
+        turns = []
+        mgr._kick_protocol_batch = turns.append
+        return mgr, bot, turns
+
+    @staticmethod
+    def _dark_ssh(db):
+        for tag in CASCADE:
+            seed_window(db, tag, 10)
+        seed_window(db, 'ssh', 0, alive_fail=False)
+
+    def test_below_the_default_floor_it_stays_on_the_dashboard(self, db):
+        self._dark_ssh(db)
+        mgr, bot, turns = self._manager(db, 'critical')
+        mgr.run_once()
+        mgr.run_once()                                 # min_cycles=2
+        bot.send_message.assert_not_called()           # no topic, no PM
+        with db._connect() as conn:
+            rows = [tuple(r) for r in conn.execute(
+                "SELECT key, severity FROM alert_history").fetchall()]
+        assert rows == [('protocol_down:ssh', 'warn')]
+        [[(alert, _row_id, post_to_topic)]] = turns    # diagnosed, not posted
+        assert alert.key == 'protocol_down:ssh' and post_to_topic is False
+
+    def test_with_the_floor_at_warn_it_reaches_the_topic(self, db):
+        self._dark_ssh(db)
+        mgr, bot, turns = self._manager(db, 'warn')
+        mgr.run_once()
+        mgr.run_once()
+        bot.send_message.assert_called_once()
+        kw = bot.send_message.call_args.kwargs
+        assert (kw['chat_id'], kw['message_thread_id']) == (-100123, 55)
+        assert kw['text'].startswith('⚠️ <b>Аварийный SSH-выход не пускает (лежит ')
+        [[(_alert, _row_id, post_to_topic)]] = turns
+        assert post_to_topic is True
+
+    def test_a_failed_topic_post_falls_back_to_no_pm(self, db):
+        self._dark_ssh(db)
+        mgr, bot, _turns = self._manager(db, 'warn')
+        bot.send_message.return_value = None           # Telegram refused it
+        mgr.run_once()
+        mgr.run_once()
+        assert [c.kwargs['chat_id'] for c in bot.send_message.call_args_list] == [-100123]
 
 
 # ------------------------------------------------------------ DPIMonitor -----

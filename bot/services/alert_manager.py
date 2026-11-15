@@ -1437,9 +1437,13 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
                 ))
                 continue
             if tag == _pr.SSH_TAG:
+                # warn, not critical (owner, 2026-11-15): the emergency path
+                # only, like the healthcheck's exit_server:ssh-exit. Below
+                # ALERT_TG_MIN_SEVERITY (critical by default) it stays on the
+                # dashboard: no chat, no PM fallback, the diagnosis not posted.
                 alerts.append(Alert(
                     key=f'protocol_down:{tag}',
-                    severity='critical',
+                    severity='warn',
                     min_cycles=2,
                     title=f'Аварийный SSH-выход не пускает (лежит {how_long})',
                     detail=(
