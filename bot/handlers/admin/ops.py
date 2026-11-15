@@ -23,6 +23,7 @@ from typing import Optional
 
 from bot.config.constants import BYTES_PER_GB
 from .base import AdminHandlerBase
+from bot.utils.user_label import user_label
 from bot.services import probe_rules
 
 logger = logging.getLogger(__name__)
@@ -1824,8 +1825,7 @@ class AdminOpsMixin(AdminHandlerBase):
             lines.append("")
         for email in emails:
             user = users_by_email.get(email)
-            uname = (f"@{user.username}" if user and user.username
-                     else (f"user_{user.chat_id}" if user else email[:30]))
+            uname = user_label(user) if user else email[:30]
             act = activity.get(email, {})
             seen = last_online_min.get(email)
             seen_str = (' (только что)' if seen == 0
@@ -1930,10 +1930,8 @@ class AdminOpsMixin(AdminHandlerBase):
         lines = [f"🔍 <b>Найдено {len(rows)} (топ 20)</b>"]
         for r in rows:
             cid, uname, status, email, uuid, quota, contact = r
-            # ext_* users have no username; the contact address is the
-            # only human-recognizable identifier.
-            uname_part = (f"@{uname}" if uname
-                          else (f"✉️ {contact}" if contact else "—"))
+            uname_part = user_label(username=uname, chat_id=cid,
+                                    contact_email=contact, fallback="—")
             email_short = email or "—"
             uuid_short = (uuid[:8] + "…") if uuid else "—"
             lines.append(
@@ -2110,7 +2108,7 @@ class AdminOpsMixin(AdminHandlerBase):
         except Exception:
             pass
 
-        uname = f"@{target.username}" if target.username else f"user_{target.chat_id}"
+        uname = user_label(target)
         self.bot.send_message(
             chat_id=chat_id,
             text=f"⚙️ Квота {uname}: <b>{old}</b> → <b>{gb}</b> ГБ{xui_msg}",
@@ -2198,7 +2196,7 @@ class AdminOpsMixin(AdminHandlerBase):
         except Exception:
             pass
 
-        uname = f"@{target.username}" if target.username else f"user_{target.chat_id}"
+        uname = user_label(target)
         self.bot.send_message(
             chat_id=chat_id,
             text=f"📅 Подписка {uname} до <b>{date_str}</b>{subs_msg}{xui_msg}",

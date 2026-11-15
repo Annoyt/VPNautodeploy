@@ -28,6 +28,7 @@ from bot.services.bot_token import BotTokenChanger
 from bot.utils.admin_token import verify_admin_token
 from bot.utils.rate_limit import check_admin_rate_limit, get_admin_rate_limit_remaining
 from bot.utils.prometheus import metrics, set_gauge_users, set_system_gauge
+from bot.utils.user_label import user_label
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +74,13 @@ _INTERNAL_NETS = tuple(ipaddress.ip_network(n) for n in (
 # Settings that hold the public address of one of our nodes. A value that
 # is a host name rather than an IP is skipped, never resolved.
 _OWN_NODE_SETTINGS = ('ENTRY_NODE_IP', 'EXIT_NODE_IP', 'HY2_HOST', 'FALLBACK_NODE_HOST')
+
+
+def _contact_email(user) -> Optional[str]:
+    """The user's contact address, which the dashboard shows for a user
+    without a Telegram username (``userLabel`` in app.js), or None."""
+    value = getattr(user, 'contact_email', None)
+    return value if isinstance(value, str) else None
 
 
 def _deployed_version() -> str:
@@ -2386,6 +2394,7 @@ class WebAppServer:
         return web.json_response({
             'chat_id': user.chat_id,
             'username': user.username,
+            'contact_email': _contact_email(user),
             'status': user.status,
             'previous_state': getattr(user, 'previous_state', None),
             'lang': user.lang,
@@ -2750,6 +2759,7 @@ class WebAppServer:
                 entry['bot_user'] = {
                     'chat_id': bu.chat_id,
                     'username': bu.username,
+                    'contact_email': _contact_email(bu),
                     'status': bu.status,
                     'uuid_match': (bu.uuid == c.get('id')),
                 }
@@ -2761,6 +2771,7 @@ class WebAppServer:
             {
                 'chat_id': u.chat_id,
                 'username': u.username,
+                'contact_email': _contact_email(u),
                 'status': u.status,
                 'uuid': u.uuid,
                 'email': u.email,
@@ -3142,7 +3153,8 @@ class WebAppServer:
                 # subscriptions has no real created_at column on prod.
                 rows = conn.execute(
                     "SELECT s.id, s.chat_id, s.plan_type, s.started_at, s.expires_at, "
-                    "s.is_active, s.started_at, u.username, u.status "
+                    "s.is_active, s.started_at, u.username, u.status, "
+                    "u.contact_email "
                     "FROM subscriptions s LEFT JOIN users u ON u.chat_id = s.chat_id "
                     "ORDER BY s.id DESC LIMIT 1000"
                 ).fetchall()
@@ -3156,13 +3168,15 @@ class WebAppServer:
         seen_chat_ids: set = set()
 
         for r in rows:
-            sid, chat_id, plan, start, end, is_active, created_at, uname, ustatus = r
+            (sid, chat_id, plan, start, end, is_active, created_at, uname,
+             ustatus, contact) = r
             seen_chat_ids.add(str(chat_id))
             end_dt = _parse_dt(end)
             entry = {
                 'sub_id': sid,
                 'chat_id': chat_id,
                 'username': uname,
+                'contact_email': contact,
                 'user_status': ustatus,
                 'plan': plan or 'demo',
                 'start': start,
@@ -3188,6 +3202,7 @@ class WebAppServer:
             {
                 'chat_id': u.chat_id,
                 'username': u.username,
+                'contact_email': _contact_email(u),
                 'status': u.status,
                 'subscription_expiry': getattr(u, 'subscription_expiry', None),
             }
@@ -4402,7 +4417,7 @@ class WebAppServer:
                     f"SELECT ufr.id, ufr.ts, ufr.chat_id, ufr.country, "
                     f"       ufr.asn, ufr.last_sub_fetch_ts, "
                     f"       ufr.last_traffic_ts, ufr.acked_at, ufr.ack_note, "
-                    f"       u.username, u.status "
+                    f"       u.username, u.status, u.contact_email "
                     f"FROM user_failure_reports ufr "
                     f"LEFT JOIN users u ON u.chat_id = ufr.chat_id "
                     f"WHERE {sql_where} "
@@ -4417,7 +4432,7 @@ class WebAppServer:
                 'country': r[3], 'asn': r[4],
                 'last_sub_fetch_ts': r[5], 'last_traffic_ts': r[6],
                 'acked_at': r[7], 'ack_note': r[8],
-                'username': r[9], 'status': r[10],
+                'username': r[9], 'status': r[10], 'contact_email': r[11],
             }
             for r in rows_raw
         ]
@@ -4488,7 +4503,7 @@ class WebAppServer:
                 reports = conn.execute(
                     "SELECT ufr.id, ufr.ts, ufr.country, ufr.asn, ufr.city, "
                     "       ufr.lat, ufr.lon, ufr.acked_at, "
-                    "       u.username, u.chat_id "
+                    "       u.username, u.chat_id, u.contact_email "
                     "FROM user_failure_reports ufr "
                     "LEFT JOIN users u ON u.chat_id = ufr.chat_id "
                     "WHERE ufr.ts >= ? "
@@ -4513,7 +4528,8 @@ class WebAppServer:
                 ).fetchall()
                 users = conn.execute(
                     "SELECT chat_id, username, last_country, last_asn, "
-                    "       last_city, last_lat, last_lon, status "
+                    "       last_city, last_lat, last_lon, status, "
+                    "       contact_email "
                     "FROM users "
                     "WHERE status IN ('demo', 'paid', 'support_topic') "
                     "  AND last_lat IS NOT NULL AND last_lon IS NOT NULL",
@@ -4530,6 +4546,7 @@ class WebAppServer:
                     'lat': r[5], 'lon': r[6],
                     'acked': r[7] is not None,
                     'username': r[8], 'chat_id': r[9],
+                    'contact_email': r[10],
                 } for r in reports
             ],
             'fetches': [
@@ -4543,6 +4560,7 @@ class WebAppServer:
                     'chat_id': r[0], 'username': r[1],
                     'country': r[2], 'asn': r[3], 'city': r[4],
                     'lat': r[5], 'lon': r[6], 'status': r[7],
+                    'contact_email': r[8],
                 } for r in users
             ],
         })
@@ -4781,6 +4799,7 @@ class WebAppServer:
         await self._broadcast_ws('user_update', {
             'chat_id': updated_user.chat_id,
             'username': updated_user.username,
+            'contact_email': _contact_email(updated_user),
             'status': updated_user.status,
             'action': action,
         })
@@ -4791,6 +4810,7 @@ class WebAppServer:
             'user': {
                 'chat_id': updated_user.chat_id,
                 'username': updated_user.username,
+                'contact_email': _contact_email(updated_user),
                 'status': updated_user.status,
             }
         })
@@ -4967,7 +4987,7 @@ class WebAppServer:
 
         if not confirm:
             sample = [
-                (u.username or f"user_{u.chat_id}") for u in recipients[:10]
+                user_label(u, html=False) for u in recipients[:10]
             ]
             return web.json_response({
                 'preview': True,

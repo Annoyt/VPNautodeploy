@@ -40,6 +40,7 @@ from datetime import datetime, timedelta
 
 from bot.config.constants import BYTES_PER_GB
 from bot.handlers.base import BaseHandler
+from bot.utils.user_label import user_label
 
 logger = logging.getLogger(__name__)
 
@@ -341,9 +342,9 @@ class PaymentHandler(BaseHandler):
         # Ping the admin so they can see the revenue live. Goes to the
         # payments topic; the personal chat is only a fallback (house
         # rule: no PM while the forum group works).
-        uname = user.username or str(chat_id)
+        who = user_label(user, fallback=f"@{chat_id}", html=False)
         revenue_text = (
-            f"💰 @{uname} продлил подписку на {months} мес "
+            f"💰 {who} продлил подписку на {months} мес "
             f"за {total_stars} ⭐ (до {new_dt.strftime('%Y-%m-%d')})"
         )
         sent = False

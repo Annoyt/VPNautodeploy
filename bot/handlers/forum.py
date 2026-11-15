@@ -5,6 +5,7 @@ import re
 from typing import Optional
 
 from bot.handlers.base import BaseHandler
+from bot.utils.user_label import user_label
 
 logger = logging.getLogger(__name__)
 
@@ -272,7 +273,7 @@ class ForumHandler(BaseHandler):
             history = self.db.get_ticket_messages(topic_id) or []
 
             ticket_id = f"T{topic_id}"
-            uname = f"@{user.username}" if user.username else f"user_{user.chat_id}"
+            uname = user_label(user)
             log_lines = [
                 f"📄 <b>Ticket Log: #{ticket_id}</b>",
                 f"👤 User: <code>{user.chat_id}</code> ({uname})\n",
@@ -339,7 +340,7 @@ class ForumHandler(BaseHandler):
             # distinct in the topic list (cheap UX win — closed forum
             # topics on mobile look the same as open ones otherwise).
             try:
-                uname = f"@{user.username}" if user.username else f"user_{user.chat_id}"
+                uname = user_label(user, html=False)
                 self.bot.edit_forum_topic(
                     chat_id=self.config.FORUM_GROUP_ID,
                     message_thread_id=topic_id,

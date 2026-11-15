@@ -3,6 +3,7 @@
 from bot.config import Settings
 from bot.config.constants import BYTES_PER_GB
 from bot.models import User
+from bot.utils.user_label import user_label
 
 
 def build_admin_request_keyboard(user: User) -> dict:
@@ -53,7 +54,7 @@ def build_rejected_user_keyboard(user: User) -> dict:
 
 def format_new_request_text(user: User) -> str:
     """Format new request notification text."""
-    username_display = f"@{user.username}" if user.username else "No username"
+    username_display = user_label(user, fallback="No username")
     return (
         f"🆕 <b>New Demo Request</b>\n\n"
         f"👤 User: {username_display}\n"
@@ -65,7 +66,7 @@ def format_new_request_text(user: User) -> str:
 
 def format_support_ticket_text(user: User, message: str) -> str:
     """Format support ticket notification text."""
-    username_display = f"@{user.username}" if user.username else "No username"
+    username_display = user_label(user, fallback="No username")
     return (
         f"🆘 <b>Support Ticket</b>\n\n"
         f"👤 User: {username_display}\n"
@@ -76,7 +77,7 @@ def format_support_ticket_text(user: User, message: str) -> str:
 
 def format_pm_support_text(user: User, message: str) -> str:
     """Format support request for PM mode."""
-    username_display = f"@{user.username}" if user.username else "No username"
+    username_display = user_label(user, fallback="No username")
     return (
         f"🆘 <b>Support Request</b>\n\n"
         f"👤 User: {username_display}\n"
@@ -88,7 +89,7 @@ def format_pm_support_text(user: User, message: str) -> str:
 
 def format_payment_issue_text(user: User, issue: str) -> str:
     """Format payment issue notification text."""
-    username_display = f"@{user.username}" if user.username else "No username"
+    username_display = user_label(user, fallback="No username")
     return (
         f"💳 <b>Payment Issue</b>\n\n"
         f"👤 User: {username_display}\n"

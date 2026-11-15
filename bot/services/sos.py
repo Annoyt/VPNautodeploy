@@ -877,9 +877,11 @@ def agent_prompt(user, report_id, source: str, fact_lines: List[str],
     billing word for subscription."""
     from bot.services.alert_manager import PROTOCOL_HEALTHCHECK_CMD
     tier = 'платный' if (getattr(user, 'status', '') or '') in PAID_STATUSES else 'демо'
-    uname = getattr(user, 'username', None) or getattr(user, 'chat_id', '?')
+    from bot.utils.user_label import user_label
+    who = user_label(user, fallback=f"@{getattr(user, 'chat_id', '?')}",
+                     html=False)
     return (
-        f"SOS ОТ ПОЛЬЗОВАТЕЛЯ ({source}): «@{uname}», chat_id "
+        f"SOS ОТ ПОЛЬЗОВАТЕЛЯ ({source}): «{who}», chat_id "
         f"{getattr(user, 'chat_id', '?')}, email в панели "
         f"{getattr(user, 'email', None) or '—'}, тир: {tier}, отчёт №{report_id or '?'}.\n"
         + '\n'.join(_plain(x) for x in fact_lines) + '\n'
@@ -993,9 +995,11 @@ class SosService:
                 return 'off', None
             from bot.services.alert_manager import Alert, PROTOCOL_AGENT_TIMEOUT_S
             agent = _agent_for(self.bot, self.config, self.db)
-            uname = getattr(user, 'username', None) or getattr(user, 'chat_id', '?')
+            from bot.utils.user_label import user_label
+            who = user_label(user, fallback=f"@{getattr(user, 'chat_id', '?')}",
+                             html=False)
             alert = Alert(key=f"sos:{getattr(user, 'chat_id', '?')}", severity='warn',
-                          title=f"SOS от @{uname}", min_cycles=1)
+                          title=f"SOS от {who}", min_cycles=1)
             gate = agent.gate(alert)
             t = agent._spawn_agent_worker(
                 alert, None,
@@ -1013,10 +1017,11 @@ class SosService:
 
     def _report_lines(self, user, report_id, source: str, fact_lines, order,
                       net: Optional[dict]) -> List[str]:
-        uname = getattr(user, 'username', None) or getattr(user, 'chat_id', '?')
+        from bot.utils.user_label import user_label
+        who = user_label(user, fallback=f"@{getattr(user, 'chat_id', '?')}")
         lines = [
             f"🆘 <b>SOS #{report_id or '?'}</b> · {html.escape(source)}",
-            f"User: <code>@{html.escape(str(uname))}</code> "
+            f"User: <code>{who}</code> "
             f"({html.escape(str(getattr(user, 'chat_id', '?')))}) · "
             f"{html.escape(str(getattr(user, 'status', '?')))}",
             *fact_lines,

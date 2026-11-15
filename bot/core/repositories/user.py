@@ -148,7 +148,9 @@ class UserRepository(BaseRepository):
         return affected > 0
     
     def search(self, query: str) -> List[User]:
-        """Search users by username or chat_id (case-insensitive).
+        """Search users by username, chat_id or contact email
+        (case-insensitive). The contact email is how the dashboard names a
+        user added by email, so it is what an admin types to find one.
         
         Args:
             query: Search string (partial match)
@@ -165,8 +167,9 @@ class UserRepository(BaseRepository):
             '''SELECT * FROM users 
                WHERE username LIKE ? COLLATE NOCASE 
                   OR chat_id LIKE ?
+                  OR contact_email LIKE ? COLLATE NOCASE
                ORDER BY created_at DESC''',
-            (pattern, pattern)
+            (pattern, pattern, pattern)
         )
         return [self._row_to_user(row) for row in rows]
     
