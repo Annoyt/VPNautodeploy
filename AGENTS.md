@@ -98,10 +98,11 @@ All user-facing callbacks enforce **IDOR protection** — users can only act on 
 
 **Prod's users table is older than the repo's schema** (read-only check, 2026-11-15, 160 rows):
 - its only unique index is the chat_id primary key: uuid and email are not UNIQUE there, so a shared uuid is stored twice rather than deleting anyone;
+- no two rows share one today: 87 rows hold a uuid and 87 an email, none twice, none in another case or with spaces (a second read-only count, same day);
 - it has `traffic_up` / `traffic_down` (`DEFAULT 0`), which the repo's `CREATE TABLE` lacks, and no `xui_synced`;
 - it has no NOT NULL column and no `''` uuid or email.
 
-Code that needs one row per uuid must not count on the constraint: prod does not have it.
+Code that needs one row per uuid must not count on the constraint: prod does not have it. A `CREATE UNIQUE INDEX` on either column would succeed there today. Adding one is a schema change on prod and the owner's call, and only with the 2026-11-15 `save()` deployed: under the old REPLACE the index would bring the silent deletion to prod.
 
 Now:
 - **A clash is refused where the schema has the constraint.** `save()` returns False and writes nothing. The log names the column and the user who holds it, never the value: the uuid is the user's key. To move a key to another user, clear it on the old row first. No code does that today.
