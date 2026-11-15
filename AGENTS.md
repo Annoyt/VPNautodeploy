@@ -90,6 +90,21 @@ DemoRequestHandler._demo_request_times.clear()
 
 All user-facing callbacks enforce **IDOR protection** — users can only act on their own `chat_id` unless admin.
 
+### 5. Saving a user writes that user's row and nothing else (2026-11-15)
+
+`UserRepository.save()` (also `db.save_user` and the async adapter) updates the user's row in place, or inserts it when there is none. Until 2026-11-15 it was an `INSERT OR REPLACE`, which had two effects:
+- `users.uuid` and `users.email` are UNIQUE, so a save carrying a uuid or panel email that another row held deleted that row silently, with its status, paid-until date and contact email. The panel client stayed, orphaned.
+- Every save reset the columns it does not write to their defaults: `traffic_up` / `traffic_down` (the traffic mirror's; prod's older table has them, the repo's schema does not) and `xui_synced`.
+
+Now:
+- **A clash is refused.** `save()` returns False and writes nothing. The log names the column and the user who holds it, never the value: the uuid is the user's key. To move a key to another user, clear it on the old row first. No code does that today.
+- **`''` is stored as NULL** for uuid and email. Two empty strings clash; two NULLs do not.
+- **A user without a chat_id (None or `''`) is refused.** Such a row belongs to nobody (the §27 zombie), and with a NULL every save added another.
+- **A NULL for a NOT NULL column with a default** is written as that default, as REPLACE did. The repo's schema has no such column; prod's older table may.
+- **Columns `save()` does not list keep their values.** `SAVE_COLUMNS` in `bot/core/repositories/user.py` is the one list, each value read from the user's attribute of the same name; a column missing from it is never written by a save.
+
+Tests: `tests/integration/test_user_save.py` (real sqlite, plus an older table built by hand).
+
 ---
 
 ## Testing Guidelines
@@ -136,6 +151,7 @@ Files with this mark: `test_database.py`, `test_security.py`, `test_state_machin
 | `bot/services/xui_service.py` | `tests/integration/test_xui_service.py`, `tests/integration/test_code_review_fixes.py` |
 | `bot/services/billing.py` | `tests/unit/test_billing.py`, `tests/integration/test_limit_ip.py`, `tests/integration/test_mykey_lost_key.py` (the key re-add uses its values) |
 | `bot/core/database.py` schema | `tests/integration/test_migration.py`, `tests/unit/test_database.py` |
+| `bot/core/repositories/user.py` `save()` / `SAVE_COLUMNS` | `tests/integration/test_user_save.py`, `tests/unit/test_repositories_user.py` |
 | `bot/models/vpn_node.py` | All cluster tests using `VPNNode` |
 | `bot/services/hop_tls.py`, `scripts/caddy_entry_hop.py`, `systemd/hysteria-entry-hop.conf` | `tests/integration/test_hop_tls.py`, `tests/integration/test_hop_tls_stand.py`, `docs/runbooks/entry_hop_tls.md` (its blocks run in the tests) |
 
