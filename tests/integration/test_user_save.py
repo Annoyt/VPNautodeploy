@@ -6,9 +6,11 @@ row, and every save reset the columns it does not write to their
 defaults. Now it updates the user's own row in place, or inserts it, and
 refuses a clash.
 
-Real sqlite: Database() builds the schema the bot runs on. An older
-table is built by hand where a case needs one (prod's users table is
-older than the repo's schema and has columns the repo does not create).
+Real sqlite. Database() builds the repo's schema: tests and any fresh
+database. Prod's users table is older (read-only check, 2026-11-15): no
+UNIQUE on uuid or email, traffic_up / traffic_down with DEFAULT 0, no
+NOT NULL column. TestProdsTable runs on that exact shape, and other
+older shapes are built by hand where a case needs one.
 """
 import asyncio
 import logging
@@ -411,3 +413,77 @@ class TestOlderSchema:
 
         assert repo.save(bob(uuid=UUID_A, lang=None)) is False
         assert rows(path) == before
+
+
+# Prod's users table as read on 2026-11-15 (read-only, schema only): the
+# chat_id primary key is its only unique index.
+PROD_USERS_TABLE = '''
+    CREATE TABLE users (
+        chat_id TEXT PRIMARY KEY, username TEXT, uuid TEXT, email TEXT,
+        status TEXT DEFAULT 'new', lang TEXT DEFAULT 'ru', platform TEXT,
+        support_topic_id INTEGER, created_at TEXT,
+        subscription_expiry TEXT, limit_ip INTEGER DEFAULT 1,
+        quota_gb REAL DEFAULT 5.0, last_traffic_update TEXT,
+        traffic_up REAL DEFAULT 0, traffic_down REAL DEFAULT 0,
+        previous_state TEXT, reject_count INTEGER DEFAULT 0,
+        next_protocol_idx INTEGER DEFAULT 0, last_country TEXT, last_asn TEXT,
+        last_city TEXT, last_lat REAL, last_lon REAL, contact_email TEXT)
+'''
+
+
+class TestProdsTable:
+    """What the change means on prod's table: the mirror's traffic
+    survives a save, and a shared uuid is stored as before, since there is
+    no constraint to refuse it."""
+
+    @pytest.fixture
+    def path(self, tmp_path):
+        path = str(tmp_path / 'prod.db')
+        sql(path, PROD_USERS_TABLE)
+        sql(path, 'CREATE INDEX idx_users_email ON users(email)')
+        return path
+
+    def test_the_mirrors_traffic_survives_a_save(self, path):
+        repo = UserRepository(path)
+        assert repo.save(alice())
+        sql(path, "UPDATE users SET traffic_up = 1.5, traffic_down = 2.5 "
+                  "WHERE chat_id = '100'")
+
+        user = repo.get_by_id('100')
+        user.status = 'demo'
+        assert repo.save(user)
+
+        stored = rows(path)['100']
+        assert (stored['status'], stored['traffic_up'], stored['traffic_down']) == (
+            'demo', 1.5, 2.5)
+
+    def test_the_old_statement_zeroed_it(self, path):
+        """What every save did on prod until now."""
+        assert UserRepository(path).save(alice())
+        sql(path, "UPDATE users SET traffic_up = 1.5 WHERE chat_id = '100'")
+
+        sql(path, "INSERT OR REPLACE INTO users (chat_id, username) VALUES ('100', 'alice')")
+
+        assert rows(path)['100']['traffic_up'] == 0
+
+    def test_a_shared_uuid_is_stored_as_before(self, path):
+        repo = UserRepository(path)
+        assert repo.save(alice())
+
+        assert repo.save(bob(uuid=UUID_A, email=EMAIL_A))
+
+        assert {cid: (r['uuid'], r['email']) for cid, r in rows(path).items()} == {
+            '100': (UUID_A, EMAIL_A), '200': (UUID_A, EMAIL_A)}
+
+    def test_every_column_round_trips(self, path):
+        repo = UserRepository(path)
+        user = alice(previous_state='demo', reject_count=2, lang='en',
+                     support_topic_id=77, last_traffic_update='2026-11-15T10:00:00',
+                     next_protocol_idx=3, last_country='RU', last_city='Kazan',
+                     last_lat=55.8, last_lon=49.1)
+        assert repo.save(user)
+
+        stored = rows(path)['100']
+        assert {c: stored[c] for c in SAVE_COLUMNS} == {
+            c: getattr(user, c) for c in SAVE_COLUMNS}
+        assert (stored['traffic_up'], stored['traffic_down']) == (0, 0)

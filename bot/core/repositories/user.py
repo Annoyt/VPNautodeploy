@@ -21,8 +21,8 @@ SAVE_COLUMNS = (
     'next_protocol_idx', 'last_country', 'last_asn', 'last_city',
     'last_lat', 'last_lon', 'contact_email',
 )
-# UNIQUE in the users table: one key (uuid) and one panel id (email) per
-# user.
+# UNIQUE in the repo's schema: one key (uuid) and one panel id (email) per
+# user. Prod's older table has neither constraint (checked 2026-11-15).
 KEY_COLUMNS = ('uuid', 'email')
 
 
@@ -115,7 +115,8 @@ class UserRepository(BaseRepository):
 
         It never touches another user's row. Until 2026-11-15 this was an
         INSERT OR REPLACE. A uuid or panel email that another row held
-        (both are UNIQUE) silently deleted that row, and every save reset
+        silently deleted that row where both are UNIQUE (the repo's schema;
+        prod's older table has neither constraint), and every save reset
         the columns it does not write to their defaults. Now such a clash
         is refused and nothing is written. The log names the column and
         the user who holds it, never the value: the uuid is the user's
