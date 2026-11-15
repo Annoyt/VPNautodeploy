@@ -92,8 +92,6 @@ def load(db, now: Optional[datetime] = None, *, strict: bool = False) -> dict:
     entry}}}``, expired and malformed ones left out. Never raises, unless
     ``strict`` (the writers): then an unreadable store raises
     ManualStoreError."""
-    now = now or datetime.utcnow()
-    out = {'global': {}, 'asn': {}}
     if strict:
         raw = _read_strict(db)
     else:
@@ -101,7 +99,16 @@ def load(db, now: Optional[datetime] = None, *, strict: bool = False) -> dict:
             raw = db.get_setting(SETTING_KEY) if db else None
         except Exception as e:
             logger.warning(f"cascade_manual read failed: {e}")
-            return out
+            return {'global': {}, 'asn': {}}
+    return parse_live(raw, now)
+
+
+def parse_live(raw, now: Optional[datetime] = None) -> dict:
+    """The stored value → its live entries (``load`` without the read), for
+    a reader that has the raw value already (the inbound-drop alert reads it
+    on its own sqlite connection). Never raises."""
+    now = now or datetime.utcnow()
+    out = {'global': {}, 'asn': {}}
     if not isinstance(raw, str) or not raw.strip():
         return out
     try:
