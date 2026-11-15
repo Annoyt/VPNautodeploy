@@ -1276,7 +1276,8 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
         per-protocol outages:
           * every cascade protocol dark at once — that is the probe
             sidecar or the exit link, ONE incident, not four (the DE
-            reserve does not count: it is meant to outlive exit);
+            reserve does not count: it is meant to outlive exit; nor does
+            the SSH emergency path, which reaches exit without entry);
           * no fresh rows at all — the probe job itself died, which the
             first version of this check could not see (too few samples
             => stay quiet), leaving it blind exactly when blindness was
@@ -1287,7 +1288,8 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
         up, and its dark probe would page critical every two hours. A
         switched-off protocol that still answers does prove the channel
         works, so it rules "all dark" out. The DE reserve, when dark, pages
-        as the reserve (B6). Every alert carries the line with all
+        as the reserve (B6), the SSH emergency path as itself (E4, probed
+        since 2026-11-15). Every alert carries the line with all
         protocols' numbers (B3).
 
         Returns the judged set too: only keys this run had a verdict for can
@@ -1353,14 +1355,18 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
         windows = {tag: _pr.judge_window(rows) for tag, rows in samples.items()}
         live = {t: w for t, w in windows.items() if t not in disabled}
         summary = _pr.summary_line(sorted(windows.items()), disabled)
-        cascade = {t: w for t, w in live.items() if t != _pr.RESERVE_TAG}
+        # The DE reserve and the SSH path are no cascade protocols
+        # (probe_rules.NON_CASCADE_TAGS): each pages as itself below.
+        cascade = {t: w for t, w in live.items() if t not in _pr.NON_CASCADE_TAGS}
         dark = {t for t, w in live.items() if w['verdict'] == _pr.VERDICT_DARK}
         measured = [t for t, w in cascade.items() if w['verdict'] != _pr.VERDICT_THIN]
         # Answers through a protocol the operator switched off still prove
-        # the channel up (the reserve does not: it is meant to outlive exit).
+        # the channel up (the reserve does not: it is meant to outlive exit;
+        # nor does the SSH path, which reaches exit without entry).
         alive_switched_off = any(
             w['verdict'] not in (_pr.VERDICT_DARK, _pr.VERDICT_THIN)
-            for t, w in windows.items() if t in disabled and t != _pr.RESERVE_TAG)
+            for t, w in windows.items()
+            if t in disabled and t not in _pr.NON_CASCADE_TAGS)
 
         def _keys(tag):
             return {f'protocol_down:{tag}', f'protocol_down:{tag}:degraded'}
@@ -1430,6 +1436,31 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
                     ),
                 ))
                 continue
+            if tag == _pr.SSH_TAG:
+                # warn, not critical (owner, 2026-11-15): the emergency path
+                # only, like the healthcheck's exit_server:ssh-exit. Below
+                # ALERT_TG_MIN_SEVERITY (critical by default) it stays on the
+                # dashboard: no chat, no PM fallback, the diagnosis not posted.
+                alerts.append(Alert(
+                    key=f'protocol_down:{tag}',
+                    severity='warn',
+                    min_cycles=2,
+                    title=f'Аварийный SSH-выход не пускает (лежит {how_long})',
+                    detail=(
+                        f"За последние {PROBE_RUNS} прогона ({w['n']} попыток) "
+                        f"через SSH-выход на exit (контейнер ssh-exit) не "
+                        f"вернулся ни один ответ: пробный пользователь не входит "
+                        f"или не может пробросить трафик. Платным этот путь "
+                        f"нужен в аварийном профиле (lockdown, /sos, /kit), "
+                        f"когда остальные лежат. Проверь на exit контейнер "
+                        f"ssh-exit и синхронизацию пользователей (находки "
+                        f"exit_server:ssh-exit, exit_sync:ssh-exit); "
+                        f"SSH_HOST_KEY и SSH_USER_SECRET в .env entry должны "
+                        f"совпадать с сервером.\n"
+                        f"Сейчас по пробам: {summary}."
+                    ),
+                ))
+                continue
             alerts.append(Alert(
                 key=f'protocol_down:{tag}',
                 severity='critical',
@@ -1455,6 +1486,24 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
         # family so the agent hook and the reset logic apply.
         for tag, w in sorted(live.items()):
             if w['verdict'] != _pr.VERDICT_DEGRADED:
+                continue
+            if tag == _pr.SSH_TAG:
+                alerts.append(Alert(
+                    key=f'protocol_down:{tag}:degraded',
+                    severity='warn',
+                    min_cycles=3,
+                    title=f"Аварийный SSH-выход деградировал: ok {w['ok']}/{w['n']}",
+                    detail=(
+                        f"SSH-выход на exit пускает пробного пользователя, но за "
+                        f"последние {PROBE_RUNS} прогона через него прошло лишь "
+                        f"{w['ok']} из {w['n']} проб "
+                        f"({_pr.degraded_threshold_text()}). Сравни с остальными "
+                        f"путями: если они в норме, смотри исходящие правила "
+                        f"контейнера ssh-exit (PermitOpen, iptables OUTPUT) и "
+                        f"его DNS.\n"
+                        f"Сейчас по пробам: {summary}."
+                    ),
+                ))
                 continue
             alerts.append(Alert(
                 key=f'protocol_down:{tag}:degraded',

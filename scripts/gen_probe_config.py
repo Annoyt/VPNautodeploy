@@ -35,7 +35,8 @@ tunnel nobody sells.
 
 xhttp is absent by design: sing-box does not implement Xray's XHTTP
 transport (see subscription.py) — that path can only be probed by an
-xray-core client.
+xray-core client. xhr (VLESS + XHTTP + Reality) and the SSH emergency path
+(ssh) are probed by the mihomo sidecar (scripts/gen_probe_config_mihomo.py).
 """
 
 import json
@@ -60,9 +61,10 @@ def build_config(config, user, svc=None, *, log=None) -> dict:
     log = log or (lambda msg: None)
     inbounds, outbounds, rules = [], [], []
     for proto, port in HealthChecker.probe_ports_for(config).items():
-        if proto == HealthChecker.XHR_TAG:
-            # sing-box has no XHTTP: the mihomo sidecar probes it
-            # (scripts/gen_probe_config_mihomo.py).
+        if proto in HealthChecker.MIHOMO_TAGS:
+            # sing-box has no XHTTP, and the SSH emergency path is probed in
+            # the core the users' Clash profile runs: the mihomo sidecar
+            # probes both (scripts/gen_probe_config_mihomo.py).
             log(f"skip {proto}: probed by the mihomo sidecar")
             continue
         if proto == HealthChecker.RESERVE_TAG:
