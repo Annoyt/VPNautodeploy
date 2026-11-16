@@ -89,6 +89,11 @@ command = ' '.join(rest[1:])
 if mode == 'down':
     print('ssh: connect to host exit-node port 22: Connection timed out', file=sys.stderr)
     sys.exit(255)
+if mode == 'slow':
+    import time
+    with open(os.path.join(st, 'slow.pid'), 'w') as f:
+        f.write(str(os.getpid()))
+    time.sleep(60)
 out = sys.stdout.buffer
 if mode == 'banner':
     out.write(b'Welcome to exit! Last login: never\n')
@@ -310,12 +315,14 @@ class Stand:
                    TMPDIR=str(self.tmp))
         return env
 
-    def run(self, *extra, timeout=120):
-        argv = [sys.executable, str(SCRIPT), '--root', str(self.entry),
+    def argv(self, *extra):
+        return [sys.executable, str(SCRIPT), '--root', str(self.entry),
                 '--exit-root', str(self.exit), '--state-dir', str(self.backup_state),
                 '--recipients', str(self.recipients), '--bot-db', str(self.bot_db),
                 '--ssh-retry-wait', '0', *extra]
-        return subprocess.run(argv, env=self.env(), capture_output=True, text=True,
+
+    def run(self, *extra, timeout=120):
+        return subprocess.run(self.argv(*extra), env=self.env(), capture_output=True, text=True,
                               timeout=timeout)
 
     def calls(self):
@@ -621,6 +628,36 @@ class TestTheRun:
         (old / 'x' / 'plain.env').write_text(ENTRY_SECRET)
         assert stand.run('--no-send').returncode == 0
         assert not old.exists()
+
+    def test_a_stopped_run_leaves_no_plaintext_and_no_children(self, stand):
+        """systemd's SIGTERM (the unit's timeout) mid-run: the work dir goes,
+        the ssh child is killed, the bot hears why."""
+        import signal
+        stand.mode('ssh_mode', 'slow')
+        p = subprocess.Popen(stand.argv(), env=stand.env(), stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, text=True)
+        pid_file = stand.state / 'slow.pid'
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline and not pid_file.exists():
+            time.sleep(0.05)
+        assert pid_file.exists() and list(stand.backup_state.glob('work-*'))
+        p.send_signal(signal.SIGTERM)
+        out, err = p.communicate(timeout=60)
+        assert p.returncode == 2, err
+        assert not list(stand.backup_state.glob('work-*'))
+        (fail,) = stand.failures()
+        assert fail[fail.index('--reason') + 1] == \
+            'прерван сигналом SIGTERM: таймаут юнита или остановка'
+        child = int(pid_file.read_text())
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            try:
+                os.kill(child, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.05)
+        else:
+            pytest.fail('the ssh child outlived the run')
 
     def test_the_bot_writing_during_the_copy(self, stand):
         """The snapshot is consistent while the bot writes (WAL, backup API)."""

@@ -65,6 +65,7 @@ import pwd
 import re
 import shlex
 import shutil
+import signal
 import socket
 import sqlite3
 import stat
@@ -789,6 +790,9 @@ def run_framed(argv: Sequence[str], dest: str, *, magic: bytes, timeout: float, 
         rc = proc.wait()
     finally:
         timer.cancel()
+        if proc.poll() is None:            # an exception (a stop signal) left it running
+            proc.kill()
+            proc.wait()
         for t in threads:
             t.join(5)
         proc.stdout.close()
@@ -1077,21 +1081,26 @@ def pack_and_encrypt(tree: str, out_path: str, recipients: str, level: int) -> N
     zstd.stdout.close()
     broke = None
     try:
-        with tarfile.open(fileobj=zstd.stdin, mode='w|', format=tarfile.PAX_FORMAT) as tar:
-            tar.add(tree, arcname=os.path.basename(tree))
-    except (BrokenPipeError, OSError) as e:
-        broke = e
-    finally:
         try:
-            zstd.stdin.close()
-        except OSError:
-            pass
-    try:
-        zrc, arc = zstd.wait(timeout=1800), age.wait(timeout=1800)
-    except subprocess.TimeoutExpired:
-        zstd.kill()
-        age.kill()
-        raise BackupFailure('zstd/age не закончили за 30 мин')
+            with tarfile.open(fileobj=zstd.stdin, mode='w|', format=tarfile.PAX_FORMAT) as tar:
+                tar.add(tree, arcname=os.path.basename(tree))
+        except (BrokenPipeError, OSError) as e:
+            broke = e
+        finally:
+            try:
+                zstd.stdin.close()
+            except OSError:
+                pass
+        try:
+            zrc, arc = zstd.wait(timeout=1800), age.wait(timeout=1800)
+        except subprocess.TimeoutExpired:
+            raise BackupFailure('zstd/age не закончили за 30 мин')
+    except BaseException:
+        for proc in (zstd, age):
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+        raise
     if zrc or arc or broke:
         raise BackupFailure(f'упаковка не удалась: zstd rc={zrc}, age rc={arc}'
                             + (f', {short(broke, 80)}' if broke else ''))
@@ -1194,6 +1203,17 @@ def dry_run_listing(manifest: dict) -> List[str]:
     return out
 
 
+def _stopped(signum, frame):
+    """systemd's stop (the unit's timeout, a shutdown) sends SIGTERM, whose
+    default kills Python without running a single `finally`: the plaintext
+    work directory (exit's secrets too) would stay on entry until the next
+    run. As an exception it unwinds: children killed, work dir removed, the
+    bot told. A second signal during the cleanup is ignored."""
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    raise BackupFailure(f'прерван сигналом {signal.Signals(signum).name}: '
+                        'таймаут юнита или остановка')
+
+
 def acquire_lock(state_dir: str):
     fh = open(os.path.join(state_dir, '.lock'), 'w')
     try:
@@ -1207,6 +1227,7 @@ def acquire_lock(state_dir: str):
 def run(args) -> int:
     created = utcnow()
     stem = 'nekovpn-backup-' + created.strftime('%Y%m%dT%H%M%SZ')
+    signal.signal(signal.SIGTERM, _stopped)
     os.makedirs(args.state_dir, mode=0o700, exist_ok=True)
     os.chmod(args.state_dir, 0o700)
     try:
