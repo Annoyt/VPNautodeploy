@@ -24,10 +24,11 @@
 # Set SSH_ENTRY_PORT there first; the bot hands the path out once vpn-bot
 # is recreated with it.
 #
-# The container: haproxy, pinned by digest, on the host network. It listens
-# on entry's own address the way haproxy and shadow-tls do, so the probe
-# sidecar reaches it through entry's public address as users do (a
-# docker-published port is dropped between two docker networks).
+# The container: haproxy, pinned by digest, on the host network. A front
+# like haproxy and shadow-tls: it listens on entry's own address, under the
+# host's firewall (ufw), with no docker NAT in the path. A port docker
+# publishes would bypass ufw. The probe sidecar reaches it through entry's
+# public address as users do.
 # Read-only, no capabilities, no new privileges, the image's own user,
 # 128 MB; no `log` lines, so it records no user's address. It does not
 # touch the Reality haproxy, shadow-tls, iptables or ufw. Every new config
