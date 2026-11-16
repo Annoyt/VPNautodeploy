@@ -230,12 +230,7 @@ class TestEndpoint:
         assert ('GET', '/api/xhr/users') in routes
 
     @pytest.mark.asyncio
-    async def test_over_http(self, db, monkeypatch):
-        # The endpoint reads the clock (ru_exit._utcnow); the rows are dated
-        # around NOW. On the real clock the test rotted on 2026-11-16 12:00 UTC,
-        # when TICKET_PAYER's paid-until (NOW + 5 days) passed.
-        from bot.services import ru_exit
-        monkeypatch.setattr(ru_exit, '_utcnow', lambda: NOW)
+    async def test_over_http(self, db):
         db.set_setting(MK.SETTING_KEY, ON)
         _rebase_to_the_clock(db)
         async with TestClient(TestServer(self._server(db).app)) as client:
