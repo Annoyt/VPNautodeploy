@@ -189,8 +189,10 @@ class TestProbeSet:
 
     def test_one_definition_of_what_is_no_cascade_protocol(self):
         from bot.handlers.callbacks.user import MyKeyAnswerHandler as MK
-        assert pr.NON_CASCADE_TAGS == (pr.RESERVE_TAG, pr.SSH_TAG) == ('de', 'ssh')
+        assert pr.NON_CASCADE_TAGS == (pr.RESERVE_TAG, pr.SSH_TAG, pr.SSH_ENTRY_TAG) == (
+            'de', 'ssh', 'ssh-entry')
         assert HealthChecker.SSH_TAG == pr.SSH_TAG
+        assert HealthChecker.SSH_ENTRY_TAG == pr.SSH_ENTRY_TAG
         assert not set(pr.NON_CASCADE_TAGS) & set(MK.PROTOCOL_METHOD_MAP)
 
 

@@ -97,6 +97,21 @@ def _uuids(payload):
     return [u['uuid'] for u in payload['users']]
 
 
+def _rebase_to_the_clock(db):
+    """Shift every paid-until date by (the real clock - NOW). The endpoint
+    judges by the real clock, not NOW: with the dates as they are, the payer
+    who pays «until NOW + 5 days» lapsed on 2026-11-16 12:00 UTC and the test
+    failed from then on (and the one «until NOW + 20 days» would on 12-01)."""
+    shift = datetime.utcnow() - NOW
+    with db._connect() as conn:
+        rows = conn.execute("SELECT chat_id, subscription_expiry FROM users "
+                            "WHERE subscription_expiry IS NOT NULL").fetchall()
+        for cid, expiry in rows:
+            conn.execute("UPDATE users SET subscription_expiry = ? WHERE chat_id = ?",
+                         ((datetime.fromisoformat(expiry) + shift).isoformat(), cid))
+        conn.commit()
+
+
 class TestWhoIsListed:
 
     def test_nobody_while_xhr_is_off_in_the_cascade(self, db):
@@ -217,6 +232,7 @@ class TestEndpoint:
     @pytest.mark.asyncio
     async def test_over_http(self, db):
         db.set_setting(MK.SETTING_KEY, ON)
+        _rebase_to_the_clock(db)
         async with TestClient(TestServer(self._server(db).app)) as client:
             resp = await client.get('/api/xhr/users', headers={'X-DPI-Token': TOKEN})
             assert resp.status == 200

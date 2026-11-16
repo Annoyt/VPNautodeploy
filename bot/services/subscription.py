@@ -539,18 +539,23 @@ class SubscriptionService:
 
         # E4: the emergency profiles (lockdown, /sub?emergency=1, the kit)
         # of paid users end with an SSH server on exit — a different kind of
-        # traffic, reported exempt from the 16-KB freeze. TCP only, so never
-        # in the calls group; not a cascade protocol, so no protocol name.
+        # traffic, reported exempt from the 16-KB freeze — and then with the
+        # same server through entry's relay, the very last: entry's Russian
+        # address, no TLS name, no UDP (ssh_exit.entry_outbound). TCP only,
+        # so never in the calls group; not a cascade protocol, so no
+        # protocol name. The builders keep every ssh server out of the
+        # speed-test groups (auto / Auto): a last resort.
         if emergency and user:
-            try:
-                from bot.services import ssh_exit
-                ssh = ssh_exit.outbound(self.config, user)
-            except Exception as e:
-                logger.warning(f'subscription: ssh outbound skipped: {e}')
-                ssh = None
-            if ssh is not None:
-                outbounds.append(ssh)
-                proxy_tags.append(ssh['tag'])
+            from bot.services import ssh_exit
+            for build in (ssh_exit.outbound, ssh_exit.entry_outbound):
+                try:
+                    ssh = build(self.config, user)
+                except Exception as e:
+                    logger.warning(f'subscription: ssh outbound skipped: {e}')
+                    ssh = None
+                if ssh is not None:
+                    outbounds.append(ssh)
+                    proxy_tags.append(ssh['tag'])
 
         if not proxy_tags:
             # Empty cascade — return a no-op config rather than a
