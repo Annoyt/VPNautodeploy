@@ -95,9 +95,50 @@ ssh entry 'docker logs --since 5m vpn-bot 2>&1 | grep -c "hy2_auth: deny from 12
 N и M, что в шаге 1, и `"bot": {…, "last_error": null, …}`. Запрос — `{"ok": false}` (это не ключ),
 а в логе бота строка этого отказа (`1`): запрос дошёл до бота через релей.
 
-## 3. Exit: hysteria спрашивает релей (рестарт hysteria: hy2-сессии и звонки рвутся, клиенты переподключаются за секунды)
+## 3. Exit: hysteria спрашивает релей (рестарт hysteria: hy2-сессии и звонки рвутся, клиенты переподключаются за 30–60 с)
 
-Тихий час. Правка `url:` колбэка:
+Тихий час. Сначала проверка, по которой судят переключение: свежий клиент hysteria на exit
+подключается к каждому экземпляру по loopback с ключом служебного аккаунта проб (`probe_internal`,
+оплачен до 2099) и качает `generate_204`. Ключ идёт через stdin и на экран не выводится. SNI клиента —
+имя из сертификата сервера: hysteria 2.9 по умолчанию (`tls.sniGuard: dns-san`) отвечает клиенту без
+подходящего SNI `tls: internal error`. Положить скрипт на exit:
+
+```bash
+ssh vpn-exit 'cat > /root/hy2-fresh-check.sh' <<'CHECK'
+set -u
+read -r KEY
+[ -n "$KEY" ] || { echo "no key on stdin"; exit 1; }
+D=$(mktemp -d); chmod 700 "$D"
+cpid=""
+trap '[ -n "$cpid" ] && kill "$cpid" 2>/dev/null; rm -rf "$D"' EXIT
+n=0
+for cfg in /etc/hysteria/config.yaml /etc/hysteria/config-turbo.yaml; do
+  n=$((n + 1)); socks=$((18410 + n))
+  port=$(grep -E '^listen:' "$cfg" | grep -oE '[0-9]+$')
+  cert=$(grep -E '^[[:space:]]+cert:' "$cfg" | head -1 | awk '{print $2}')
+  sni=$(openssl x509 -in "$cert" -noout -ext subjectAltName | grep -oE 'DNS:[^, ]+' | head -1 | cut -d: -f2)
+  pw=$(grep -E '^[[:space:]]+password:' "$cfg" | head -1 | awk '{print $2}' | tr -d "\"'")
+  printf 'server: 127.0.0.1:%s\nauth: "%s"\ntls:\n  sni: "%s"\n  insecure: true\nobfs:\n  type: salamander\n  salamander:\n    password: "%s"\nsocks5:\n  listen: 127.0.0.1:%s\n' \
+    "$port" "$KEY" "$sni" "$pw" "$socks" > "$D/client$n.yaml"
+  timeout 30 /usr/local/bin/hysteria client -c "$D/client$n.yaml" >/dev/null 2>&1 &
+  cpid=$!
+  sleep 2
+  code=$(curl -s -m 12 -x "socks5h://127.0.0.1:$socks" -o /dev/null -w '%{http_code}' https://www.gstatic.com/generate_204)
+  echo "$(basename "$cfg") :$port $(grep -E '^[[:space:]]+url:' "$cfg" | awk '{print $2}') -> $code"
+  kill "$cpid" 2>/dev/null; cpid=""
+done
+CHECK
+```
+
+Прогнать её ДО правки, на старом колбэке:
+
+```bash
+probe_key() { ssh entry 'python3 -c "import json; c = json.load(open(\"/opt/vpn-bot/probe-proxy/config.json\")); print(next(o[\"password\"] for o in c[\"outbounds\"] if o.get(\"type\") == \"hysteria2\" and o.get(\"password\")))"'; }
+probe_key | ssh vpn-exit 'bash /root/hy2-fresh-check.sh'
+```
+
+Ожидается `-> 204` у обоих конфигов со старым `https://entry-hop.invalid…`: это проверяет саму проверку.
+Только потом правка `url:` колбэка:
 
 ```bash
 ssh vpn-exit bash -s -- "$TS" <<'SH'
@@ -117,17 +158,32 @@ done
 SH
 ```
 
-Рестарт и проверка:
+Рестарт и сразу та же проверка:
 
 ```bash
-ssh vpn-exit 'systemctl restart hysteria hysteria-turbo && sleep 3 && systemctl is-active hysteria hysteria-turbo'
-ssh entry 'docker exec vpn-bot curl -s -m 20 -x http://probe-proxy:18082 -o /dev/null -w "hy2 probe %{http_code}\n" https://www.gstatic.com/generate_204'
+ssh vpn-exit 'systemctl restart hysteria hysteria-turbo && sleep 2 && systemctl is-active hysteria hysteria-turbo'
+probe_key | ssh vpn-exit 'bash /root/hy2-fresh-check.sh'
 ssh vpn-exit 'curl -s 127.0.0.1:9979/status; echo'
 ```
 
-`hy2 probe 204` — проба прошла через hy2, значит hysteria спросила релей, релей — бота, бот пустил.
-В статусе `served.bot_allow` > 0 (живые юзеры переподключились через релей). Если проба не 204 —
-откат шага 3 (ниже) и разбор: `journalctl -u hy2-auth-relay -n 50`.
+`-> 204` у обоих конфигов, теперь с `http://127.0.0.1:9979/…`: hysteria спросила релей, релей — бота, бот
+пустил; в статусе `served.bot_allow` вырос на 2. Не 204 — сразу откат шага 3 (ниже) и разбор:
+`journalctl -u hy2-auth-relay -n 50`.
+
+**Не судить по пробе через probe-proxy сразу после рестарта.** Сайдкар держит долгое QUIC-соединение к
+старому процессу hysteria. Оно мертво, но клиент узнаёт об этом только по таймауту простоя: у sing-box
+около 30 с, на сервере `quic.maxIdleTimeout: 60s`, у клиентов до 60 с. Проба, запущенная в эти секунды,
+висит до своего таймаута и даёт `000` при рабочем релее; 2026-11-16 первую попытку так откатили зря.
+Живые клиенты переподключаются те же 30–60 с, а hy2 вечером — 0–8 подключений за 10 минут: «за минуту ни
+одного пропуска» ничего не доказывает. Ровный поток отказов (клиент с мёртвым ключом раз в ~7 с) — норма.
+Пробы с entry (18082 — hy2, 18085 — hy2t) — через минуту, на новых соединениях; потом убрать скрипт:
+
+```bash
+for p in 18082 18085; do ssh entry "docker exec vpn-bot curl -s -m 20 -x http://probe-proxy:$p -o /dev/null -w '$p %{http_code}\n' https://www.gstatic.com/generate_204"; done
+ssh vpn-exit 'rm -f /root/hy2-fresh-check.sh'
+```
+
+Время в журналах exit — +05:00 (Asia/Aqtau): абсолютное `journalctl --since` писать с `UTC`.
 
 ## 4. Проверка «бот лежит» — на ближайшем деплое бота
 
