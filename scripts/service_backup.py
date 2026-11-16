@@ -112,6 +112,15 @@ SEND_TIMEOUT_S = 1800
 FACT_TIMEOUT_S = 20
 AGE_RECIPIENT = re.compile(r'^age1[02-9ac-hj-np-z]{58}$')
 
+# Hermes keeps settings and state next to a large runtime (v0.23: tools/ with
+# its own Python, node and ffmpeg, ~1.5 GB; caches; logs; sandboxes; 44 stock
+# skills). Only the settings, the state and our skills go in, listed one by
+# one, so the runtime never does. After the v0.23 update ~/.hermes may be a
+# link to /root/.hermes-v023: the collector stores the files under the real
+# directory and the link next to them.
+HERMES_HOME = '/root/.hermes'
+HERMES_EXCLUDE = ('*.lock', '*.pid')
+
 # Hermes' skills that are ours (scripts/deploy_hermes_skills.sh, the repo's
 # skills/ directory; a test keeps the two lists equal). The stock ones are not.
 HERMES_SKILLS = ('billing-ops', 'code-review', 'dpi-analysis', 'incident-response',
@@ -201,12 +210,15 @@ ENTRY_ITEMS: Tuple[Item, ...] = (
     Item('/usr/local/lib/nekovpn-healthcheck', 'root-копия protocol_healthcheck.py (§50)'),
     Item('/usr/local/lib/nekovpn-backup', 'root-копия этого скрипта'),
     Item('/etc/nekovpn-backup', 'открытый ключ age, которым шифруются бэкапы'),
-    Item('/root/.hermes/config.yaml', 'Hermes (/ai): модель, фолбэки, aux-модели',
+    Item(f'{HERMES_HOME}/config.yaml', 'Hermes (/ai): модель, фолбэки, aux-модели',
          required=True),
-    Item('/root/.hermes/.env', 'Hermes: ключи провайдеров (OpenRouter…)', required=True),
-    Item('/root/.hermes/SOUL.md', 'Hermes: личность агента'),
-    Item('/root/.hermes/memories', 'Hermes: память агента'),
-    *(Item(f'/root/.hermes/skills/{name}', 'наш скилл Hermes (с подставленными значениями)')
+    Item(f'{HERMES_HOME}/.env', 'Hermes: ключи провайдеров (OpenRouter…)', required=True),
+    Item(f'{HERMES_HOME}/auth.json', 'Hermes: авторизация у провайдеров'),
+    Item(f'{HERMES_HOME}/SOUL.md', 'Hermes: личность агента'),
+    Item(f'{HERMES_HOME}/memories', 'Hermes: память агента', exclude=HERMES_EXCLUDE),
+    Item(f'{HERMES_HOME}/cron', 'Hermes: задания по расписанию', exclude=HERMES_EXCLUDE),
+    *(Item(f'{HERMES_HOME}/skills/{name}', 'наш скилл Hermes (с подставленными значениями)',
+           exclude=HERMES_EXCLUDE)
       for name in HERMES_SKILLS),
     Item('/root/hermes-work/AGENTS.md', 'рабочий AGENTS.md агента'),
     Item('/opt/site-vpn-kzstomsk', 'SSTP-шлюз объекта kzstomsk (не из репо; README внутри)'),
@@ -215,6 +227,9 @@ ENTRY_ITEMS: Tuple[Item, ...] = (
 
 ENTRY_DBS: Tuple[Db, ...] = (
     Db(XUI_VOLUME + '/x-ui.db', 'локальная панель 3x-ui на entry (снимок 19.07, бот ей не пользуется)'),
+    Db(f'{HERMES_HOME}/state.db', 'Hermes: сессии и состояние агента'),
+    Db(f'{HERMES_HOME}/response_store.db', 'Hermes: сохранённые ответы'),
+    Db(f'{HERMES_HOME}/kanban.db', 'Hermes: доска задач'),
 )
 
 EXIT_ITEMS: Tuple[Item, ...] = (
@@ -461,6 +476,7 @@ class Collector:
         self.dbs: List[dict] = []
         self.facts: List[dict] = []
         self.problems: List[str] = []
+        self.layout: List[dict] = []        # linked directories met on the way to an item
         self.dirs = 0
         self.links = 0
 
@@ -480,6 +496,59 @@ class Collector:
         info.mtime = int(st.st_mtime)
         return info
 
+    def _hop(self, host: str) -> Optional[str]:
+        """Where the link at ``host`` points, as a path on this node: an
+        absolute target counts from the node's root, as it does there (with
+        a test root, from the test root). None when ``host`` is no link."""
+        fs = self.fs(host)
+        if not os.path.islink(fs):
+            return None
+        target = os.readlink(fs)
+        base = '/' if target.startswith('/') else os.path.dirname(host)
+        return os.path.normpath(os.path.join(base, target))
+
+    def resolve(self, host: str) -> Tuple[str, List[str]]:
+        """``host`` with every linked DIRECTORY on the way replaced by where it
+        points (the last component is left alone: it is the item's own), and
+        the links met. Pure: nothing is added."""
+        parts = [p for p in host.split('/') if p]
+        cur, met = '/', []
+        for name in parts[:-1]:
+            cur = os.path.join(cur, name)
+            for _ in range(40):
+                nxt = self._hop(cur)
+                if nxt is None:
+                    break
+                met.append(cur)
+                cur = nxt
+        return (os.path.join(cur, parts[-1]) if parts else '/'), met
+
+    def real(self, host: str) -> str:
+        """``resolve``, and each link met goes into the part as a link: a
+        restore then makes the same layout, the files in the real directory
+        and the link next to it."""
+        path, met = self.resolve(host)
+        for link in met:
+            if link not in self.seen:
+                self.layout.append({'path': link, 'target': os.readlink(self.fs(link))})
+            self._add_link(link)
+        return path
+
+    def _add_link(self, host: str) -> None:
+        if host in self.seen:
+            return
+        self.seen.add(host)
+        fs = self.fs(host)
+        try:
+            st = os.lstat(fs)
+            info = self._info(host.lstrip('/'), st)
+            info.type, info.linkname = tarfile.SYMTYPE, os.readlink(fs)
+        except OSError as e:
+            self.errors.append({'path': host, 'error': short(e, 160)})
+            return
+        self.tar.addfile(info)
+        self.links += 1
+
     def _excluded(self, name: str, item: Item) -> bool:
         return any(fnmatch.fnmatch(name, pat) for pat in EXCLUDE + item.exclude)
 
@@ -487,12 +556,12 @@ class Collector:
         stats = {'path': item.path, 'what': item.what, 'required': item.required,
                  'files': 0, 'bytes': 0, 'status': 'ok'}
         self.items.append(stats)
-        pattern = self.fs(item.path)
+        path = self.real(item.path)
         if glob.has_magic(item.path):
-            matches = sorted(glob.glob(glob.escape(self.root.rstrip('/') + '/')
-                                       + item.path.lstrip('/')))
+            folder, pattern = os.path.split(path)
+            matches = sorted(glob.glob(os.path.join(glob.escape(self.fs(folder)), pattern)))
         else:
-            matches = [pattern] if os.path.lexists(pattern) else []
+            matches = [self.fs(path)] if os.path.lexists(self.fs(path)) else []
         if not matches:
             stats['status'] = 'absent'
             if item.required:
@@ -500,14 +569,17 @@ class Collector:
             return
         for match in matches:
             self._add_tree(match, item, stats)
-            if os.path.islink(match):
-                # The item names a link: its target's content goes in too, at
-                # the target's own path, when the target is on this node.
-                target = os.path.realpath(match)
-                inside = os.path.commonpath([target, os.path.realpath(self.root)]) == \
-                    os.path.realpath(self.root)
-                if inside and os.path.exists(target):
-                    self._add_tree(target, item, stats)
+            # The item names a link: its target's content goes in too, at the
+            # target's own path on this node (never outside the node's root).
+            first = target = self.host(match)
+            for _ in range(40):
+                nxt = self._hop(target)
+                if nxt is None:
+                    break
+                self._add_link(target)
+                target = self.real(nxt)
+            if target != first and os.path.exists(self.fs(target)):
+                self._add_tree(self.fs(target), item, stats)
 
     def _add_tree(self, fs_path: str, item: Item, stats: dict) -> None:
         self._add_entry(fs_path, item, stats)
@@ -603,14 +675,17 @@ class Collector:
         return size, digest.hexdigest()
 
     def reserve(self, host: str) -> None:
-        """Keep a path out of the tree walks (the live DB a copy stands for)."""
-        for suffix in ('', '-wal', '-shm', '-journal'):
-            self.seen.add(host + suffix)
+        """Keep a path out of the tree walks (the live DB a copy stands for),
+        under its own name and under the one its linked directories resolve to."""
+        for path in {host, self.resolve(host)[0]}:
+            for suffix in ('', '-wal', '-shm', '-journal'):
+                self.seen.add(path + suffix)
 
     def add_db(self, db: Db, workdir: str) -> None:
-        entry = {'path': db.path, 'what': db.what, 'required': db.required}
+        path = self.real(db.path)
+        entry = {'path': path, 'what': db.what, 'required': db.required}
         self.dbs.append(entry)
-        live = self.fs(db.path)
+        live = self.fs(path)
         if not os.path.exists(live):
             entry['status'] = 'absent'
             if db.required:
@@ -620,7 +695,7 @@ class Collector:
         try:
             snapshot_sqlite(live, copy)
             check = check_sqlite(copy)
-            size, sha = self._add_file_from(db.path.lstrip('/'), copy, os.stat(live))
+            size, sha = self._add_file_from(path.lstrip('/'), copy, os.stat(live))
         except (sqlite3.Error, OSError) as e:
             entry.update(status='error', error=short(e, 160))
             self.problems.append(f'{os.path.basename(db.path)}: {short(e, 120)}')
@@ -680,6 +755,7 @@ class Collector:
             'items': self.items, 'databases': self.dbs, 'files': self.files,
             'skipped': self.skipped, 'errors': self.errors, 'facts': self.facts,
             'problems': self.problems, 'dirs': self.dirs, 'links': self.links,
+            'layout': self.layout,
             'bytes': sum(f['size'] for f in self.files)
                      + sum(d.get('size') or 0 for d in self.dbs),
         }
@@ -921,8 +997,10 @@ RESTORE_ORDER = """\
    4. RU-зона (`etc/ru-exit` → `setup_ru_exit.sh`), ssh-relay (`etc/ssh-relay` →
       `setup_ssh_entry_relay.sh`), сайдкары проб (`opt/vpn-bot/probe-proxy*`), таймеры
       (`install_protocol_healthcheck.sh`, `install_service_backup.sh`);
-   5. Hermes: `root/.hermes/{config.yaml,.env,SOUL.md,memories,skills}`,
-      `root/hermes-work/AGENTS.md`; версия — `nekovpn-facts/hermes-pip-freeze.txt`.
+   5. Hermes: `root/.hermes/{config.yaml,.env,auth.json,SOUL.md,memories,cron,skills}` и базы
+      `state.db`, `response_store.db`, `kanban.db` (копии), `root/hermes-work/AGENTS.md`;
+      версия — `nekovpn-facts/hermes-pip-freeze.txt`. Если `~/.hermes` была ссылкой (v0.23 →
+      `/root/.hermes-v023`), файлы лежат под настоящим каталогом, ссылка — рядом.
 4. **Новый адрес** entry или exit: `ENTRY_NODE_IP` / `EXIT_NODE_IP` в .env, DNS доменов, правила
    DOCKER-USER (`entry-fw-*`); при новом адресе entry — новый сертификат перегона
    (`hop_tls.py init --force --ip`) и его пин на exit (§53).
@@ -1004,7 +1082,13 @@ def render_readme(manifest: dict) -> str:
         pm = part.get('manifest')
         if not pm:
             continue
-        lines += [f'## Что где: {name}', '', '| Путь | Что это | Файлов | Есть |', '|---|---|---|---|']
+        lines += [f'## Что где: {name}', '']
+        for link in pm.get('layout') or []:
+            lines.append(f'`{link["path"]}` — ссылка на `{link["target"]}`: файлы под ней лежат в '
+                         'архиве по настоящему пути, ссылка — рядом, tar восстановит обе.')
+        if pm.get('layout'):
+            lines.append('')
+        lines += ['| Путь | Что это | Файлов | Есть |', '|---|---|---|---|']
         for item in pm.get('items') or []:
             have = {'ok': '✅', 'absent': '—'}.get(item.get('status'), item.get('status'))
             if item.get('status') == 'absent' and item.get('required'):
@@ -1039,9 +1123,11 @@ def sender_meta(manifest: dict, size: int, sha256: str) -> dict:
             entry.update(files=len(pm.get('files') or []), bytes=pm.get('bytes'))
         parts[name] = entry
     for db in _dbs_of(manifest):
+        # The caption names the two that matter (bot.db, exit's x-ui.db); the
+        # others are in the README and the manifest, their problems above.
         target = 'bot' if db['path'].endswith('/bot.db') else db['node']
         tables = db.get('tables') or {}
-        if target in parts:
+        if target in parts and target != 'entry':
             parts[target].setdefault('dbs', []).append({
                 'name': os.path.basename(db['path']), 'integrity': db.get('integrity'),
                 'size': db.get('size'), 'users': tables.get('users'),

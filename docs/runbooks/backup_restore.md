@@ -24,7 +24,11 @@
   - haproxy, shadow-tls, iptables, ufw;
   - RU-зона (`/etc/ru-exit`), ssh-relay;
   - юниты и root-копии скриптов;
-  - Hermes: `config.yaml`, `.env`, наши скиллы, `AGENTS.md`;
+  - Hermes, только настройки и состояние: `config.yaml`, `.env`, `auth.json`, `SOUL.md`, `memories/`,
+    `cron/`, наши скиллы, копии `state.db`, `response_store.db`, `kanban.db`, `AGENTS.md`. Его
+    рантайм (`tools/` — ~1,5 ГБ у v0.23.1, кэши, логи, `sandboxes/`, стоковые скиллы) не входит.
+    Если `~/.hermes` — ссылка (v0.23 → `/root/.hermes-v023`), файлы лежат под настоящим каталогом,
+    ссылка — рядом;
   - ssh root и ключи хоста, crontab, sysctl;
   - `nekovpn-facts/` — версии, живые правила iptables, контейнеры, `systemctl cat`.
 - `exit/exit.tar` — то же для exit:
@@ -288,8 +292,11 @@ ssh vpn-exit 'rm -f /root/restore-exit.tar'
 5. Сайдкары проб: `opt/vpn-bot/probe-proxy*`.
 6. Таймеры: `install_protocol_healthcheck.sh` и `install_service_backup.sh` (`etc/nekovpn-backup`
    хранит открытый ключ).
-7. Hermes той же версии (`nekovpn-facts/hermes-pip-freeze.txt`): `root/.hermes/{config.yaml,.env,
-   SOUL.md,memories,skills}` и `root/hermes-work/AGENTS.md`, затем `deploy_hermes_host.sh`.
+7. Hermes той же версии (`nekovpn-facts/hermes-pip-freeze.txt`): `config.yaml`, `.env`,
+   `auth.json`, `SOUL.md`, `memories/`, `cron/`, наши скиллы и базы `state.db`, `response_store.db`,
+   `kanban.db` из `root/.hermes` (или из `root/.hermes-v023` и ссылку `root/.hermes` — как было),
+   `root/hermes-work/AGENTS.md`, затем `deploy_hermes_host.sh`. Базы — при остановленном
+   `hermes-api`, без старых `-wal`/`-shm`.
 
 **Новый адрес** у entry или exit:
 

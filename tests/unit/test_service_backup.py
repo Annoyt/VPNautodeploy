@@ -231,6 +231,7 @@ class Stand:
     """A fake entry tree, a fake exit tree, fakes first in PATH."""
 
     def __init__(self, base: Path):
+        self.hermes_db = None
         self.base = base
         self.bin = base / 'bin'
         self.state = base / 'fakestate'
@@ -275,6 +276,17 @@ class Stand:
         self.put(e, 'root/.hermes/skills/vpn-ops/SKILL.md', '# vpn-ops\n')
         self.put(e, 'root/.hermes/skills/stock-skill/SKILL.md', '# not ours\n')
         self.put(e, 'root/.hermes/sessions/session.json', '{"chat": "not a setting"}')
+        self.put(e, 'root/.hermes/auth.json', '{"provider": "t"}', 0o600)
+        self.put(e, 'root/.hermes/cron/jobs.json', '[]')
+        self.put(e, 'root/.hermes/cron/run.lock', '')
+        self.put(e, 'root/.hermes/memories/MEMORY.md', '# memory')
+        self.put(e, 'root/.hermes/memories/agent.pid', '42')
+        (e / 'root/.hermes/tools/python/bin').mkdir(parents=True)
+        (e / 'root/.hermes/tools/python/bin/python3').write_bytes(b'\x7fELF\x00' * 10)
+        self.put(e, 'root/.hermes/cache/blob', 'cache')
+        self.put(e, 'root/.hermes/logs/gateway.log', 'log')
+        self.put(e, 'root/.hermes/sandboxes/s1/file', 'sandbox')
+        self.hermes_db = make_bot_db(e / 'root/.hermes/state.db', users=2)
         self.put(e, 'root/hermes-work/AGENTS.md', '# agent\n')
         self.put(e, 'root/.ssh/config', 'Host exit-node\n', 0o600)
         self.put(e, 'usr/local/bin/hermes_model_guard.py', '#!/usr/bin/env python3\n', 0o755)
@@ -345,6 +357,7 @@ def stand(tmp_path):
     s = Stand(tmp_path)
     yield s
     s.bot_conn.close()
+    s.hermes_db.close()
     trip = s.state / 'tripwire.log'
     assert not trip.exists(), trip.read_text()
     # facts only ever READ systemd
@@ -388,6 +401,7 @@ class TestTheRun:
             {'entry': 'ok', 'bot': 'ok', 'exit': 'ok'}
         assert meta['parts']['bot']['dbs'][0]['users'] == 5
         assert meta['parts']['exit']['dbs'][0]['clients'] == 7
+        assert 'dbs' not in meta['parts']['entry']      # the caption names those two only
         assert not stand.failures()
         # the plaintext work dir is gone, the lock file and archives stay
         assert sorted(p.name for p in stand.backup_state.iterdir()) == ['.lock', 'archives']
@@ -406,7 +420,9 @@ class TestTheRun:
         for path in ('opt/vpn-bot/.env', 'opt/vpn-bot/docker-compose.yml', 'etc/haproxy/haproxy.cfg',
                      'etc/ru-exit/keys.env', 'etc/iptables/rules.v4', 'root/.hermes/config.yaml',
                      'root/.hermes/.env', 'root/.hermes/skills/vpn-ops/SKILL.md',
-                     'root/hermes-work/AGENTS.md', 'root/.ssh/config',
+                     'root/hermes-work/AGENTS.md', 'root/.ssh/config', 'root/.hermes/auth.json',
+                     'root/.hermes/cron/jobs.json', 'root/.hermes/memories/MEMORY.md',
+                     'root/.hermes/state.db',
                      'usr/local/bin/hermes_model_guard.py', 'usr/local/sbin/ru-exit-sync',
                      f'{VOLUME}/bot.db', f'{VOLUME}/secrets/sub_token_secret.json',
                      f'{VOLUME}/hop-tls/key.pem', f'{XUI}/x-ui.db',
@@ -414,6 +430,10 @@ class TestTheRun:
             assert path in entry, path
         for path in ('etc/haproxy/old.log', 'root/.hermes/skills/stock-skill/SKILL.md',
                      'root/.hermes/sessions/session.json', 'usr/local/bin/sing-box',
+                     'root/.hermes/cron/run.lock', 'root/.hermes/memories/agent.pid',
+                     'root/.hermes/tools', 'root/.hermes/tools/python/bin/python3',
+                     'root/.hermes/cache/blob', 'root/.hermes/logs/gateway.log',
+                     'root/.hermes/sandboxes/s1/file', 'root/.hermes/state.db-wal',
                      f'{VOLUME}/hop-tls/__pycache__/x.pyc', f'{VOLUME}/bot.db-wal',
                      f'{VOLUME}/bot.db-shm'):
             assert path not in entry, path
@@ -770,15 +790,112 @@ class TestCollector:
         root = tmp_path / 'root'
         (root / 'etc/real').mkdir(parents=True)
         (root / 'etc/real/cert.pem').write_text('CERT')
+        (root / 'opt/abs').mkdir(parents=True)
+        (root / 'opt/abs/key.pem').write_text('KEY')
         (root / 'etc/ssl').mkdir()
         (root / 'etc/ssl/sub').symlink_to('../real')
-        (root / 'etc/outside').symlink_to('/etc')
-        profile([sb.Item('/etc/ssl/sub', 's'), sb.Item('/etc/outside', 'o')])
+        # Absolute targets count from the node's root, as they do on the node:
+        # never the test machine's own /opt or /etc, and '..' cannot climb out.
+        (root / 'etc/abs').symlink_to('/opt/abs')
+        (root / 'etc/up').symlink_to('../../../../../../../../opt/abs')
+        profile([sb.Item('/etc/ssl/sub', 's'), sb.Item('/etc/abs', 'a'), sb.Item('/etc/up', 'u')])
         manifest, tar, _ = run_collect(root)
-        assert tar['etc/ssl/sub'].issym()
-        assert 'etc/real/cert.pem' in tar
-        assert tar['etc/outside'].issym() and 'etc/passwd' not in tar      # never leaves the root
-        assert not any('..' in name for name in tar) and len(tar) == 5
+        assert tar['etc/ssl/sub'].issym() and 'etc/real/cert.pem' in tar
+        assert tar['etc/abs'].issym() and tar['etc/abs'].linkname == '/opt/abs'
+        assert tar['etc/up'].issym() and 'opt/abs/key.pem' in tar
+        assert sorted(tar) == ['etc/abs', 'etc/real', 'etc/real/cert.pem', 'etc/ssl/sub', 'etc/up',
+                               'nekovpn-manifest.json', 'opt/abs', 'opt/abs/key.pem']
+
+    def test_links_in_a_chain(self, tmp_path, profile):
+        """An item that is a link to a link whose target's folder is a link
+        again: every link goes in as a link, the files at their real path."""
+        root = tmp_path / 'root'
+        (root / 'opt/real/inner').mkdir(parents=True)
+        (root / 'opt/real/inner/f.conf').write_text('F')
+        (root / 'lnk').symlink_to('opt/real')
+        (root / 'etc').mkdir()
+        (root / 'etc/c1').symlink_to('c2')
+        (root / 'etc/c2').symlink_to('/lnk/inner')
+        profile([sb.Item('/etc/c1', 'chain')])
+        manifest, tar, _ = run_collect(root)
+        assert tar['etc/c1'].linkname == 'c2' and tar['etc/c2'].linkname == '/lnk/inner'
+        assert tar['lnk'].linkname == 'opt/real'
+        assert 'opt/real/inner/f.conf' in tar and 'lnk/inner/f.conf' not in tar
+        assert manifest['layout'] == [{'path': '/lnk', 'target': 'opt/real'}]
+
+    def test_a_db_behind_a_link_is_never_packed_raw(self, tmp_path, profile):
+        """The DB is named through a link; a walked folder is its real home:
+        only the copy goes in, never the live file or its -wal."""
+        root = tmp_path / 'root'
+        conn = make_bot_db(root / 'data' / 'app.db', users=3)
+        conn.execute('INSERT INTO users VALUES (?, ?)', ('w', 'demo'))
+        conn.commit()
+        (root / 'data' / 'notes.txt').write_text('n')
+        (root / 'link').symlink_to('data')
+        profile([sb.Item('/data', 'd')], dbs=[sb.Db('/link/app.db', 'db')])
+        manifest, tar, buf = run_collect(root)
+        conn.close()
+        assert 'data/notes.txt' in tar and 'data/app.db' in tar
+        assert 'data/app.db-wal' not in tar and 'data/app.db-shm' not in tar
+        buf.seek(0)
+        data = tarfile.open(fileobj=buf, mode='r:').extractfile('data/app.db').read()
+        copy = tmp_path / 'c.db'
+        copy.write_bytes(data)
+        assert sqlite3.connect(copy).execute('SELECT count(*) FROM users').fetchone()[0] == 4
+        assert [d['path'] for d in manifest['databases']] == ['/data/app.db']
+
+    @pytest.mark.parametrize('target', ['/root/.hermes-v023', '.hermes-v023'])
+    def test_hermes_behind_a_link(self, tmp_path, profile, target):
+        """Hermes v0.23 may move to /root/.hermes-v023 behind a link: the
+        settings and state go in under the real directory, the link next to
+        them, the runtime never; GNU tar puts the same layout back."""
+        root = tmp_path / 'root'
+        real = root / 'root' / '.hermes-v023'
+        for rel, text in (('config.yaml', 'model: x'), ('.env', 'K=1'), ('auth.json', '{}'),
+                          ('SOUL.md', 'soul'), ('cron/jobs.json', '[]'), ('cron/run.lock', ''),
+                          ('memories/MEMORY.md', 'm'), ('skills/vpn-ops/SKILL.md', '# ours'),
+                          ('skills/stock/SKILL.md', '# stock'), ('cache/blob', 'c'),
+                          ('logs/gateway.log', 'l'), ('sandboxes/s/f', 's'), ('gateway.pid', '1')):
+            (real / rel).parent.mkdir(parents=True, exist_ok=True)
+            (real / rel).write_text(text)
+        (real / 'tools/python/bin').mkdir(parents=True)
+        (real / 'tools/python/bin/python3').write_bytes(b'\x7fELF\x00')
+        conn = make_bot_db(real / 'state.db', users=2)
+        make_xui_db(real / 'kanban.db', clients=4)
+        (root / 'root' / '.hermes').symlink_to(target)
+        profile(sb.ENTRY_ITEMS, sb.ENTRY_DBS, ())
+        manifest, tar, buf = run_collect(root)
+        conn.close()
+        assert tar['root/.hermes'].issym() and tar['root/.hermes'].linkname == target
+        for rel in ('config.yaml', '.env', 'auth.json', 'SOUL.md', 'cron/jobs.json',
+                    'memories/MEMORY.md', 'skills/vpn-ops/SKILL.md', 'state.db', 'kanban.db'):
+            assert f'root/.hermes-v023/{rel}' in tar, rel
+        for rel in ('cron/run.lock', 'skills/stock/SKILL.md', 'cache/blob', 'logs/gateway.log',
+                    'sandboxes/s/f', 'gateway.pid', 'tools', 'tools/python/bin/python3',
+                    'state.db-wal', 'response_store.db'):
+            assert f'root/.hermes-v023/{rel}' not in tar, rel
+        assert not [n for n in tar if n.startswith('root/.hermes/')]
+        assert manifest['layout'] == [{'path': '/root/.hermes', 'target': target}]
+        dbs = {d['path']: d for d in manifest['databases']}
+        assert dbs['/root/.hermes-v023/state.db']['integrity'] == 'ok'
+        assert dbs['/root/.hermes-v023/state.db']['tables']['users'] == 2
+        assert dbs['/root/.hermes-v023/kanban.db']['tables']['clients'] == 4
+        assert dbs['/root/.hermes-v023/response_store.db']['status'] == 'absent'
+        assert manifest['problems'] == [f'нет {sb.BOT_VOLUME}', 'нет /opt/vpn-bot/.env',
+                                        'нет /opt/vpn-bot/docker-compose.yml', 'нет /etc/haproxy']
+        readme = sb.render_readme({'archive': 'x', 'created': '2026-11-17T01:40:12Z',
+                                   'made_on': 'e', 'complete': False,
+                                   'parts': {'entry': {'status': 'incomplete', 'manifest': manifest}}})
+        assert f'`/root/.hermes` — ссылка на `{target}`' in readme
+        part = tmp_path / 'entry.tar'
+        part.write_bytes(buf.getvalue())
+        out = tmp_path / 'out'
+        out.mkdir()
+        subprocess.run(['tar', '-xf', str(part), '-C', str(out)], check=True)
+        assert os.readlink(out / 'root/.hermes') == target
+        assert (out / 'root/.hermes-v023/config.yaml').read_text() == 'model: x'
+        if not target.startswith('/'):     # an absolute link resolves once unpacked at /
+            assert (out / 'root/.hermes/skills/vpn-ops/SKILL.md').read_text() == '# ours'
 
     def test_a_db_is_a_consistent_copy_and_its_live_files_stay_out(self, tmp_path, profile):
         root = tmp_path / 'root'
@@ -1041,6 +1158,7 @@ def real_stand(tmp_path, keypair):
     s.recipients.write_text(f'# test\n{keypair[1]}\n')
     yield s
     s.bot_conn.close()
+    s.hermes_db.close()
     trip = s.state / 'tripwire.log'
     assert not trip.exists(), trip.read_text()
 
