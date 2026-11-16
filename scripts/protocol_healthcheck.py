@@ -19,8 +19,9 @@ improvisation. It reads the THREE signals that actually distinguish
 
   A) the bot's own probe rows (``outbound_health``), recent alerts,
      bot /health, and the panel audit (``verify_panel_client_fields.py``);
-  B) the entry host: shadow-tls / haproxy / probe-proxy up, the UDP
-     DNAT rules that carry Hysteria to exit;
+  B) the entry host: shadow-tls / haproxy / the probe sidecars up
+     (probe-proxy, probe-proxy-mihomo), the UDP DNAT rules that carry
+     Hysteria to exit;
   C) the exit host (ONE ssh round-trip): hysteria daemons, xray RUNTIME
      users per inbound (``xray api inbounduser``) vs config.json, recent
      accepted connections per inbound, hop REDIRECT rules, hysteria
@@ -59,6 +60,17 @@ rows → the pre-2026-09-05 path: layer C (+ entry DNAT) is the only
 source and the evidence says "no probe coverage". Either way a definite
 layer-C failure (daemon not active, entry DNAT :8402 gone) is DOWN —
 probe coverage adds a signal, it never removes one.
+
+THE DE RESERVE AND THE SSH EMERGENCY PATH
+-----------------------------------------
+Probed where the deployment has them (rows decide, as for hy2t): the DE
+reserve (``de``) and the SSH path to the ssh-exit container on exit
+(``ssh``, through the mihomo sidecar since 2026-11-15). Each is judged from
+its own rows and counts in the exit code and the ИТОГ line, but neither is
+a cascade protocol (``probe_rules.NON_CASCADE_TAGS``): neither takes part in
+"every protocol dark", and neither proves the channel up — the reserve is
+meant to outlive exit, the SSH path reaches exit without entry. The pager
+agrees.
 
 PROTOCOLS SWITCHED OFF IN THE CASCADE ARE "OFF"
 -----------------------------------------------
@@ -137,12 +149,19 @@ probe_rules = _load_probe_rules()
 
 PROBED = ['reality', 'hy2', 'ws', 'stls']      # what the probe sidecar ALWAYS speaks
 # Probed only where the deployment has them — decided per run by
-# probed_tags(): hy2t with HY2T_PORT, the DE reserve with FALLBACK_NODE_*.
-PROBED_OPTIONAL = ['hy2t', probe_rules.RESERVE_TAG, 'xhr']
+# probed_tags(): hy2t with HY2T_PORT, the DE reserve with FALLBACK_NODE_*,
+# xhr with XHR_SNI, the SSH emergency path with SSH_EXIT_HOST & co.
+PROBED_OPTIONAL = ['hy2t', probe_rules.RESERVE_TAG, 'xhr', probe_rules.SSH_TAG]
 PROTOCOLS = ['reality', 'hy2', 'hy2t', 'ws', 'stls']   # what we always report on
-# ...plus the DE reserve (B6) where it is probed: it joins the report only
-# with probe rows of its own, judged from them alone (no layer B/C facts).
-REPORT_ORDER = PROTOCOLS + [probe_rules.RESERVE_TAG, 'xhr']
+# ...plus the DE reserve (B6), xhr and the SSH path (E4) where they are
+# probed: each joins the report only with probe rows of its own, judged from
+# them (the DE reserve and the SSH path are no cascade protocols:
+# probe_rules.NON_CASCADE_TAGS, outside "every protocol dark").
+REPORT_ORDER = PROTOCOLS + [probe_rules.RESERVE_TAG, 'xhr', probe_rules.SSH_TAG]
+# The sidecar each probe goes through (layer B inspects both): xhr and the
+# SSH path ride the mihomo one (scripts/gen_probe_config_mihomo.py).
+MIHOMO_SIDECAR = 'probe-proxy-mihomo'
+SIDECAR_FOR = {'xhr': MIHOMO_SIDECAR, probe_rules.SSH_TAG: MIHOMO_SIDECAR}
 
 # One definition with the pager, the monitor and /protocols (probe_rules,
 # IMPROVEMENT_PLAN F, B5). Until 2026-11 this script called a window
@@ -267,7 +286,8 @@ def sh(cmd, timeout=15):
         return -1, "", str(e)
 out = {"errors": {}}
 svc = {}
-for u in ("hysteria", "hysteria-turbo", "hy2-traffic-collector", "hy2-traffic-collector-turbo"):
+for u in ("hysteria", "hysteria-turbo", "hy2-traffic-collector", "hy2-traffic-collector-turbo",
+          "hy2-auth-relay"):
     rc, o, e = sh("systemctl is-active " + u, 10)
     svc[u] = (o.strip().splitlines() or [e.strip() or "unknown"])[0]
 out["services"] = svc
@@ -391,6 +411,11 @@ def guard_acl_block(text):
     return out
 
 
+# The auth relay's URL in a hysteria config: http on loopback (AGENTS.md 56).
+GUARD_RELAY_URL = _gre.compile(
+    r"^[^#]*http://(127\.[0-9.]+|\[::1\]|localhost)(:[0-9]+)?/api/hy2t?/auth", _gre.M)
+
+
 def guard_hysteria(unit_text, read):
     """The ACL facts of one hysteria unit: its config path and the `acl`
     block (or, for a JSON config, the `acl` object), plus the rules file the
@@ -408,17 +433,21 @@ def guard_hysteria(unit_text, read):
     except Exception as e:
         return {"config": path, "error": str(e)[:200]}
     fpath = None
+    # whether hysteria asks the auth relay on loopback; only the answer
+    # leaves the host, never the URL
+    relay = bool(GUARD_RELAY_URL.search(text))
     if path.endswith(".json"):
         try:
             acl = _gjson.loads(text).get("acl")
         except Exception as e:
             return {"config": path, "error": "config json: " + str(e)[:160]}
-        info = {"config": path, "acl_json": acl if isinstance(acl, dict) or acl is None else str(acl)[:200]}
+        info = {"config": path, "auth_relay": relay,
+                "acl_json": acl if isinstance(acl, dict) or acl is None else str(acl)[:200]}
         if isinstance(acl, dict) and acl.get("file"):
             fpath = str(acl.get("file"))
     else:
         block = guard_acl_block(text)
-        info = {"config": path, "acl_lines": block[:400]}
+        info = {"config": path, "auth_relay": relay, "acl_lines": block[:400]}
         for line in block:
             m = _gre.match(r"\s+file\s*:\s*(\S+)", line)
             if m:
@@ -665,7 +694,7 @@ def collect_layer_b() -> dict:
     for unit in ('shadow-tls', 'haproxy'):
         rc, so, se = _run(['systemctl', 'is-active', unit], 10)
         out['services'][unit] = (so.strip().splitlines() or [se.strip() or 'unknown'])[0]
-    for name in ('probe-proxy', BOT_CONTAINER):
+    for name in ('probe-proxy', MIHOMO_SIDECAR, BOT_CONTAINER):
         rc, so, se = _run(['docker', 'inspect', '-f', '{{.State.Status}}', name], 10)
         out['containers'][name] = so.strip() if rc == 0 else f'missing ({se.strip()[:80]})'
     rc, so, se = _run(['iptables', '-t', 'nat', '-S', 'PREROUTING'], 10)
@@ -883,6 +912,11 @@ HY2_LOOPBACK_TARGETS = ('127.0.0.1', '::1')
 HY2_PRIVATE_TARGETS = ('10.0.0.1', '100.64.0.1', '169.254.169.254', '172.16.0.1',
                        '172.20.0.2', '192.168.0.1', 'fc00::1', 'fe80::1')
 GUARD_KEYS_XRAY = ('xray_api_exposed', 'xray_api_polling')
+# The hy2 auth relay (AGENTS.md §56): while it is down, a hysteria that asks
+# it refuses every new hy2 connection.
+RELAY_UNIT = 'hy2-auth-relay'
+RELAY_KEY = 'hy2_relay'
+UNIT_RUNNING = ('active', 'activating', 'reloading', 'deactivating')
 HY2_ACL_NEXT = ('AGENTS.md §52: в {config} блок acl: inline: с reject(127.0.0.0/8), reject(::1/128) '
                 'и частными сетями, затем systemctl restart {unit}')
 
@@ -1201,12 +1235,42 @@ def hysteria_uncovered(rules, targets) -> List[str]:
     return out
 
 
+def _relay_verdict(services: dict, hysteria: dict):
+    """The hy2 auth relay (AGENTS.md §56): a critical finding when a running
+    hysteria asks it and it is not active; ``'unread'`` when that cannot be
+    told (a hysteria config or a unit state not read); None otherwise."""
+    asking, unread = [], False
+    for unit in HY2_UNITS:
+        state = services.get(unit)
+        if state in ('inactive', 'failed'):
+            continue                           # a stopped hysteria asks nobody
+        asks = (hysteria.get(unit) or {}).get('auth_relay')
+        if state not in UNIT_RUNNING or not isinstance(asks, bool):
+            unread = True
+        elif asks:
+            asking.append(unit)
+    state = services.get(RELAY_UNIT)
+    if state == 'active':
+        return None
+    if asking and state in ('inactive', 'failed', 'activating'):
+        # activating: a Type=simple service is "active" once forked, so this
+        # is its restart loop
+        return {'key': RELAY_KEY, 'severity': 'critical', 'layer': 'c',
+                'title': (f'{RELAY_UNIT} на exit: {state} — {", ".join(asking)} '
+                          'спрашивают его: новые hy2-подключения отклоняются'),
+                'next': f"ssh exit-node 'systemctl status {RELAY_UNIT} --no-pager; "
+                        f"journalctl -u {RELAY_UNIT} -n 30 --no-pager'"}
+    if asking or unread:
+        return 'unread'
+    return None
+
+
 def exit_guard(c: dict) -> Tuple[List[dict], List[str]]:
     """(findings, unjudged keys) from layer C's ``guard`` facts. A key this
     run could not look at is ``unjudged``: the bot keeps its alert as it was
     instead of reading the missing finding as "fixed"."""
     guard = c.get('guard')
-    all_keys = [f'hy2_acl:{u}' for u in HY2_UNITS] + list(GUARD_KEYS_XRAY)
+    all_keys = [f'hy2_acl:{u}' for u in HY2_UNITS] + list(GUARD_KEYS_XRAY) + [RELAY_KEY]
     if not isinstance(guard, dict) or not guard:
         return [], all_keys                    # a collector without the guard
     if guard.get('error'):
@@ -1225,7 +1289,7 @@ def exit_guard(c: dict) -> Tuple[List[dict], List[str]]:
         state = services.get(unit)
         if state in ('inactive', 'failed'):
             continue                           # a stopped hysteria serves nobody
-        if state not in ('active', 'activating', 'reloading', 'deactivating'):
+        if state not in UNIT_RUNNING:
             unjudged.append(f'hy2_acl:{unit}')
             blind.append(f'{unit}: состояние юнита {str(state)[:60]!r}')
             continue
@@ -1250,6 +1314,12 @@ def exit_guard(c: dict) -> Tuple[List[dict], List[str]]:
             findings.append({'key': f'hy2_acl:{unit}', 'severity': 'warn', 'layer': 'c',
                              'title': f"{unit}: ACL не закрывает частные сети ({', '.join(priv)})",
                              'next': nxt})
+    relay = _relay_verdict(services, guard.get('hysteria') or {})
+    if relay == 'unread':
+        unjudged.append(RELAY_KEY)
+        blind.append(f'{RELAY_UNIT}: не понять, спрашивает ли его hysteria и жив ли он')
+    elif relay:
+        findings.append(relay)
     view = guard.get('xray')
     version = parse_xray_version(guard.get('xray_version'))
     if not isinstance(view, dict) or version is None:
@@ -1680,9 +1750,10 @@ def assess(layers: dict, now: Optional[datetime] = None) -> dict:
             missing = [f'{d}→:{p}' for d, p in ENTRY_DNAT_FOR[tag] if (d, p) not in entry_dnat]
             protocols[tag]['evidence'].append(
                 'entry DNAT: ' + ('все правила на месте' if not missing else 'НЕТ ' + ', '.join(missing)))
-        if cont.get('probe-proxy') != 'running':
-            for tag in probed:
-                protocols[tag]['evidence'].append(f'entry: контейнер probe-proxy {cont.get("probe-proxy")} — '
+        for tag in probed:
+            sidecar = SIDECAR_FOR.get(tag, 'probe-proxy')
+            if sidecar in cont and cont.get(sidecar) != 'running':
+                protocols[tag]['evidence'].append(f'entry: контейнер {sidecar} {cont.get(sidecar)} — '
                                                   'пробы слепы независимо от протокола')
 
     # --- protocols switched off in the cascade (see the docstring) ----------
@@ -1697,15 +1768,18 @@ def assess(layers: dict, now: Optional[datetime] = None) -> dict:
         p['down_for'] = None
         p.pop('degraded_reason', None)
     # Answers through a switched-off protocol still prove the channel up (the
-    # pager agrees); the DE reserve does not: it is meant to outlive exit.
+    # pager agrees); the DE reserve does not (it is meant to outlive exit),
+    # nor the SSH path (it reaches exit without entry): NON_CASCADE_TAGS.
     alive_switched_off = any(probe_state.get(t) in ('OK', 'DEGRADED')
-                             for t in off if t != probe_rules.RESERVE_TAG)
+                             for t in off if t not in probe_rules.NON_CASCADE_TAGS)
 
     # --- suspects ---------------------------------------------------------------
     states = {t: protocols[t]['state'] for t in REPORT_ORDER if t in protocols}
-    # The DE reserve is meant to outlive exit: alive while every cascade
-    # protocol is dark it is that same upstream incident (the pager agrees).
-    cascade_probed = [t for t in probed if t != probe_rules.RESERVE_TAG and t not in off]
+    # The DE reserve is meant to outlive exit, the SSH path skips entry:
+    # alive while every cascade protocol is dark they are that same upstream
+    # incident (the pager agrees).
+    cascade_probed = [t for t in probed
+                      if t not in probe_rules.NON_CASCADE_TAGS and t not in off]
     probed_down = [t for t in cascade_probed if states.get(t) == 'DOWN']
     all_dark = (len(cascade_probed) >= 2 and len(probed_down) == len(cascade_probed)
                 and not alive_switched_off)
@@ -1812,6 +1886,18 @@ def assess(layers: dict, now: Optional[datetime] = None) -> dict:
                               'title': f'{unit} активен, NAT и hop на месте — смотри auth ↔ bot /api/{ "hy2" if tag == "hy2" else "hy2t"}/auth',
                               'next': f"ssh exit-node \"journalctl -u {unit} -n 60 --no-pager | grep -iE 'auth|error|fail' | tail -20\""}]
                 suspects.extend(found)
+
+        if states.get(probe_rules.SSH_TAG) == 'DOWN':
+            # The SSH emergency path (E4): the probe user does not get in or
+            # cannot forward. The findings exit_server:ssh-exit and
+            # exit_sync:ssh-exit name a dead container or a stuck user sync.
+            suspects.append({'rank': 40, 'protocol': probe_rules.SSH_TAG,
+                             'title': 'SSH-выход на exit не пускает пробного пользователя — контейнер ssh-exit, '
+                                      'его синхронизация пользователей, SSH_HOST_KEY / SSH_USER_SECRET в '
+                                      '/opt/vpn-bot/.env на entry против сервера, порт в файрволе exit',
+                             'next': "ssh exit-node 'docker ps -a --filter name=ssh-exit; "
+                                     "docker logs --tail 40 ssh-exit; "
+                                     "journalctl -u ssh-exit-sync -n 20 --no-pager'"})
 
         rows_cmd = ('docker exec vpn-bot python3 -c "import sqlite3; c=sqlite3.connect(\'/var/lib/vpn-bot/bot.db\'); '
                     '[print(r) for r in c.execute(\\"SELECT ts,target_domain,status,latency_ms,error_msg FROM outbound_health '

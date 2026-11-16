@@ -1276,7 +1276,8 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
         per-protocol outages:
           * every cascade protocol dark at once — that is the probe
             sidecar or the exit link, ONE incident, not four (the DE
-            reserve does not count: it is meant to outlive exit);
+            reserve does not count: it is meant to outlive exit; nor does
+            the SSH emergency path, which reaches exit without entry);
           * no fresh rows at all — the probe job itself died, which the
             first version of this check could not see (too few samples
             => stay quiet), leaving it blind exactly when blindness was
@@ -1287,7 +1288,8 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
         up, and its dark probe would page critical every two hours. A
         switched-off protocol that still answers does prove the channel
         works, so it rules "all dark" out. The DE reserve, when dark, pages
-        as the reserve (B6). Every alert carries the line with all
+        as the reserve (B6), the SSH emergency path as itself (E4, probed
+        since 2026-11-15). Every alert carries the line with all
         protocols' numbers (B3).
 
         Returns the judged set too: only keys this run had a verdict for can
@@ -1353,14 +1355,18 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
         windows = {tag: _pr.judge_window(rows) for tag, rows in samples.items()}
         live = {t: w for t, w in windows.items() if t not in disabled}
         summary = _pr.summary_line(sorted(windows.items()), disabled)
-        cascade = {t: w for t, w in live.items() if t != _pr.RESERVE_TAG}
+        # The DE reserve and the SSH path are no cascade protocols
+        # (probe_rules.NON_CASCADE_TAGS): each pages as itself below.
+        cascade = {t: w for t, w in live.items() if t not in _pr.NON_CASCADE_TAGS}
         dark = {t for t, w in live.items() if w['verdict'] == _pr.VERDICT_DARK}
         measured = [t for t, w in cascade.items() if w['verdict'] != _pr.VERDICT_THIN]
         # Answers through a protocol the operator switched off still prove
-        # the channel up (the reserve does not: it is meant to outlive exit).
+        # the channel up (the reserve does not: it is meant to outlive exit;
+        # nor does the SSH path, which reaches exit without entry).
         alive_switched_off = any(
             w['verdict'] not in (_pr.VERDICT_DARK, _pr.VERDICT_THIN)
-            for t, w in windows.items() if t in disabled and t != _pr.RESERVE_TAG)
+            for t, w in windows.items()
+            if t in disabled and t not in _pr.NON_CASCADE_TAGS)
 
         def _keys(tag):
             return {f'protocol_down:{tag}', f'protocol_down:{tag}:degraded'}
@@ -1430,6 +1436,31 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
                     ),
                 ))
                 continue
+            if tag == _pr.SSH_TAG:
+                # warn, not critical (owner, 2026-11-15): the emergency path
+                # only, like the healthcheck's exit_server:ssh-exit. Below
+                # ALERT_TG_MIN_SEVERITY (critical by default) it stays on the
+                # dashboard: no chat, no PM fallback, the diagnosis not posted.
+                alerts.append(Alert(
+                    key=f'protocol_down:{tag}',
+                    severity='warn',
+                    min_cycles=2,
+                    title=f'Аварийный SSH-выход не пускает (лежит {how_long})',
+                    detail=(
+                        f"За последние {PROBE_RUNS} прогона ({w['n']} попыток) "
+                        f"через SSH-выход на exit (контейнер ssh-exit) не "
+                        f"вернулся ни один ответ: пробный пользователь не входит "
+                        f"или не может пробросить трафик. Платным этот путь "
+                        f"нужен в аварийном профиле (lockdown, /sos, /kit), "
+                        f"когда остальные лежат. Проверь на exit контейнер "
+                        f"ssh-exit и синхронизацию пользователей (находки "
+                        f"exit_server:ssh-exit, exit_sync:ssh-exit); "
+                        f"SSH_HOST_KEY и SSH_USER_SECRET в .env entry должны "
+                        f"совпадать с сервером.\n"
+                        f"Сейчас по пробам: {summary}."
+                    ),
+                ))
+                continue
             alerts.append(Alert(
                 key=f'protocol_down:{tag}',
                 severity='critical',
@@ -1455,6 +1486,24 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
         # family so the agent hook and the reset logic apply.
         for tag, w in sorted(live.items()):
             if w['verdict'] != _pr.VERDICT_DEGRADED:
+                continue
+            if tag == _pr.SSH_TAG:
+                alerts.append(Alert(
+                    key=f'protocol_down:{tag}:degraded',
+                    severity='warn',
+                    min_cycles=3,
+                    title=f"Аварийный SSH-выход деградировал: ok {w['ok']}/{w['n']}",
+                    detail=(
+                        f"SSH-выход на exit пускает пробного пользователя, но за "
+                        f"последние {PROBE_RUNS} прогона через него прошло лишь "
+                        f"{w['ok']} из {w['n']} проб "
+                        f"({_pr.degraded_threshold_text()}). Сравни с остальными "
+                        f"путями: если они в норме, смотри исходящие правила "
+                        f"контейнера ssh-exit (PermitOpen, iptables OUTPUT) и "
+                        f"его DNS.\n"
+                        f"Сейчас по пробам: {summary}."
+                    ),
+                ))
                 continue
             alerts.append(Alert(
                 key=f'protocol_down:{tag}:degraded',
@@ -1642,7 +1691,10 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
     # and cf-ws 09.11; with four blocks (8 h) only the ws outage, caught at
     # 22:00 on 29.10. Only an alert, never a DPIMonitor rule: a demotion
     # moves users off the protocol, its connections fall, and the rule
-    # would hold itself.
+    # would hold itself. For the same reason the alert gives no verdict on
+    # a protocol demoted for everyone (2026-11-15: ws, demoted by hand on
+    # 11-13 after the Cloudflare freeze, paged critical every 2 h for a
+    # week): see INBOUND_DROP_DEMOTION_TAIL_H.
     INBOUND_DROP_BLOCK_H = 2         # one block = two hours
     INBOUND_DROP_BLOCKS = 4          # four low blocks in a row = 8 h
     INBOUND_DROP_BASELINE_DAYS = 7   # the same clock block on each of 7 days
@@ -1657,6 +1709,15 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
     INBOUND_DROP_BASELINE_MIN_DAYS = 4
     INBOUND_DROP_MIN_MEDIAN = 50     # too quiet an inbound proves nothing
     INBOUND_DROP_RATIO = 0.2         # below a fifth of its usual count
+    # A protocol demoted for everyone (cascade_manual or cascade_auto, the
+    # global part) has users leaving it on purpose. Its blocks give no
+    # verdict while it is demoted and for a tail after: the tail lasts as
+    # long as the demotion did, at most this many hours, because a client
+    # takes the protocol back only at its next profile fetch, and FlClash
+    # fetches once a day. Those blocks stay out of its baseline too, or a
+    # week-long demotion would set "usual" to the demoted level. The spans
+    # come from demotion_spans, sampled at every recompute.
+    INBOUND_DROP_DEMOTION_TAIL_H = 24
     # A block counts only if the exit reported through most of it: the
     # reporter posts every 5 min, 24 times a block. Fewer = "no report",
     # never "no connections".
@@ -1698,7 +1759,11 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
         its own warn, ``inbound_drop:no_reports`` (only once a report has
         ever come); eight hours of reports that carry no rows at all page
         ``inbound_drop:empty_reports`` instead of every inbound at once.
-        Recomputed every 10 min."""
+        A protocol demoted for everyone gives no verdict either, while it
+        is demoted and for the tail after (INBOUND_DROP_DEMOTION_TAIL_H):
+        an alert already open stays open, without repeats or a recovery.
+        Recomputed every 10 min; each recompute also samples the demotion
+        stores into ``demotion_spans``."""
         now_ts = time.time()
         if (_drop_cache['result'] is not None
                 and now_ts - _drop_cache['at'] < INBOUND_DROP_RECOMPUTE_S):
@@ -1707,6 +1772,8 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
             db_path = getattr(config, 'DB_PATH', None) or '/var/lib/vpn-bot/bot.db'
             import sqlite3
             from datetime import datetime, timedelta
+
+            from bot.services import cascade_manual, demotion_spans
             now = datetime.utcnow()
             now_iso = now.isoformat()
             per_day = 24 // INBOUND_DROP_BLOCK_H
@@ -1762,6 +1829,24 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
                     "SELECT COUNT(*), COALESCE(SUM(rows), 0) FROM exit_reports WHERE ts >= ?",
                     (window_cut,),
                 ).fetchone()
+                stored = dict(conn.execute(
+                    "SELECT key, value FROM app_settings WHERE key IN (?, ?, ?)",
+                    ('cascade_auto', cascade_manual.SETTING_KEY, demotion_spans.SETTING_KEY),
+                ).fetchall())
+                protos = set(INBOUND_DROP_TAGS.values())
+                demoted = {p: since for p, since in demotion_spans.global_demotions(
+                               stored.get('cascade_auto'), stored.get(cascade_manual.SETTING_KEY),
+                               now).items() if p in protos}
+                spans, changed = demotion_spans.update(
+                    demotion_spans.load_spans(stored.get(demotion_spans.SETTING_KEY)),
+                    demoted, now)
+                if changed:
+                    # Best effort: a failed write costs only this sample (the
+                    # verdicts below use what was read), never the check.
+                    try:
+                        demotion_spans.save(conn, spans)
+                    except sqlite3.Error as e:
+                        logger.warning(f"{demotion_spans.SETTING_KEY} not written: {e}")
         except Exception as e:
             logger.warning(f"inbound-drop alert read failed: {e}")
             return ("inbound_drop:", [], frozenset())   # no verdict on anything
@@ -1787,13 +1872,20 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
             start, end = now_ts - (j + 1) * block_s, now_ts - j * block_s
             return start < inc[1] and end > inc[0]
 
-        def usual_for(tag, key, series, i):
+        def demoted_block(proto, j) -> bool:
+            """Block j falls in a demotion of ``proto`` for everyone, or in
+            the tail after one: users left the protocol on purpose."""
+            return demotion_spans.covers(
+                spans, proto, now_ts - (j + 1) * block_s, now_ts - j * block_s,
+                now_ts, INBOUND_DROP_DEMOTION_TAIL_H * 3600)
+
+        def usual_for(tag, proto, key, series, i):
             """Median of the same clock block on the 7 most recent usable
             days, or None (too little history: no verdict)."""
             vals = []
             for d in range(1, back_days + 1):
                 j = i + per_day * d
-                if in_incident(key, j):
+                if in_incident(key, j) or demoted_block(proto, j):
                     continue
                 if tag not in _BOT_TAGS and not exit_reported(j):
                     continue
@@ -1819,10 +1911,12 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
                 continue
             if not all(reported(tag, i) for i in range(INBOUND_DROP_BLOCKS)):
                 continue                       # no verdict: the key keeps its state
+            if any(demoted_block(proto, i) for i in range(INBOUND_DROP_BLOCKS)):
+                continue                       # demoted on purpose: no verdict either
             series = conns.get(tag, {})
             blocks = []
             for i in range(INBOUND_DROP_BLOCKS):
-                usual = usual_for(tag, key, series, i)
+                usual = usual_for(tag, proto, key, series, i)
                 if usual is None:
                     break
                 blocks.append((series.get(i, 0), usual))

@@ -139,7 +139,7 @@
             if (state.activeTab === 'users') {
                 fetchUsers().catch(e => console.error(e));
             }
-            showToast(`👤 ${msg.data.username || msg.data.chat_id} → ${msg.data.status}`, 'ok');
+            showToast(`👤 ${userName(msg.data, msg.data.chat_id)} → ${msg.data.status}`, 'ok');
             return;
         }
     }
@@ -542,8 +542,7 @@
         const activityMap = state.onlineByEmail || {};
 
         container.innerHTML = users.map(u => {
-            const name = u.username ? `@${esc(u.username)}`
-                : (u.contact_email ? `✉️ ${esc(u.contact_email)}` : 'no_username');
+            const name = userLabel(u, 'no_username');
             const actions = getAvailableActions(u.status);
             const act = u.email ? activityMap[u.email] : null;
             const isOnline = !!(act && act.online);
@@ -612,6 +611,10 @@
             return;
         }
 
+        if (d.username || d.contact_email) {
+            titleEl.textContent = `Пользователь ${userName(d)} · #${chatId}`;
+        }
+
         const mb = b => (b / (1024 * 1024)).toFixed(1);
         const gb = b => (b / (1024 * 1024 * 1024)).toFixed(2);
         const t = d.traffic || {};
@@ -647,6 +650,7 @@
             : '0 GB';
         const meta = [
             ['Статус', `<b>${esc(d.status || '—')}</b>`],
+            ...(d.contact_email ? [['Почта для связи', esc(d.contact_email)]] : []),
             ['Онлайн', isOnline ? '🟢 да' : '⚪ нет'],
             ['IP сейчас (60с)', ipLine],
             ['IP адреса', ipsList],
@@ -665,7 +669,7 @@
 
         const credBlock = d.uuid ? `
             <div class="detail-row"><span class="k">UUID</span><span class="v"><code>${esc(d.uuid)}</code></span></div>
-            <div class="detail-row"><span class="k">Email</span><span class="v"><code>${esc(d.email || '')}</code></span></div>
+            <div class="detail-row"><span class="k">Email в панели</span><span class="v"><code>${esc(d.email || '')}</code></span></div>
         ` : '<div class="detail-row"><span class="k">VPN-ключ</span><span class="v">не выдан</span></div>';
 
         const trafficBlock = t.quota_bytes > 0 ? `
@@ -2130,7 +2134,7 @@
                         ${ackTxt}
                     </div>
                     <div class="alert-title">
-                        ${esc(r.username || r.chat_id)} (${esc(r.status || '?')}) — ${esc(net)}
+                        ${userLabel(r, r.chat_id)} (${esc(r.status || '?')}) — ${esc(net)}
                     </div>
                     <div class="alert-detail">Последний трафик: ${esc(traffic)} · /sub: ${esc(subFetch)} (UTC)</div>
                 </div>`;
@@ -2444,12 +2448,12 @@
                     fillOpacity: 0.85,
                     weight: 2,
                 });
-                const who = esc(r.username || r.chat_id || '?');
+                const who = userLabel(r, `@${r.chat_id || '?'}`);
                 const net = [r.country, r.asn, r.city].filter(Boolean).map(esc).join(' / ');
                 m.bindPopup(`
                     <b>🆘 Report #${r.id}</b><br>
                     ${esc(r.ts)}<br>
-                    <code>@${who}</code><br>
+                    <code>${who}</code><br>
                     ${net}<br>
                     ${r.acked ? '<span style="color:#888">✓ закрыта</span>' : '<span style="color:#c83a3a">открыта</span>'}
                 `);
@@ -2500,7 +2504,7 @@
                 });
                 const where = [u.country, u.asn, u.city].filter(Boolean).map(esc).join(' / ');
                 m.bindPopup(`
-                    <b>👤 ${esc(u.username || u.chat_id || '?')}</b> (${esc(u.status || '?')})<br>
+                    <b>👤 ${userLabel(u, u.chat_id || '?')}</b> (${esc(u.status || '?')})<br>
                     ${where}
                 `);
                 group.addLayer(m);
@@ -2629,7 +2633,7 @@
                     <div class="xui-row" ${bu ? `onclick="window.__openDetail('${esc(bu.chat_id)}')"` : ''}>
                         <div class="xui-row-head">
                             <span class="xui-email">${esc(r.email || 'no_email')}</span>
-                            ${bu ? `<span class="xui-bot">@${esc(bu.username || '')} · ${esc(bu.status || '')}</span>` : '<span class="xui-bot xui-orphan">не в бот-БД</span>'}
+                            ${bu ? `<span class="xui-bot">${userLabel(bu)} · ${esc(bu.status || '')}</span>` : '<span class="xui-bot xui-orphan">не в бот-БД</span>'}
                         </div>
                         <div class="xui-row-meta">
                             <code class="xui-uuid">${esc((r.uuid || '').slice(0, 8))}…</code>
@@ -2643,7 +2647,7 @@
                     <div class="xui-row" onclick="window.__openDetail('${esc(r.chat_id)}')">
                         <div class="xui-row-head">
                             <span class="xui-email">${esc(r.email || '')}</span>
-                            <span class="xui-bot">@${esc(r.username || '')} · ${esc(r.status || '')}</span>
+                            <span class="xui-bot">${userLabel(r)} · ${esc(r.status || '')}</span>
                         </div>
                         <div class="xui-row-meta">
                             <code class="xui-uuid">${esc((r.uuid || '').slice(0, 8))}…</code>
@@ -2703,7 +2707,7 @@
             return `
                 <div class="subs-row" onclick="window.__openDetail('${esc(r.chat_id)}')">
                     <div class="subs-row-head">
-                        <span class="subs-user">@${esc(r.username || 'no_username')}</span>
+                        <span class="subs-user">${userLabel(r, 'no_username')}</span>
                         <span class="subs-status badge-${esc(r.user_status || r.status || '')}">${esc(r.user_status || r.status || '')}</span>
                     </div>
                     <div class="subs-row-meta">
@@ -2911,6 +2915,22 @@
         const div = document.createElement('div');
         div.textContent = String(str);
         return div.innerHTML;
+    }
+
+    // How the dashboard names a user, the rule of bot/utils/user_label.py:
+    // @username; else the contact address (a user added by email has no
+    // Telegram name, and its chat_id ext_… and panel email user_ext_… say
+    // nothing about who it is); else the fallback, user_<chat_id> by default.
+    // userName gives plain text (textContent, toasts), userLabel escaped HTML.
+    function userName(u, fallback) {
+        u = u || {};
+        if (u.username) return `@${u.username}`;
+        const mail = typeof u.contact_email === 'string' ? u.contact_email.trim() : '';
+        if (mail) return `✉️ ${mail}`;
+        return fallback !== undefined ? String(fallback) : `user_${u.chat_id}`;
+    }
+    function userLabel(u, fallback) {
+        return esc(userName(u, fallback));
     }
 
     // ==================== Agent replies ====================

@@ -18,6 +18,7 @@ except ImportError:
     SCHEDULER_AVAILABLE = False
 
 from bot.config import Platform, MESSAGES
+from bot.utils.user_label import user_label
 
 logger = logging.getLogger(__name__)
 
@@ -165,7 +166,7 @@ class NotificationService:
         if not self.config.FORUM_ENABLED:
             return False
             
-        username_display = f"@{user.username}" if user.username else "no_username"
+        username_display = user_label(user, fallback="no_username")
         text = (
             f"✅ <b>User Approved</b>\n\n"
             f"👤 User: <code>{user.chat_id}</code> ({username_display})\n"
@@ -484,7 +485,7 @@ class NotificationService:
         Returns:
             message_id or topic_id
         """
-        username = f"@{user.username}" if user.username else f"user_{user.chat_id}"
+        username = user_label(user)
         text = f"🆕 <b>New Demo Request</b>\n\nUser: {username}\nID: <code>{user.chat_id}</code>"
         keyboard = {
             'inline_keyboard': [
@@ -525,7 +526,7 @@ class NotificationService:
         the user turns out to be abusive, the admin can /ban or /reset
         them after the fact.
         """
-        username = f"@{user.username}" if user.username else f"user_{user.chat_id}"
+        username = user_label(user)
         text = (
             f"⚡ <b>Auto-approved</b>\n\n"
             f"User: {username}\n"
@@ -562,7 +563,7 @@ class NotificationService:
         Returns:
             topic_id or message_id
         """
-        username = f"@{user.username}" if user.username else f"user_{user.chat_id}"
+        username = user_label(user)
 
         # Build a topic title that is searchable in the topic list: the
         # @handle plus the first line of the issue (≤60 chars). Telegram
@@ -570,7 +571,7 @@ class NotificationService:
         snippet = (issue_text or '').strip().splitlines()[0] if (issue_text or '').strip() else ''
         if len(snippet) > 60:
             snippet = snippet[:57] + '…'
-        title_parts = [f"🎫 {username}"]
+        title_parts = [f"🎫 {user_label(user, html=False)}"]
         if snippet:
             title_parts.append(snippet)
         topic_name = ' · '.join(title_parts)[:128]
@@ -645,7 +646,7 @@ class NotificationService:
     
     def notify_payment_issue(self, user, issue: str) -> bool:
         """Notify admin about payment issue."""
-        username = f"@{user.username}" if user.username else f"user_{user.chat_id}"
+        username = user_label(user)
         text = f"💰 <b>Payment Issue</b>\nUser: {username}\nID: <code>{user.chat_id}</code>\n\n{issue}"
         
         try:

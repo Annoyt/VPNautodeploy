@@ -28,6 +28,7 @@ from bot.services.bot_token import BotTokenChanger
 from bot.utils.admin_token import verify_admin_token
 from bot.utils.rate_limit import check_admin_rate_limit, get_admin_rate_limit_remaining
 from bot.utils.prometheus import metrics, set_gauge_users, set_system_gauge
+from bot.utils.user_label import user_label
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +74,13 @@ _INTERNAL_NETS = tuple(ipaddress.ip_network(n) for n in (
 # Settings that hold the public address of one of our nodes. A value that
 # is a host name rather than an IP is skipped, never resolved.
 _OWN_NODE_SETTINGS = ('ENTRY_NODE_IP', 'EXIT_NODE_IP', 'HY2_HOST', 'FALLBACK_NODE_HOST')
+
+
+def _contact_email(user) -> Optional[str]:
+    """The user's contact address, which the dashboard shows for a user
+    without a Telegram username (``userLabel`` in app.js), or None."""
+    value = getattr(user, 'contact_email', None)
+    return value if isinstance(value, str) else None
 
 
 def _deployed_version() -> str:
@@ -181,6 +189,9 @@ class WebAppServer:
         # password (= user UUID) is the auth secret.
         self.app.router.add_post('/api/hy2/auth', self.handle_hy2_auth)
         self.app.router.add_post('/api/hy2t/auth', self.handle_hy2t_auth)
+        # The keys both callbacks let in, hashed: the exit's auth relay
+        # answers from them while the bot is down (A6). The exit's token.
+        self.app.router.add_get('/api/hy2/keys', self.handle_hy2_keys)
         self.app.router.add_post('/api/dpi/exit_report', self.handle_dpi_exit_report)
         self.app.router.add_post('/api/healthcheck/report', self.handle_healthcheck_report)
         self.app.router.add_get('/api/ssh/users', self.handle_ssh_users)
@@ -610,6 +621,91 @@ class WebAppServer:
         self._bg_tasks.add(task)
         task.add_done_callback(self._bg_tasks.discard)
 
+    def _hy2_quota_denies(self, email_id: str, *, refresh: bool, who=None) -> bool:
+        """The hy2 quota gate: True when the panel's cached reading says the
+        client is switched off or its quota is spent.
+
+        Hy2 bytes are bridged into the panel's client_traffics on the exit
+        host (hy2-traffic-collector), so the xray+hy2 quota is one shared
+        counter there. Without this gate, an over-quota user kicked out of
+        xray could still ride hy2 forever via reconnects.
+
+        The panel is NEVER awaited here. Hysteria blocks the client's
+        handshake on the auth callback, and the panel lookup (bot on entry
+        -> panel on exit) cost ~95 ms per new hy2 connection — ~620 ms when
+        the session had to log in again — on top of the ~100 ms the callback
+        already costs: the "hysteria connects slowly" complaint of
+        2026-09-30, a cost no other protocol pays. So the decision uses the
+        per-email panel reading a BACKGROUND refresh left in the cache (see
+        HY2_QUOTA_*). No reading yet (first connect since a bot restart) ->
+        allow; with ``refresh`` (the live callback) the refresh this triggers
+        gates the next connect. The exit relay's key list (handle_hy2_keys)
+        asks without ``refresh``: a list of every key must not start a panel
+        lookup per user.
+
+        The panel stays the only source of truth: the bot's users.quota_gb
+        is NOT the panel's limit (the probe user: 1 GB here, unlimited
+        there) — deciding from it denied a user the panel allows."""
+        import time as _time
+        cached = self._hy2_quota_cache.get(email_id)
+        age = _time.monotonic() - cached[0] if cached else None
+        t = cached[1] if cached is not None and age < self.HY2_QUOTA_STALE_MAX_S else None
+        if refresh and (cached is None or age >= self.HY2_QUOTA_FRESH_S):
+            self._schedule_hy2_quota_refresh(email_id)
+        if not t:
+            return False
+        # XUIService's API path speaks upload/download, its DB fallback
+        # up/down — accept both.
+        total = t.get('total') or 0
+        used = (
+            (t.get('upload') or t.get('up') or 0)
+            + (t.get('download') or t.get('down') or 0)
+        )
+        if t.get('enable') is False or (total > 0 and used >= total):
+            if refresh:
+                logger.info(
+                    f"hy2_auth: quota gate deny {who} "
+                    f"(used {used} of {total}, enable={t.get('enable')})"
+                )
+            return True
+        return False
+
+    def _hy2_keys_payload(self, rows) -> dict:
+        """``{"hy2": {hash: id}, "hy2t": {hash: id}}``: every key each
+        callback would let in now — the same status, expiry and tier gate
+        (hy2_keys.allows) and the same cached quota reading as the live
+        path, and the id it would answer. Runs on the event loop, where the
+        quota cache lives."""
+        from bot.services import hy2_keys
+        now = hy2_keys.utc_now()
+        keys = {route: {} for route, _paid in hy2_keys.ROUTES}
+        for uuid, chat_id, email, status, expiry in rows:
+            if email and self._hy2_quota_denies(email, refresh=False):
+                continue
+            ident = email or str(chat_id)
+            for route, paid_only in hy2_keys.ROUTES:
+                if hy2_keys.allows(status, expiry, paid_only, now):
+                    keys[route][hy2_keys.key_hash(uuid)] = ident
+        return keys
+
+    async def handle_hy2_keys(self, request: web.Request) -> web.Response:
+        """GET /api/hy2/keys — what the exit's auth relay answers from while
+        the bot does not answer (scripts/hy2_auth_relay.py, IMPROVEMENT_PLAN
+        F, A6): ``{"ok", "hy2": {hash: id}, "hy2t": {hash: id}}``, the keys
+        each callback would let in right now, hashed (hy2_keys.key_hash). The
+        exit report's token."""
+        if not self._dpi_token_ok(request):
+            return web.json_response({'ok': False}, status=403)
+        from bot.services import hy2_keys
+        try:
+            rows = await asyncio.to_thread(hy2_keys.read_rows, self.db)
+        except Exception as e:
+            logger.warning(f"hy2 keys: read failed: {e}")
+            # 503, never an empty list: the relay keeps the list it has
+            return web.json_response({'ok': False}, status=503)
+        return web.json_response({'ok': True, **self._hy2_keys_payload(rows)},
+                                 headers={'Cache-Control': 'no-store'})
+
     # Queued audit writes past which new ones are dropped (_spawn_hy2_record).
     HY2_RECORD_MAX_PENDING = 500
 
@@ -796,67 +892,22 @@ class WebAppServer:
             row = await self._hy2_user_row(password)
             if row:
                 chat_id_str, email_id, status, expiry = row[0], row[1], row[2], row[3]
-                expired = False
-                if expiry:
-                    try:
-                        from datetime import datetime as _dt
-                        exp = _dt.fromisoformat(expiry)
-                        if exp < _dt.utcnow():
-                            expired = True
-                    except Exception:
-                        pass
-                # Tier gate. Turbo (paid_only=True) mirrors PROTOCOL_TIER:
-                # a demo UUID extracted from a free key must not unlock
-                # the Brutal instance. The main instance additionally
-                # accepts the demo cohort (freemium hy2 since 2026-08-23);
-                # everything else (new/pending/rejected/banned) still
-                # fails closed on both.
-                from bot.handlers.callbacks.user import MyKeyAnswerHandler
-                allowed = set(MyKeyAnswerHandler.PAID_USER_STATUSES)
-                if not paid_only:
-                    allowed.add('demo')
-                if not expired and status in allowed:
+                # Status, expiry and tier (bot/services/hy2_keys.py; the
+                # exit relay's key list runs the same gate). Turbo
+                # (paid_only=True) mirrors PROTOCOL_TIER: a demo UUID
+                # extracted from a free key must not unlock the Brutal
+                # instance. The main instance additionally accepts the demo
+                # cohort (freemium hy2 since 2026-08-23); everything else
+                # (new/pending/rejected/banned) still fails closed on both.
+                from bot.services import hy2_keys
+                if hy2_keys.allows(status, expiry, paid_only):
                     decision = 'allow'
 
-        # Quota gate. Hy2 bytes are bridged into the panel's client_traffics
-        # on the exit host (hy2-traffic-collector), so the xray+hy2 quota is
-        # one shared counter there. Deny when the panel has disabled the
-        # client or the quota is spent — without this, an over-quota user
-        # kicked out of xray could still ride hy2 forever via reconnects.
-        #
-        # The panel is NEVER awaited here. Hysteria blocks the client's
-        # handshake on this callback, and the panel lookup (bot on entry ->
-        # panel on exit) cost ~95 ms per new hy2 connection — ~620 ms when
-        # the session had to log in again — on top of the ~100 ms this
-        # callback already costs: the "hysteria connects slowly" complaint of
-        # 2026-09-30, a cost no other protocol pays. So the decision uses the
-        # per-email panel reading a BACKGROUND refresh left in the cache (see
-        # HY2_QUOTA_*). No reading yet (first connect since a bot restart) ->
-        # allow; the refresh this triggers gates the next connect.
-        # The panel stays the only source of truth: the bot's users.quota_gb
-        # is NOT the panel's limit (the probe user: 1 GB here, unlimited
-        # there) — deciding from it denied a user the panel allows.
+        # Quota gate (_hy2_quota_denies): the panel's cached reading, never
+        # the panel itself on this path.
         if decision == 'allow' and email_id:
-            import time as _time
-            cached = self._hy2_quota_cache.get(email_id)
-            age = _time.monotonic() - cached[0] if cached else None
-            t = cached[1] if cached is not None and age < self.HY2_QUOTA_STALE_MAX_S else None
-            if cached is None or age >= self.HY2_QUOTA_FRESH_S:
-                self._schedule_hy2_quota_refresh(email_id)
-            if t:
-                # XUIService's API path speaks upload/download, its DB
-                # fallback up/down — accept both.
-                total = t.get('total') or 0
-                used = (
-                    (t.get('upload') or t.get('up') or 0)
-                    + (t.get('download') or t.get('down') or 0)
-                )
-                if t.get('enable') is False or (total > 0 and used >= total):
-                    decision = 'deny'
-                    logger.info(
-                        f"hy2_auth: quota gate deny {chat_id_str} "
-                        f"(used {used} of {total}, enable={t.get('enable')})"
-                    )
+            if self._hy2_quota_denies(email_id, refresh=True, who=chat_id_str):
+                decision = 'deny'
 
         # The writes go AFTER the answer (IMPROVEMENT_PLAN F, A4): hysteria
         # holds the client's handshake on this callback, and these used to
@@ -2386,6 +2437,7 @@ class WebAppServer:
         return web.json_response({
             'chat_id': user.chat_id,
             'username': user.username,
+            'contact_email': _contact_email(user),
             'status': user.status,
             'previous_state': getattr(user, 'previous_state', None),
             'lang': user.lang,
@@ -2750,6 +2802,7 @@ class WebAppServer:
                 entry['bot_user'] = {
                     'chat_id': bu.chat_id,
                     'username': bu.username,
+                    'contact_email': _contact_email(bu),
                     'status': bu.status,
                     'uuid_match': (bu.uuid == c.get('id')),
                 }
@@ -2761,6 +2814,7 @@ class WebAppServer:
             {
                 'chat_id': u.chat_id,
                 'username': u.username,
+                'contact_email': _contact_email(u),
                 'status': u.status,
                 'uuid': u.uuid,
                 'email': u.email,
@@ -3142,7 +3196,8 @@ class WebAppServer:
                 # subscriptions has no real created_at column on prod.
                 rows = conn.execute(
                     "SELECT s.id, s.chat_id, s.plan_type, s.started_at, s.expires_at, "
-                    "s.is_active, s.started_at, u.username, u.status "
+                    "s.is_active, s.started_at, u.username, u.status, "
+                    "u.contact_email "
                     "FROM subscriptions s LEFT JOIN users u ON u.chat_id = s.chat_id "
                     "ORDER BY s.id DESC LIMIT 1000"
                 ).fetchall()
@@ -3156,13 +3211,15 @@ class WebAppServer:
         seen_chat_ids: set = set()
 
         for r in rows:
-            sid, chat_id, plan, start, end, is_active, created_at, uname, ustatus = r
+            (sid, chat_id, plan, start, end, is_active, created_at, uname,
+             ustatus, contact) = r
             seen_chat_ids.add(str(chat_id))
             end_dt = _parse_dt(end)
             entry = {
                 'sub_id': sid,
                 'chat_id': chat_id,
                 'username': uname,
+                'contact_email': contact,
                 'user_status': ustatus,
                 'plan': plan or 'demo',
                 'start': start,
@@ -3188,6 +3245,7 @@ class WebAppServer:
             {
                 'chat_id': u.chat_id,
                 'username': u.username,
+                'contact_email': _contact_email(u),
                 'status': u.status,
                 'subscription_expiry': getattr(u, 'subscription_expiry', None),
             }
@@ -4402,7 +4460,7 @@ class WebAppServer:
                     f"SELECT ufr.id, ufr.ts, ufr.chat_id, ufr.country, "
                     f"       ufr.asn, ufr.last_sub_fetch_ts, "
                     f"       ufr.last_traffic_ts, ufr.acked_at, ufr.ack_note, "
-                    f"       u.username, u.status "
+                    f"       u.username, u.status, u.contact_email "
                     f"FROM user_failure_reports ufr "
                     f"LEFT JOIN users u ON u.chat_id = ufr.chat_id "
                     f"WHERE {sql_where} "
@@ -4417,7 +4475,7 @@ class WebAppServer:
                 'country': r[3], 'asn': r[4],
                 'last_sub_fetch_ts': r[5], 'last_traffic_ts': r[6],
                 'acked_at': r[7], 'ack_note': r[8],
-                'username': r[9], 'status': r[10],
+                'username': r[9], 'status': r[10], 'contact_email': r[11],
             }
             for r in rows_raw
         ]
@@ -4488,7 +4546,7 @@ class WebAppServer:
                 reports = conn.execute(
                     "SELECT ufr.id, ufr.ts, ufr.country, ufr.asn, ufr.city, "
                     "       ufr.lat, ufr.lon, ufr.acked_at, "
-                    "       u.username, u.chat_id "
+                    "       u.username, u.chat_id, u.contact_email "
                     "FROM user_failure_reports ufr "
                     "LEFT JOIN users u ON u.chat_id = ufr.chat_id "
                     "WHERE ufr.ts >= ? "
@@ -4513,7 +4571,8 @@ class WebAppServer:
                 ).fetchall()
                 users = conn.execute(
                     "SELECT chat_id, username, last_country, last_asn, "
-                    "       last_city, last_lat, last_lon, status "
+                    "       last_city, last_lat, last_lon, status, "
+                    "       contact_email "
                     "FROM users "
                     "WHERE status IN ('demo', 'paid', 'support_topic') "
                     "  AND last_lat IS NOT NULL AND last_lon IS NOT NULL",
@@ -4530,6 +4589,7 @@ class WebAppServer:
                     'lat': r[5], 'lon': r[6],
                     'acked': r[7] is not None,
                     'username': r[8], 'chat_id': r[9],
+                    'contact_email': r[10],
                 } for r in reports
             ],
             'fetches': [
@@ -4543,6 +4603,7 @@ class WebAppServer:
                     'chat_id': r[0], 'username': r[1],
                     'country': r[2], 'asn': r[3], 'city': r[4],
                     'lat': r[5], 'lon': r[6], 'status': r[7],
+                    'contact_email': r[8],
                 } for r in users
             ],
         })
@@ -4781,6 +4842,7 @@ class WebAppServer:
         await self._broadcast_ws('user_update', {
             'chat_id': updated_user.chat_id,
             'username': updated_user.username,
+            'contact_email': _contact_email(updated_user),
             'status': updated_user.status,
             'action': action,
         })
@@ -4791,6 +4853,7 @@ class WebAppServer:
             'user': {
                 'chat_id': updated_user.chat_id,
                 'username': updated_user.username,
+                'contact_email': _contact_email(updated_user),
                 'status': updated_user.status,
             }
         })
@@ -4967,7 +5030,7 @@ class WebAppServer:
 
         if not confirm:
             sample = [
-                (u.username or f"user_{u.chat_id}") for u in recipients[:10]
+                user_label(u, html=False) for u in recipients[:10]
             ]
             return web.json_response({
                 'preview': True,

@@ -11,6 +11,7 @@ from bot.services.admin_notifications import build_rejected_user_keyboard
 from bot.services.notifications import NotificationService
 from bot.services.user_lifecycle import revoke_user_key
 from bot.utils.exceptions import PermissionDeniedError, UserNotFoundError
+from bot.utils.user_label import user_label
 
 if TYPE_CHECKING:
     from bot.core.bot import Bot
@@ -64,7 +65,7 @@ class ApproveUserHandler(BaseCallbackHandler):
             self._send_user_not_found(admin_id, message, target_id)
             return
 
-        uname = f"@{user.username}" if user.username else f"user_{user.chat_id}"
+        uname = user_label(user)
 
         # Idempotency: only act if user is still in the PENDING_DEMO state.
         # Without this gate a stale Approve button (in a DM that wasn't edited
@@ -101,7 +102,9 @@ class ApproveUserHandler(BaseCallbackHandler):
             self._update_forum(message, user, admin_id)
 
         # Admin notification
-        self._notify_admin(message, target_id, user.username, admin_id)
+        self._notify_admin(message, target_id,
+                           user_label(user, fallback='no_username', html=False),
+                           admin_id)
 
         logger.info(f"User {target_id} approved by admin {admin_id}")
     
@@ -131,7 +134,7 @@ class ApproveUserHandler(BaseCallbackHandler):
             notifier = NotificationService(self.bot, self.db, self.config)
             notifier.notify_approved_admin_migration(user, admin_id)
     
-    def _notify_admin(self, message: dict, target_id: str, username: str, admin_id: str) -> None:
+    def _notify_admin(self, message: dict, target_id: str, who: str, admin_id: str) -> None:
         """Send approval confirmation to admin."""
         source_chat_id = str(message.get('chat', {}).get('id', admin_id))
         message_thread_id = message.get('message_thread_id')
@@ -140,7 +143,7 @@ class ApproveUserHandler(BaseCallbackHandler):
             chat_id=source_chat_id,
             message_thread_id=message_thread_id,
             target_thread_id=self.config.TOPIC_USERS,
-            text=f"✅ User {target_id} ({username or 'no_username'}) approved for DEMO."
+            text=f"✅ User {target_id} ({who}) approved for DEMO."
         )
 
 
@@ -187,7 +190,7 @@ class RejectUserHandler(BaseCallbackHandler):
             self._send_user_not_found(admin_id, message, target_id)
             return
 
-        uname = f"@{user.username}" if user.username else f"user_{user.chat_id}"
+        uname = user_label(user)
 
         # Idempotency — see ApproveUserHandler._approve_user for rationale.
         if user.status != UserState.PENDING_DEMO.value:
@@ -228,7 +231,9 @@ class RejectUserHandler(BaseCallbackHandler):
             self._update_forum(message, user, admin_id)
 
         # Admin notification
-        self._notify_admin(message, target_id, user.username, admin_id)
+        self._notify_admin(message, target_id,
+                           user_label(user, fallback='no_username', html=False),
+                           admin_id)
 
         logger.info(f"User {target_id} rejected by admin {admin_id} (count: {user.reject_count})")
     
@@ -262,12 +267,12 @@ class RejectUserHandler(BaseCallbackHandler):
         self.bot.send_message_to_topic(
             chat_id=self.config.FORUM_GROUP_ID,
             message_thread_id=self.config.TOPIC_REJECTED,
-            text=f"❌ <b>Request Rejected</b>\n\nUser: {user.chat_id} (@{user.username})\nAdmin: {admin_id}",
+            text=f"❌ <b>Request Rejected</b>\n\nUser: {user.chat_id} ({user_label(user)})\nAdmin: {admin_id}",
             parse_mode='HTML',
             reply_markup=keyboard
         )
     
-    def _notify_admin(self, message: dict, target_id: str, username: str, admin_id: str) -> None:
+    def _notify_admin(self, message: dict, target_id: str, who: str, admin_id: str) -> None:
         """Send rejection confirmation to admin."""
         source_chat_id = str(message.get('chat', {}).get('id', admin_id))
         message_thread_id = message.get('message_thread_id')
@@ -276,7 +281,7 @@ class RejectUserHandler(BaseCallbackHandler):
             chat_id=source_chat_id,
             message_thread_id=message_thread_id,
             target_thread_id=self.config.TOPIC_REJECTED,
-            text=f"❌ User {target_id} ({username or 'no_username'}) rejected."
+            text=f"❌ User {target_id} ({who}) rejected."
         )
 
 
@@ -334,7 +339,9 @@ class RevokeUserHandler(BaseCallbackHandler):
         notifier.notify_rejected(target_id, "Access revoked by administrator", user.lang)
 
         # Notify admin
-        self._notify_admin(message, target_id, user.username, admin_id)
+        self._notify_admin(message, target_id,
+                           user_label(user, fallback='no_username', html=False),
+                           admin_id)
 
         logger.info(f"User {target_id} access revoked by admin {admin_id}")
     
@@ -358,7 +365,7 @@ class RevokeUserHandler(BaseCallbackHandler):
         except Exception as e:
             logger.warning(f"Failed to delete client from X-UI: {e}")
     
-    def _notify_admin(self, message: dict, target_id: str, username: str, admin_id: str) -> None:
+    def _notify_admin(self, message: dict, target_id: str, who: str, admin_id: str) -> None:
         """Send revocation confirmation to admin."""
         source_chat_id = str(message.get('chat', {}).get('id', admin_id))
         message_thread_id = message.get('message_thread_id')
@@ -366,7 +373,7 @@ class RevokeUserHandler(BaseCallbackHandler):
         self.bot.send_message(
             chat_id=source_chat_id,
             message_thread_id=message_thread_id,
-            text=f"🚫 User {target_id} ({username or 'no_username'}) access revoked."
+            text=f"🚫 User {target_id} ({who}) access revoked."
         )
 
 
@@ -433,7 +440,7 @@ class AdminProfileHandler(BaseCallbackHandler):
             )
             return
         
-        username = f"@{user.username}" if user.username else "Нет username"
+        username = user_label(user, fallback="Нет username")
         text = (
             f"👤 <b>Профиль пользователя</b>\n\n"
             f"Имя: {username}\n"
@@ -504,7 +511,9 @@ class ResetApprovalHandler(BaseCallbackHandler):
         self._notify_user_reset(target_id, user.lang)
         
         # Notify admin
-        self._notify_admin(message, target_id, user.username, admin_id)
+        self._notify_admin(message, target_id,
+                           user_label(user, fallback='no_username', html=False),
+                           admin_id)
         
         logger.info(f"Approval reset for user {target_id} by admin {admin_id}")
     
@@ -560,16 +569,15 @@ class ResetApprovalHandler(BaseCallbackHandler):
         
         self.bot.send_message(chat_id=target_id, text=text)
     
-    def _notify_admin(self, message: dict, target_id: str, username: str, admin_id: str) -> None:
+    def _notify_admin(self, message: dict, target_id: str, who: str, admin_id: str) -> None:
         """Notify admin about reset."""
         source_chat_id = str(message.get('chat', {}).get('id', admin_id))
         message_thread_id = message.get('message_thread_id')
         
-        username_display = username or 'no_username'
         self.bot.send_message(
             chat_id=source_chat_id,
             message_thread_id=message_thread_id,
-            text=f"🔄 Approval reset for user {target_id} (@{username_display})."
+            text=f"🔄 Approval reset for user {target_id} ({who})."
         )
 
 
@@ -793,7 +801,7 @@ class BanFromTicketHandler(BaseCallbackHandler):
         except Exception as e:
             logger.warning(f"ban_from_ticket: audit log failed: {e}")
 
-        uname = f"@{user.username}" if user.username else f"user_{user.chat_id}"
+        uname = user_label(user)
         self.bot.send_message(
             chat_id=forum_group,
             message_thread_id=topic_id,

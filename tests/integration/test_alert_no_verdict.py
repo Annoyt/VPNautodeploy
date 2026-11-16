@@ -6,6 +6,10 @@
 * The inbound-drop baseline skips the blocks of the key's own incident, so a
   long outage stays open and a second drop soon after a recovery is still
   seen; eight hours of empty exit reports are the reporter's problem.
+* A protocol demoted for everyone (by hand or by DPIMonitor) gives no
+  inbound-drop verdict while demoted and for a tail after (as long as the
+  demotion, at most a day), and its demoted days stay out of the baseline;
+  an alert already open stays open without repeats (2026-11-15: ws).
 * The repeat cooldown and the ack are cleared on close only for the families
   whose recovery is posted.
 * An open key loaded from alert_state that no check reports heals.
@@ -15,6 +19,8 @@
 Level 2: real sqlite and the real checks; Telegram and the agent stubbed.
 """
 
+import json
+import sqlite3
 import time
 from datetime import datetime, timedelta
 from unittest.mock import Mock, patch
@@ -23,6 +29,7 @@ import pytest
 
 from bot.core.database import Database
 from bot.services import alert_manager as am
+from bot.services import cascade_manual, demotion_spans
 from bot.services import probe_rules as pr
 from bot.services.alert_manager import Alert, AlertManager, build_default_checks
 
@@ -263,6 +270,174 @@ class TestInboundDropAcrossARestart:
             m1.run_once()
         assert recovered(m1) == []
         assert m1._state['inbound_drop:hy2'].open
+
+
+# ------------------------------------------- inbound drop while demoted -----
+
+def hours_ago(h):
+    return datetime.utcnow() - timedelta(hours=h)
+
+
+def iso(ts):
+    return ts.isoformat(timespec='seconds')
+
+
+def demote_by_hand(db, proto='ws', *, since_h=48, ttl_h=72, asn=None):
+    cascade_manual.demote(db, proto, asn, timedelta(hours=ttl_h), 'admin:1',
+                          now=hours_ago(since_h))
+
+
+def demote_by_monitor(db, proto='ws', *, since_h=48):
+    db.set_setting('cascade_auto', json.dumps({
+        'global': {proto: {'since': iso(hours_ago(since_h)), 'reason': 'probe_bulk',
+                           'evidence': 'bulk 3/3 partial'}},
+        'asn': {}}))
+
+
+def set_journal(db, **spans):
+    """``ws=[(started_h_ago, ended_h_ago | None), …]``."""
+    db.set_setting(demotion_spans.SETTING_KEY, json.dumps({
+        proto: [[iso(hours_ago(a)), None if b is None else iso(hours_ago(b))] for a, b in ss]
+        for proto, ss in spans.items()}))
+
+
+def journal(db):
+    raw = db.get_setting(demotion_spans.SETTING_KEY)
+    return json.loads(raw) if raw else None
+
+
+def quiet_now(h):
+    """A normal week (240 a block), then 8.5 quiet hours."""
+    return 0 if h < 8.5 else 10
+
+
+class TestInboundDropWhileDemoted:
+    """2026-11-15: ws, demoted by hand on 11-13 after the Cloudflare freeze,
+    paged «Подключения ws на exit упали» critical every 2 h: its users left
+    it because of the demotion."""
+
+    def test_a_hand_demotion_gives_no_verdict(self, db, config):
+        seed_series(db, quiet_now, days=7.5)
+        assert 'inbound_drop:ws' in drop_alerts(config)[0]      # pages without it
+        demote_by_hand(db)
+        alerts, judged = drop_alerts(config)
+        assert 'inbound_drop:ws' not in alerts and 'inbound_drop:ws' not in judged
+
+    def test_a_monitor_demotion_too(self, db, config):
+        seed_series(db, quiet_now, days=7.5)
+        demote_by_monitor(db)
+        alerts, judged = drop_alerts(config)
+        assert 'inbound_drop:ws' not in alerts and 'inbound_drop:ws' not in judged
+
+    def test_the_other_inbounds_keep_their_verdict(self, db, config):
+        seed_series(db, quiet_now, days=7.5)
+        seed_series(db, quiet_now, days=7.5, tag='reality', beats=False)
+        demote_by_hand(db, 'ws')
+        alerts, judged = drop_alerts(config)
+        assert 'inbound_drop:reality' in alerts and 'inbound_drop:ws' not in judged
+
+    def test_a_demotion_for_one_network_still_pages(self, db, config):
+        # an inbound counts every network's users: one network leaving does
+        # not take it below a fifth, so a drop this deep is not explained
+        seed_series(db, quiet_now, days=7.5)
+        demote_by_hand(db, asn='AS31133')
+        assert 'inbound_drop:ws' in drop_alerts(config)[0]
+
+    def test_an_expired_hand_demotion_is_none(self, db, config):
+        seed_series(db, quiet_now, days=7.5)
+        demote_by_hand(db, since_h=80, ttl_h=24)               # ended 56 h ago, never seen
+        assert 'inbound_drop:ws' in drop_alerts(config)[0]
+
+    def test_the_journal_follows_the_stores(self, db, config):
+        seed_series(db, quiet_now, days=7.5)
+        demote_by_hand(db, since_h=48)
+        check = named_check(config, 'check_inbound_drop')
+        check()
+        [[start, end]] = journal(db)['ws']
+        assert end is None
+        assert abs(datetime.fromisoformat(start) - hours_ago(48)) < timedelta(minutes=1)
+        cascade_manual.restore(db, 'ws', None)
+        check.cache['at'] = 0.0
+        judged = check()[2]
+        [[start2, end2]] = journal(db)['ws']
+        assert start2 == start
+        assert abs(datetime.fromisoformat(end2) - datetime.utcnow()) < timedelta(minutes=1)
+        # ended a moment ago: its tail still covers the window
+        assert 'inbound_drop:ws' not in judged
+
+    def test_the_tail_lasts_a_day_after_a_long_demotion(self, db, config):
+        seed_series(db, quiet_now, days=12)
+        set_journal(db, ws=[(92, 20)])          # three days, ended 20 h ago
+        alerts, judged = drop_alerts(config)
+        assert 'inbound_drop:ws' not in judged
+        set_journal(db, ws=[(105, 33)])         # its tail ended 9 h ago
+        assert 'inbound_drop:ws' in drop_alerts(config)[0]
+
+    def test_a_short_demotion_has_a_short_tail(self, db, config):
+        seed_series(db, quiet_now, days=7.5)
+        set_journal(db, ws=[(11, 10)])          # one hour: its tail ended 9 h ago
+        assert 'inbound_drop:ws' in drop_alerts(config)[0]
+        set_journal(db, ws=[(8, 7)])            # its tail reaches into the window
+        alerts, judged = drop_alerts(config)
+        assert 'inbound_drop:ws' not in judged
+
+    def test_demoted_days_stay_out_of_the_baseline(self, db, config):
+        # two normal weeks, but users left ws during a six-day demotion that
+        # ended two days ago; now 8.5 quiet hours. With the demoted days in
+        # it the "usual" would be 24 a block, below the 50 that proves anything.
+        seed_series(db, lambda h: 0 if h < 8.5 else (1 if 48 <= h < 192 else 10), days=14.5)
+        set_journal(db, ws=[(192, 48)])
+        alerts, judged = drop_alerts(config)
+        assert 'inbound_drop:ws' in alerts
+        assert '0 из ~240' in alerts['inbound_drop:ws'].detail
+
+    def test_an_open_alert_stays_open_and_quiet(self, db, config):
+        seed_series(db, quiet_now, days=7.5)
+        check = named_check(config, 'check_inbound_drop')
+        m = mgr(db, config, check)
+        m.run_once()
+        assert m._state['inbound_drop:ws'].open
+        # control: past the repeat cooldown the drop pages again
+        sent = len(texts(m))
+        check.cache['at'] = 0.0
+        m._state['inbound_drop:ws'].last_fired_ts = 0.0
+        m.run_once()
+        assert len(texts(m)) > sent
+        demote_by_hand(db, since_h=1)
+        sent = len(texts(m))
+        for _ in range(am.RECOVERY_TICKS + 1):
+            check.cache['at'] = 0.0
+            m._state['inbound_drop:ws'].last_fired_ts = 0.0
+            m.run_once()
+        assert len(texts(m)) == sent                           # no repeat, no recovery
+        assert m._state['inbound_drop:ws'].open
+
+    def test_a_failed_journal_write_costs_only_the_sample(self, db, config, monkeypatch):
+        seed_series(db, quiet_now, days=7.5)
+        demote_by_hand(db)
+
+        def locked(conn, spans):
+            raise sqlite3.OperationalError('database is locked')
+
+        monkeypatch.setattr(demotion_spans, 'save', locked)
+        alerts, judged = drop_alerts(config)
+        assert 'inbound_drop:ws' not in judged                 # read from the store
+        assert 'inbound_drop:stls' in judged
+        assert journal(db) is None
+
+    def test_a_broken_journal_starts_over(self, db, config):
+        seed_series(db, quiet_now, days=7.5)
+        db.set_setting(demotion_spans.SETTING_KEY, '{not json')
+        demote_by_hand(db)
+        assert 'inbound_drop:ws' not in drop_alerts(config)[1]
+        assert journal(db)['ws'][0][1] is None
+
+    def test_protocols_without_an_inbound_are_not_journaled(self, db, config):
+        seed_series(db, quiet_now, days=7.5)
+        demote_by_hand(db, 'hy2t')
+        demote_by_monitor(db, 'de')
+        assert 'inbound_drop:ws' in drop_alerts(config)[0]
+        assert journal(db) is None
 
 
 class TestReporterKeys:

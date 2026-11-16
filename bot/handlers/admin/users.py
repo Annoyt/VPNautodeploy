@@ -13,6 +13,7 @@ from bot.core.state_machine import StateMachine
 from bot.services.notifications import NotificationService
 from bot.services.user_lifecycle import revoke_user_key
 from bot.services.vpn import VPNService
+from bot.utils.user_label import user_label
 from .base import AdminHandlerBase
 
 logger = logging.getLogger(__name__)
@@ -31,7 +32,7 @@ class AdminUsersMixin(AdminHandlerBase):
         
         text = f"📋 <b>Ожидают одобрения ({len(users)}):</b>\n\n"
         for user in users:
-            username = f"@{user.username}" if user.username else f"user_{user.chat_id}"
+            username = user_label(user)
             text += f"• {username} <code>{user.chat_id}</code>\n"
             if user.email:
                 text += f"  📧 {user.email}\n"
@@ -63,7 +64,7 @@ class AdminUsersMixin(AdminHandlerBase):
         lang = target.lang or 'ru'
         notifier.notify_approved(target.chat_id, lang)
         
-        username = f"@{target.username}" if target.username else f"user_{target.chat_id}"
+        username = user_label(target, html=False)
         self._send(chat_id=chat_id, text=f"✅ {username} одобрен и активирован.")
         logger.info(f"Admin {chat_id} approved user {target.chat_id}")
 
@@ -88,7 +89,7 @@ class AdminUsersMixin(AdminHandlerBase):
         notifier = NotificationService(self.bot, self.db, self.config)
         notifier.notify_rejected(target.chat_id, target.lang)
 
-        username = f"@{target.username}" if target.username else f"user_{target.chat_id}"
+        username = user_label(target, html=False)
         self._send(chat_id=chat_id, text=f"❌ {username} отклонён.")
         logger.info(f"Admin {chat_id} rejected user {target.chat_id}")
 
@@ -113,7 +114,7 @@ class AdminUsersMixin(AdminHandlerBase):
             except Exception as e:
                 logger.warning(f"Could not get traffic for {target.email}: {e}")
         
-        username = f"@{target.username}" if target.username else "(no username)"
+        username = user_label(target, fallback="(no username)")
         
         text = (
             f"👤 <b>Пользователь {username}</b>\n"
@@ -154,7 +155,7 @@ class AdminUsersMixin(AdminHandlerBase):
         sm = StateMachine(self.db)
         sm.transition(target.chat_id, UserState.BANNED)
 
-        username = f"@{target.username}" if target.username else f"user_{target.chat_id}"
+        username = user_label(target, html=False)
         self._send(chat_id=chat_id, text=f"🚫 {username} забанен.")
         logger.info(f"Admin {chat_id} banned user {target.chat_id}")
 
@@ -182,7 +183,7 @@ class AdminUsersMixin(AdminHandlerBase):
         sm = StateMachine(self.db)
         sm.transition(target.chat_id, UserState.NEW)
 
-        username = f"@{target.username}" if target.username else f"user_{target.chat_id}"
+        username = user_label(target, html=False)
         self._send(chat_id=chat_id, text=f"✅ {username} разбанен.")
         logger.info(f"Admin {chat_id} unbanned user {target.chat_id}")
 
@@ -213,7 +214,7 @@ class AdminUsersMixin(AdminHandlerBase):
         # Clear user data
         self.db.reset_user_data(target.chat_id)
         
-        username = f"@{target.username}" if target.username else f"user_{target.chat_id}"
+        username = user_label(target, html=False)
         self.bot.send_message(
             chat_id=chat_id,
             text=f"🔄 {username} сброшен (статус: new)."
@@ -257,7 +258,7 @@ class AdminUsersMixin(AdminHandlerBase):
                 except Exception as e:
                     logger.warning(f"Could not update limit in X-UI: {e}")
         
-        username = f"@{target.username}" if target.username else f"user_{target.chat_id}"
+        username = user_label(target, html=False)
         self.bot.send_message(
             chat_id=chat_id,
             text=f"✅ Лимит IP для {username} установлен: {limit}"
@@ -298,7 +299,7 @@ class AdminUsersMixin(AdminHandlerBase):
             except Exception as e:
                 logger.warning(f"Could not update quota in X-UI: {e}")
         
-        username = f"@{target.username}" if target.username else f"user_{target.chat_id}"
+        username = user_label(target, html=False)
         new_quota = user.quota_gb if user else target.quota_gb
         self.bot.send_message(
             chat_id=chat_id,
@@ -347,7 +348,7 @@ class AdminUsersMixin(AdminHandlerBase):
         lang = target.lang or 'ru'
         notifier.notify_payment_approved(target.chat_id, lang)
         
-        username = f"@{target.username}" if target.username else f"user_{target.chat_id}"
+        username = user_label(target, html=False)
         self.bot.send_message(
             chat_id=chat_id,
             text=f"✅ Оплата {username} подтверждена. Подписка до {end_date[:10]}."
@@ -378,14 +379,8 @@ class AdminUsersMixin(AdminHandlerBase):
         text = f"👥 <b>{title}</b>\n\n"
         
         for user in users[:50]:  # Limit to 50 users
-            # Email-only (ext_*) users have no Telegram username — the
-            # contact address is the only thing an admin can recognize.
-            if user.username:
-                username = f"@{user.username}"
-            elif user.contact_email:
-                username = f"✉️ {user.contact_email}"
-            else:
-                username = f"ID:{(user.chat_id or '?')[:8]}"
+            username = user_label(
+                user, fallback=f"ID:{(user.chat_id or '?')[:8]}")
             status_emoji = {
                 'demo': '🎁',
                 'paid': '💎',

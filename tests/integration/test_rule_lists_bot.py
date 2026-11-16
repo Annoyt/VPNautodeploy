@@ -76,8 +76,8 @@ def bot():
 
 
 def seed_user(db, chat_id='111', username='alice', status='demo', uuid='auto', **kw):
-    # one uuid per user: users.uuid is UNIQUE and save_user is an
-    # INSERT OR REPLACE — a shared uuid silently deletes the earlier row
+    # one uuid per user: users.uuid is UNIQUE, and save_user refuses a
+    # uuid another row holds (AGENTS.md "Saving a user")
     if uuid == 'auto':
         uuid = f"{UUID[:24]}{int(chat_id):012d}"
     db.save_user(User(chat_id=chat_id, username=username, status=status, uuid=uuid,

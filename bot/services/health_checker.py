@@ -7,11 +7,12 @@ protocol:
    probe-proxy sidecar's per-protocol HTTP proxy (sing-box with the
    actual reality/hy2/ws/stls outbounds, plus hy2t on deployments that
    set HY2T_PORT and the DE reserve where it is configured; see
-   scripts/gen_probe_config.py)
+   scripts/gen_probe_config.py) — or, for xhr and the SSH emergency path,
+   through the mihomo sidecar (scripts/gen_probe_config_mihomo.py)
 2. Records latency + status in ``outbound_health`` table, one row per
    (outbound_tag, target_domain) — the tag IS the protocol short-name
-   ('hy2t' for Turbo, 'de' for the reserve), which is what the pager and
-   /protocols key on.
+   ('hy2t' for Turbo, 'de' for the reserve, 'ssh' for the SSH emergency
+   path), which is what the pager and /protocols key on.
 3. Downloads ``BULK_BYTES`` through the same proxy and records it in
    ``outbound_bulk`` (IMPROVEMENT_PLAN F, B1): a HEAD cannot show a path
    that freezes after the first kilobytes.
@@ -88,9 +89,24 @@ class HealthChecker:
     # compose service probe-proxy-mihomo). Probed where XHR_SNI is set.
     XHR_TAG = 'xhr'
     XHR_PROBE_PORT = 18087
+
+    # The SSH emergency path (IMPROVEMENT_PLAN F, E4; AGENTS.md §51): the
+    # ssh-exit container on exit, in the emergency profiles of active payers.
+    # Since PR #58 the healthcheck watches its container and its user sync;
+    # this probe checks that a user gets in and forwards traffic. sing-box
+    # speaks ssh too, but the mihomo sidecar runs the core the users' Clash
+    # profile runs. The probe user (probe_internal, paid until 2099) is an
+    # eligible payer, so ssh-exit lists it, under credentials derived from
+    # its uuid (bot/services/ssh_exit.py). Probed wherever the bot hands the
+    # path out: ssh_exit.enabled(config).
+    SSH_TAG = probe_rules.SSH_TAG
+    SSH_PROBE_PORT = 18088
+
+    # The tags the mihomo sidecar serves (gen_probe_config_mihomo.py reads it).
+    MIHOMO_TAGS = (XHR_TAG, SSH_TAG)
     # Tags whose sidecar inbound arrives with a regenerated probe config:
     # until it does, every probe is proxy_down and nothing is written.
-    OPTIONAL_SIDECAR_TAGS = (RESERVE_TAG, XHR_TAG)
+    OPTIONAL_SIDECAR_TAGS = (RESERVE_TAG, XHR_TAG, SSH_TAG)
 
     # Per-request time budget, seconds. Every request of a run starts at
     # once (the pool holds one connection per target), so the budget is
@@ -163,6 +179,8 @@ class HealthChecker:
             ports[cls.RESERVE_TAG] = cls.RESERVE_PROBE_PORT
         if cls.xhr_probe_enabled(config):
             ports[cls.XHR_TAG] = cls.XHR_PROBE_PORT
+        if cls.ssh_probe_enabled(config):
+            ports[cls.SSH_TAG] = cls.SSH_PROBE_PORT
         return ports
 
     @staticmethod
@@ -170,6 +188,14 @@ class HealthChecker:
         """Same gate as subscription._build_xhr: XHR_SNI set (a string)."""
         sni = getattr(config, 'XHR_SNI', '') or ''
         return isinstance(sni, str) and bool(sni.strip())
+
+    @staticmethod
+    def ssh_probe_enabled(config) -> bool:
+        """Same gate as the emergency profiles' SSH server
+        (ssh_exit.enabled): SSH_EXIT_HOST, SSH_USER_SECRET and SSH_HOST_KEY
+        set, as strings — a Mock attribute in tests is "not configured"."""
+        from bot.services import ssh_exit
+        return ssh_exit.enabled(config)
 
     @classmethod
     def probe_tags_for(cls, config) -> List[str]:
@@ -190,7 +216,7 @@ class HealthChecker:
         port = self.probe_ports.get(protocol)
         if not port:
             return None
-        if protocol == self.XHR_TAG:
+        if protocol in self.MIHOMO_TAGS:
             host = (getattr(self.config, 'PROBE_PROXY_MIHOMO_HOST', '') or
                     'probe-proxy-mihomo')   # Settings + compose pass it
             host = host.strip() if isinstance(host, str) else 'probe-proxy-mihomo'
@@ -222,10 +248,11 @@ class HealthChecker:
 
         A connection pool of one connection per target: no request waits
         for another to finish, so ``TIMEOUT_SEC`` is each request's own
-        budget (B1). None (and nothing written) for the DE reserve when the
-        sidecar has no inbound for it yet: every probe ``proxy_down`` means
-        the probe config predates B6 — rows saying "dark" would page about
-        a reserve that may be fine."""
+        budget (B1). None (and nothing written) for a tag of
+        ``OPTIONAL_SIDECAR_TAGS`` (the DE reserve, xhr, ssh) when its sidecar
+        has no inbound for it yet: every probe ``proxy_down`` means the
+        probe config predates the tag — rows saying "dark" would page about
+        a path that may be fine."""
         proxy = self._proxy_url(protocol)
         # A sidecar of its own that does not answer at all (not created yet,
         # stopped, its name unresolvable) is not a dark protocol: aiohttp
@@ -256,7 +283,7 @@ class HealthChecker:
                 logger.warning(
                     f"health_checker: no probe sidecar inbound for {protocol} yet — "
                     f"regenerate it (scripts/gen_probe_config.py, "
-                    f"gen_probe_config_mihomo.py for xhr); no rows written"
+                    f"gen_probe_config_mihomo.py for xhr and ssh); no rows written"
                 )
                 return None
             for domain, result in protocol_results.items():

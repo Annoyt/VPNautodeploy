@@ -40,7 +40,7 @@ tls:
 auth:
   type: http
   http:
-    url: http://127.0.0.1:8080/api/hy2/auth?marker=AUTH-MARKER
+    url: http://130.49.146.10:8080/api/hy2/auth?marker=AUTH-MARKER
     insecure: false
 
 ignoreClientBandwidth: true
@@ -131,14 +131,17 @@ def view(cfg=None):
 
 
 def layer_c(*, hysteria='active', turbo='active', hy=None, turbo_facts=None, listen=('127.0.0.1:2019',),
-            version=V26, cfg=None, guard=None):
+            version=V26, cfg=None, guard=None, relay='inactive'):
     hy = facts(HY_CONFIG + ACL_52) if hy is None else hy
     g = {'hysteria': {'hysteria': hy, 'hysteria-turbo': hy if turbo_facts is None else turbo_facts},
          'listen_2019': list(listen) if listen is not None else None,
          'xray_version': version, 'xray': view(cfg)}
     if guard is not None:
         g = guard
-    return {'ok': True, 'services': {'hysteria': hysteria, 'hysteria-turbo': turbo}, 'guard': g}
+    services = {'hysteria': hysteria, 'hysteria-turbo': turbo}
+    if relay is not None:
+        services['hy2-auth-relay'] = relay
+    return {'ok': True, 'services': services, 'guard': g}
 
 
 def found(c):
@@ -151,7 +154,8 @@ class TestHelpersOnExit:
 
     def test_no_acl_block_leaves_nothing_of_the_config(self):
         got = facts(HY_CONFIG)
-        assert got == {'config': '/etc/hysteria/config.yaml', 'acl_lines': []}
+        assert got == {'config': '/etc/hysteria/config.yaml', 'auth_relay': False,
+                       'acl_lines': []}
 
     def test_only_the_acl_block_leaves_the_host(self):
         got = facts(HY_CONFIG + ACL_52 + 'masquerade:\n  type: proxy\n')
@@ -198,6 +202,27 @@ class TestHelpersOnExit:
         got = facts('', unit=unit, files={'/etc/hysteria/config.json': json.dumps(cfg)})
         assert got['acl_json'] == {'inline': ['reject(127.0.0.0/8)']}
         assert 'AUTH-MARKER' not in json.dumps(got)
+
+    def test_whether_hysteria_asks_the_relay_and_only_that(self):
+        relay = HY_CONFIG.replace('http://130.49.146.10:8080/api/hy2/auth?marker=AUTH-MARKER',
+                                  'http://127.0.0.1:9979/api/hy2/auth')
+        got = facts(relay + ACL_52)
+        assert got['auth_relay'] is True
+        assert '9979' not in json.dumps(got) and 'url' not in json.dumps(got)
+        for text, asks in ((HY_CONFIG, False),
+                           (HY_CONFIG.replace('http://130.49.146.10:8080',
+                                              'https://entry-hop.invalid:8448'), False),
+                           (relay.replace('    url:', '#   url:'), False),
+                           (relay.replace('/api/hy2/auth', '/api/hy2t/auth'), True),
+                           (relay.replace('127.0.0.1:9979', '[::1]:9979'), True),
+                           (relay.replace('127.0.0.1:9979', 'localhost'), True)):
+            assert facts(text)['auth_relay'] is asks, text
+        unit = UNIT.replace('config.yaml', 'config.json')
+        cfg = {'auth': {'type': 'http', 'http': {'url': 'http://127.0.0.1:9979/api/hy2t/auth'}}}
+        assert facts('', unit=unit, files={'/etc/hysteria/config.json':
+                                           json.dumps(cfg)})['auth_relay'] is True
+        assert 'auth_relay' not in G['guard_hysteria'](
+            UNIT, lambda p: (_ for _ in ()).throw(PermissionError(p)))
 
     def test_listeners_on_2019(self):
         ss = ('LISTEN 0 4096 127.0.0.1:2019 0.0.0.0:* users:(("caddy",pid=825,fd=11))\n'
@@ -477,7 +502,7 @@ class TestFindings:
 
     def test_an_unanswered_state_is_unjudged_not_stopped(self):
         findings, unjudged = hc.exit_guard(layer_c(turbo='Failed to connect to bus'))
-        assert unjudged == ['hy2_acl:hysteria-turbo']
+        assert unjudged == ['hy2_acl:hysteria-turbo', 'hy2_relay']
         assert [f['key'] for f in findings] == ['exit_guard_unreadable']
 
     def test_a_switched_off_turbo_still_running_is_judged(self):
@@ -487,14 +512,14 @@ class TestFindings:
 
     def test_an_unreadable_config_is_unjudged_not_fixed(self):
         findings, unjudged = hc.exit_guard(layer_c(turbo_facts={'config': '/x', 'error': 'denied'}))
-        assert unjudged == ['hy2_acl:hysteria-turbo']
+        assert unjudged == ['hy2_acl:hysteria-turbo', 'hy2_relay']
         assert [f['key'] for f in findings] == ['exit_guard_unreadable']
         assert findings[0]['severity'] == 'warn' and 'denied' in findings[0]['title']
 
     def test_an_unknown_unit_state_is_unjudged(self):
         c = layer_c()
         del c['services']['hysteria']
-        assert hc.exit_guard(c)[1] == ['hy2_acl:hysteria']
+        assert hc.exit_guard(c)[1] == ['hy2_acl:hysteria', 'hy2_relay']
 
     def test_an_exposed_api(self):
         got = found(layer_c(cfg=with_socks(xray_config())))
@@ -520,12 +545,12 @@ class TestFindings:
         c = layer_c()
         del c['guard']
         assert hc.exit_guard(c) == ([], ['hy2_acl:hysteria', 'hy2_acl:hysteria-turbo',
-                                         'xray_api_exposed', 'xray_api_polling'])
+                                         'xray_api_exposed', 'xray_api_polling', 'hy2_relay'])
 
     def test_a_crashed_guard_read(self):
         findings, unjudged = hc.exit_guard(layer_c(guard={'hysteria': {}, 'error': 'boom'}))
         assert [f['key'] for f in findings] == ['exit_guard_unreadable']
-        assert len(unjudged) == 4
+        assert len(unjudged) == 5
 
     def test_findings_for_carries_them_only_when_exit_looked(self):
         base = {'a': {'ok': True}, 'b': {'ok': False}, 'c': layer_c(hy=facts(HY_CONFIG))}
@@ -543,7 +568,8 @@ class TestFindings:
         # this layer C carries no exit_servers facts: those keys are unjudged
         # too (TestExitServers in test_protocol_healthcheck.py)
         assert [k for k in report['unjudged']
-                if not k.startswith(('exit_server:', 'exit_sync:'))] == ['hy2_acl:hysteria-turbo']
+                if not k.startswith(('exit_server:', 'exit_sync:'))] == [
+                    'hy2_acl:hysteria-turbo', 'hy2_relay']
         text = hc.render_human(report)
         assert 'НАХОДКИ' in text and 'hy2_acl:hysteria' in text and 'exit_guard_unreadable' in text
 
@@ -551,3 +577,69 @@ class TestFindings:
         blob = json.dumps({'services': {}, 'guard': {'listen_2019': []}})
         assert hc.parse_exit_json(blob)['guard'] == {'listen_2019': []}
         assert hc.parse_exit_json(json.dumps({'guard': 'x'}))['guard'] == {}
+
+
+# --------------------------------------------------------- the auth relay ---
+
+ASKS = facts(HY_CONFIG.replace('http://130.49.146.10:8080/api/hy2/auth?marker=AUTH-MARKER',
+                               'http://127.0.0.1:9979/api/hy2/auth') + ACL_52)
+
+
+class TestAuthRelay:
+    """AGENTS.md §56: a hysteria that asks the relay refuses every new hy2
+    connection while the relay is down."""
+
+    @pytest.mark.parametrize('state', ['inactive', 'failed', 'activating'])
+    def test_hysteria_asks_a_relay_that_is_down(self, state):
+        findings, unjudged = hc.exit_guard(layer_c(hy=ASKS, relay=state))
+        assert unjudged == []
+        assert [f['key'] for f in findings] == ['hy2_relay']
+        f = findings[0]
+        assert f['severity'] == 'critical' and f['layer'] == 'c'
+        assert f'hy2-auth-relay на exit: {state} — hysteria, hysteria-turbo' in f['title']
+        assert 'journalctl -u hy2-auth-relay' in f['next']
+
+    def test_a_relay_that_is_up_is_quiet(self):
+        assert hc.exit_guard(layer_c(hy=ASKS, relay='active')) == ([], [])
+
+    def test_a_relay_nobody_asks_is_none_of_its_business(self):
+        for relay in ('inactive', 'failed', 'activating', None):
+            assert hc.exit_guard(layer_c(relay=relay)) == ([], []), relay
+
+    def test_only_a_running_hysteria_counts(self):
+        f = found(layer_c(hy=ASKS, turbo='inactive', turbo_facts={'error': 'x'},
+                          relay='failed'))['hy2_relay']
+        assert '— hysteria спрашивают' in f['title']
+        assert hc.exit_guard(layer_c(hy=ASKS, hysteria='failed', turbo='inactive',
+                                     relay='failed')) == ([], [])
+
+    @pytest.mark.parametrize('relay', [None, 'deactivating', 'Failed to connect to bus'])
+    def test_a_relay_state_that_says_nothing_is_unjudged(self, relay):
+        findings, unjudged = hc.exit_guard(layer_c(hy=ASKS, relay=relay))
+        assert unjudged == ['hy2_relay']
+        assert [f['key'] for f in findings] == ['exit_guard_unreadable']
+
+    def test_a_config_not_read_while_the_relay_is_down_is_unjudged(self):
+        findings, unjudged = hc.exit_guard(layer_c(turbo_facts={'config': '/x', 'error': 'denied'},
+                                                   relay='failed'))
+        assert 'hy2_relay' in unjudged
+        assert 'hy2_relay' not in [f['key'] for f in findings]
+
+    def test_one_asking_is_enough_even_when_the_other_is_not_read(self):
+        findings, _unjudged = hc.exit_guard(layer_c(hy=ASKS, turbo_facts={'error': 'x'},
+                                                    relay='failed'))
+        assert 'hy2_relay' in [f['key'] for f in findings]
+
+    def test_findings_for_carries_it_when_exit_looked(self):
+        base = {'a': {'ok': True}, 'b': {'ok': False}, 'c': layer_c(hy=ASKS, relay='failed')}
+        assert 'hy2_relay' in {f['key'] for f in hc.findings_for(base)}
+
+    def test_layer_c_reads_the_relays_unit(self):
+        src = hc.REMOTE_C % {'sni': 'www.bing.com'}
+        assert '"hy2-auth-relay"' in src.split('out["services"]')[0]
+
+    def test_the_installer_and_the_guard_agree_on_what_the_relay_is(self):
+        import re
+        installer = open(os.path.join(os.path.dirname(_PATH), 'install_hy2_auth_relay.sh')).read()
+        pattern = re.search(r"grep -lE '([^']+)'", installer).group(1)
+        assert pattern == G['GUARD_RELAY_URL'].pattern

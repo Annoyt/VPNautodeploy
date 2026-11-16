@@ -54,6 +54,19 @@ PROBE_DEGRADED_MIN_SAMPLES = 25
 # leaves it alive by design), and DPIMonitor never demotes it.
 RESERVE_TAG = 'de'
 
+# The SSH emergency path (E4, AGENTS.md §51): the ssh-exit container on
+# exit, in the emergency profiles of active payers only. Probed since
+# 2026-11-15 through the mihomo sidecar, under the probe user's own derived
+# credentials. Not a cascade protocol either: it reaches exit without entry,
+# so answering while every cascade protocol is dark proves nothing about
+# their common path (the sing-box sidecar, entry's forwarding).
+SSH_TAG = 'ssh'
+
+# Probed paths that are no cascade protocol: never part of "every protocol
+# dark at once", never proof that the channel is up, never demoted. Each
+# pages under its own title.
+NON_CASCADE_TAGS = (RESERVE_TAG, SSH_TAG)
+
 VERDICT_DARK = 'dark'
 VERDICT_DEGRADED = 'degraded'
 VERDICT_OK = 'ok'
