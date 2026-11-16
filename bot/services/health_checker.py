@@ -101,12 +101,18 @@ class HealthChecker:
     # path out: ssh_exit.enabled(config).
     SSH_TAG = probe_rules.SSH_TAG
     SSH_PROBE_PORT = 18088
+    # The same server through entry's relay (scripts/setup_ssh_entry_relay.sh),
+    # the very last server of the emergency profiles: the probe goes from the
+    # mihomo sidecar to entry's public address, as a user's client does.
+    # Probed wherever the bot hands it out: ssh_exit.entry_enabled(config).
+    SSH_ENTRY_TAG = probe_rules.SSH_ENTRY_TAG
+    SSH_ENTRY_PROBE_PORT = 18089
 
     # The tags the mihomo sidecar serves (gen_probe_config_mihomo.py reads it).
-    MIHOMO_TAGS = (XHR_TAG, SSH_TAG)
+    MIHOMO_TAGS = (XHR_TAG, SSH_TAG, SSH_ENTRY_TAG)
     # Tags whose sidecar inbound arrives with a regenerated probe config:
     # until it does, every probe is proxy_down and nothing is written.
-    OPTIONAL_SIDECAR_TAGS = (RESERVE_TAG, XHR_TAG, SSH_TAG)
+    OPTIONAL_SIDECAR_TAGS = (RESERVE_TAG, XHR_TAG, SSH_TAG, SSH_ENTRY_TAG)
 
     # Per-request time budget, seconds. Every request of a run starts at
     # once (the pool holds one connection per target), so the budget is
@@ -181,6 +187,8 @@ class HealthChecker:
             ports[cls.XHR_TAG] = cls.XHR_PROBE_PORT
         if cls.ssh_probe_enabled(config):
             ports[cls.SSH_TAG] = cls.SSH_PROBE_PORT
+        if cls.ssh_entry_probe_enabled(config):
+            ports[cls.SSH_ENTRY_TAG] = cls.SSH_ENTRY_PROBE_PORT
         return ports
 
     @staticmethod
@@ -196,6 +204,14 @@ class HealthChecker:
         set, as strings — a Mock attribute in tests is "not configured"."""
         from bot.services import ssh_exit
         return ssh_exit.enabled(config)
+
+    @staticmethod
+    def ssh_entry_probe_enabled(config) -> bool:
+        """Same gate as the emergency profiles' SSH server through entry
+        (ssh_exit.entry_enabled): the SSH path, plus SSH_ENTRY_PORT and
+        ENTRY_NODE_IP."""
+        from bot.services import ssh_exit
+        return ssh_exit.entry_enabled(config)
 
     @classmethod
     def probe_tags_for(cls, config) -> List[str]:

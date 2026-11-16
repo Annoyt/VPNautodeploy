@@ -396,6 +396,101 @@ class TestSetup:
         assert (set_up.dir / 'keys' / 'ssh_host_ed25519_key').exists()
 
 
+class TestTheRelays:
+    """SSH_RELAY_IPS — the relay on entry (setup_ssh_entry_relay.sh). Every
+    user of the path through entry arrives from entry's address, and sshd
+    from OpenSSH 9.8 on refuses an address after a few connections that
+    never authenticate (PerSourcePenalties): one scanner on the relay would
+    lock everyone behind it out. The entrypoint exempts the relays where
+    sshd knows the option; this image's 9.7 does not, and starts as always.
+    The real sshd of both kinds runs on the stand in
+    tests/integration/test_ssh_entry_path.py."""
+
+    def _env_arg(self, env):
+        args = env.start_args()
+        return [args[i + 1] for i, a in enumerate(args) if a == '-e']
+
+    def test_they_reach_the_container(self, env):
+        env.write_env(SSH_RELAY_IPS='203.0.113.20,2001:db8::/64')
+        r = env.run()
+        assert r.returncode == 0, r.stderr
+        assert self._env_arg(env) == ['SSH_RELAY_IPS=203.0.113.20,2001:db8::/64']
+
+    def test_none_is_an_empty_value(self, env):
+        r = env.run()
+        assert r.returncode == 0, r.stderr
+        assert self._env_arg(env) == ['SSH_RELAY_IPS=']
+
+    def test_the_environment_is_no_source(self, env):
+        r = env.run(SSH_RELAY_IPS='198.51.100.66')
+        assert r.returncode == 0, r.stderr
+        assert self._env_arg(env) == ['SSH_RELAY_IPS=']
+
+    @pytest.mark.parametrize('value', [
+        '203.0.113.20 198.51.100.1', '203.0.113.20;touch {m}', '$(touch {m})',
+        ',203.0.113.20', '203.0.113.20,', 'entry.example.com', '203.0.113.20\\n'])
+    def test_addresses_or_masks_only(self, env, value):
+        # the payloads only touch a file in the test's own directory
+        marker = env.state / 'executed'
+        env.write_env(SSH_RELAY_IPS=value.format(m=marker))
+        r = env.run()
+        assert r.returncode == 2 and 'SSH_RELAY_IPS must be' in r.stderr, r.stderr
+        assert not env.calls() and not marker.exists()
+
+    FAKE_SSHD = r'''#!/bin/sh
+for a in "$@"; do
+  if [ "$a" = -t ]; then
+    printf '%s\n' "$*" >> "$STATE/tested"
+    [ -f "$STATE/knows_penalties" ]
+    exit
+  fi
+done
+printf '%s\n' "$*" > "$STATE/started"
+'''
+
+    def _start(self, env, tmp_path, *, relays, knows):
+        """The entrypoint's last part (from the arguments on), with sshd
+        replaced by a fake that answers -t as an sshd that knows the option
+        (``knows``) or not, and records how it was started."""
+        printed = env.run('--print-entrypoint').stdout
+        assert printed.count('/usr/sbin/sshd') == 2
+        tail = printed[printed.index('set -- -D -e -f /etc/ssh/sshd_config'):]
+        fake = tmp_path / 'sshd'
+        fake.write_text(self.FAKE_SSHD)
+        fake.chmod(0o755)
+        script = tmp_path / 'start.sh'
+        script.write_text('#!/bin/sh\nset -eu\n' + tail.replace('/usr/sbin/sshd', str(fake)))
+        state = tmp_path / 'st'
+        state.mkdir(exist_ok=True)
+        for f in state.iterdir():
+            f.unlink()
+        if knows:
+            (state / 'knows_penalties').touch()
+        run_env = {'PATH': os.environ['PATH'], 'STATE': str(state)}
+        if relays is not None:
+            run_env['SSH_RELAY_IPS'] = relays
+        r = subprocess.run(['sh', str(script)], env=run_env, capture_output=True, text=True,
+                           timeout=10)
+        assert r.returncode == 0, r.stderr
+        tested = (state / 'tested').read_text().splitlines() if (state / 'tested').exists() else []
+        return tested, (state / 'started').read_text().split()
+
+    def test_the_entrypoint_asks_sshd_first(self, env, tmp_path):
+        plain = ['-D', '-e', '-f', '/etc/ssh/sshd_config']
+        exempt = plain + ['-o', 'PerSourcePenaltyExemptList=203.0.113.20']
+        # 9.8+: tested, then started with the exemption
+        tested, started = self._start(env, tmp_path, relays='203.0.113.20', knows=True)
+        assert tested == ['-t -f /etc/ssh/sshd_config -o PerSourcePenaltyExemptList=203.0.113.20']
+        assert started == exempt
+        # 9.7 (this image): the option would stop sshd — started as always
+        tested, started = self._start(env, tmp_path, relays='203.0.113.20', knows=False)
+        assert len(tested) == 1 and started == plain
+        # no relays: nothing asked, nothing added
+        for relays in (None, ''):
+            tested, started = self._start(env, tmp_path, relays=relays, knows=True)
+            assert tested == [] and started == plain
+
+
 class TestSync:
 
     def test_applies_the_bots_list(self, set_up):

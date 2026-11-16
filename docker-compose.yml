@@ -136,6 +136,7 @@ services:
       - SSH_EXIT_PORT=${SSH_EXIT_PORT:-}
       - SSH_HOST_KEY=${SSH_HOST_KEY:-}
       - SSH_USER_SECRET=${SSH_USER_SECRET:-}
+      - SSH_ENTRY_PORT=${SSH_ENTRY_PORT:-}
       - XHR_SNI=${XHR_SNI:-}
       - XHR_PATH=${XHR_PATH:-}
       - XHR_PUBLIC_KEY=${XHR_PUBLIC_KEY:-}
@@ -317,7 +318,8 @@ services:
   # and so is the SSH emergency path (E4, since 2026-11-15).
   # Config: scripts/gen_probe_config_mihomo.py > ./probe-proxy-mihomo/config.yaml.
   # Needed where XHR_SNI or the SSH path (SSH_EXIT_HOST, SSH_USER_SECRET,
-  # SSH_HOST_KEY) is set; probe-proxy-mihomo:18087 (xhr), :18088 (ssh).
+  # SSH_HOST_KEY) is set; probe-proxy-mihomo:18087 (xhr), :18088 (ssh),
+  # :18089 (ssh through entry's relay, with SSH_ENTRY_PORT).
   probe-proxy-mihomo:
     image: metacubex/mihomo:v1.19.33
     container_name: probe-proxy-mihomo

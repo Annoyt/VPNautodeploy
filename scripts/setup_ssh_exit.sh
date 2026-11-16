@@ -17,6 +17,13 @@
 #           BOT_URL (the hop's pinned certificate); empty = the system's CAs
 #   DPI_REPORT_TOKEN=<the same token as /etc/exit-dpi.env>
 #   SSH_EXIT_PORT=22022                       the port users connect to
+#   SSH_RELAY_IPS=<entry ip>                  optional: addresses that relay users
+#           here (setup_ssh_entry_relay.sh on entry), comma-separated. Every
+#           user of the path through entry arrives from entry's address, and
+#           sshd from OpenSSH 9.8 on refuses an address after a few connections
+#           that never authenticate (PerSourcePenalties): one scanner on the
+#           relay would lock everyone behind it out. These addresses are
+#           exempt. An sshd without the option (9.7, this image) ignores it.
 #
 # The sshd only forwards: no shell, no tty, no agent/X11, group vpn only, and only
 # to the ports clients need (PermitOpen). The container firewalls its own egress
@@ -104,7 +111,15 @@ if [ -r /etc/ssh/users.plan ]; then
     printf '%s:%s\n' "$name" "$hash" | chpasswd -e
   done < /etc/ssh/users.plan
 fi
-exec /usr/sbin/sshd -D -e -f /etc/ssh/sshd_config
+# The relays (SSH_RELAY_IPS): exempt from the per-address penalties of
+# OpenSSH 9.8+, asked of sshd itself; one without the option (9.7) starts
+# as it always did.
+set -- -D -e -f /etc/ssh/sshd_config
+if [ -n "${SSH_RELAY_IPS:-}" ] && /usr/sbin/sshd -t -f /etc/ssh/sshd_config \
+     -o "PerSourcePenaltyExemptList=$SSH_RELAY_IPS" >/dev/null 2>&1; then
+  set -- "$@" -o "PerSourcePenaltyExemptList=$SSH_RELAY_IPS"
+fi
+exec /usr/sbin/sshd "$@"
 EP
 }
 
@@ -133,7 +148,7 @@ read_env() {  # $1 = file; then the keys to take from it
   done < "$file"
 }
 
-ENV_KEYS='BOT_URL BOT_CA_FILE DPI_REPORT_TOKEN SSH_EXIT_PORT'
+ENV_KEYS='BOT_URL BOT_CA_FILE DPI_REPORT_TOKEN SSH_EXIT_PORT SSH_RELAY_IPS'
 
 load_env() {  # the env file is the only source of these
   [ -r "$ENV_FILE" ] || { echo "missing $ENV_FILE (BOT_URL, DPI_REPORT_TOKEN, SSH_EXIT_PORT)" >&2; exit 2; }
@@ -143,6 +158,10 @@ load_env() {  # the env file is the only source of these
   read_env "$ENV_FILE" $ENV_KEYS
   : "${BOT_URL:?BOT_URL not set}" "${DPI_REPORT_TOKEN:?DPI_REPORT_TOKEN not set}"
   SSH_EXIT_PORT="${SSH_EXIT_PORT:-22022}"
+  SSH_RELAY_IPS="${SSH_RELAY_IPS:-}"
+  # Addresses or CIDR masks, comma-separated: nothing else reaches sshd.
+  [[ -z $SSH_RELAY_IPS || $SSH_RELAY_IPS =~ ^[0-9A-Fa-f.:/]+(,[0-9A-Fa-f.:/]+)*$ ]] \
+    || { echo "SSH_RELAY_IPS must be addresses or CIDR masks, comma-separated" >&2; exit 2; }
   check_bot_url
 }
 
@@ -249,6 +268,7 @@ DOCKERFILE
   docker run -d --name "$NAME" --restart unless-stopped \
     -p "${SSH_EXIT_PORT}:22" \
     --cap-add NET_ADMIN --dns 1.1.1.1 --dns 8.8.8.8 \
+    -e "SSH_RELAY_IPS=$SSH_RELAY_IPS" \
     --sysctl net.ipv6.conf.all.disable_ipv6=1 \
     -v "$CONF_DIR/sshd_config:/etc/ssh/sshd_config:ro" \
     -v "$CONF_DIR/keys:/etc/ssh/keys:ro" \

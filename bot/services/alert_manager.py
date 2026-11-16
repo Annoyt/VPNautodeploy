@@ -1461,6 +1461,27 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
                     ),
                 ))
                 continue
+            if tag == _pr.SSH_ENTRY_TAG:
+                # The same server through entry's relay: warn like 'ssh'.
+                alerts.append(Alert(
+                    key=f'protocol_down:{tag}',
+                    severity='warn',
+                    min_cycles=2,
+                    title=f'Аварийный SSH через entry не пускает (лежит {how_long})',
+                    detail=(
+                        f"За последние {PROBE_RUNS} прогона ({w['n']} попыток) "
+                        f"через SSH-путь через entry (ретранслятор ssh-relay на "
+                        f"entry → ssh-exit на exit) не вернулся ни один ответ. "
+                        f"Это самый последний сервер аварийного профиля платных. "
+                        f"Если SSH напрямую на exit (ssh) жив — дело в "
+                        f"ретрансляторе: контейнер ssh-relay на entry, порт "
+                        f"SSH_ENTRY_PORT, файрвол entry (находка healthcheck "
+                        f"entry_relay:ssh). Если молчат оба — смотри ssh-exit "
+                        f"на exit.\n"
+                        f"Сейчас по пробам: {summary}."
+                    ),
+                ))
+                continue
             alerts.append(Alert(
                 key=f'protocol_down:{tag}',
                 severity='critical',
@@ -1501,6 +1522,23 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
                         f"путями: если они в норме, смотри исходящие правила "
                         f"контейнера ssh-exit (PermitOpen, iptables OUTPUT) и "
                         f"его DNS.\n"
+                        f"Сейчас по пробам: {summary}."
+                    ),
+                ))
+                continue
+            if tag == _pr.SSH_ENTRY_TAG:
+                alerts.append(Alert(
+                    key=f'protocol_down:{tag}:degraded',
+                    severity='warn',
+                    min_cycles=3,
+                    title=f"Аварийный SSH через entry деградировал: ok {w['ok']}/{w['n']}",
+                    detail=(
+                        f"SSH-путь через entry пускает пробного пользователя, но "
+                        f"за последние {PROBE_RUNS} прогона через него прошло "
+                        f"лишь {w['ok']} из {w['n']} проб "
+                        f"({_pr.degraded_threshold_text()}). Сравни с SSH "
+                        f"напрямую на exit (ssh): если он в норме, смотри "
+                        f"ретранслятор ssh-relay на entry и путь entry → exit.\n"
                         f"Сейчас по пробам: {summary}."
                     ),
                 ))
@@ -2009,7 +2047,7 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
         key = str((f or {}).get('key') or '')
         if key == 'panel_audit':
             return 'a'
-        if key.startswith('entry_dnat:') or key == 'unit:shadow-tls':
+        if key.startswith(('entry_dnat:', 'entry_relay:')) or key == 'unit:shadow-tls':
             return 'b'
         return 'c'
 

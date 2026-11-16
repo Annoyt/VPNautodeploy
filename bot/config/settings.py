@@ -321,6 +321,9 @@ class Settings:
         self.SSH_EXIT_PORT: str = os.getenv('SSH_EXIT_PORT', '22022').strip() or '22022'
         self.SSH_HOST_KEY: str = os.getenv('SSH_HOST_KEY', '').strip()
         self.SSH_USER_SECRET: str = os.getenv('SSH_USER_SECRET', '').strip()
+        # The same path through entry: the port of the relay on entry
+        # (scripts/setup_ssh_entry_relay.sh). Empty = no such server.
+        self.SSH_ENTRY_PORT: str = os.getenv('SSH_ENTRY_PORT', '').strip()
         self.XHR_SNI: str = os.getenv('XHR_SNI', '').strip()
         self.XHR_PATH: str = os.getenv('XHR_PATH', '/xhr').strip() or '/xhr'
         self.XHR_PUBLIC_KEY: str = os.getenv('XHR_PUBLIC_KEY', '').strip()

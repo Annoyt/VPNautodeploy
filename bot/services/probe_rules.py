@@ -62,10 +62,15 @@ RESERVE_TAG = 'de'
 # their common path (the sing-box sidecar, entry's forwarding).
 SSH_TAG = 'ssh'
 
+# The same SSH server reached through entry (AGENTS.md §51): a TCP relay on
+# entry's Russian address in front of ssh-exit, the very last server of the
+# emergency profiles. Probed through the mihomo sidecar like 'ssh'.
+SSH_ENTRY_TAG = 'ssh-entry'
+
 # Probed paths that are no cascade protocol: never part of "every protocol
 # dark at once", never proof that the channel is up, never demoted. Each
 # pages under its own title.
-NON_CASCADE_TAGS = (RESERVE_TAG, SSH_TAG)
+NON_CASCADE_TAGS = (RESERVE_TAG, SSH_TAG, SSH_ENTRY_TAG)
 
 VERDICT_DARK = 'dark'
 VERDICT_DEGRADED = 'degraded'
