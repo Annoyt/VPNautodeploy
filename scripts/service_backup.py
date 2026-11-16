@@ -960,7 +960,7 @@ def render_readme(manifest: dict) -> str:
         'entry': ('`entry/entry.tar`', 'файлы entry по их путям: том бота (bot.db — согласованная '
                   'копия), .env, compose, haproxy, shadow-tls, правила, RU-зона, юниты, Hermes; '
                   '`nekovpn-facts/` — версии, живые правила, контейнеры'),
-        'bot': ('bot.db в `entry/entry.tar`', 'копия снята в контейнере vpn-bot backup API sqlite'),
+        'bot': ('bot.db в `entry/entry.tar`', 'копия снята в контейнере vpn-bot через backup API sqlite'),
         'exit': ('`exit/exit.tar`', 'файлы exit по их путям: x-ui.db (копия), compose, .env, '
                  'hysteria, Caddy, пин перегона, xhr-exit, ssh-exit, tinyproxy, acme.sh; '
                  '`nekovpn-facts/`'),
