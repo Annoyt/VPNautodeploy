@@ -65,12 +65,14 @@ THE DE RESERVE AND THE SSH EMERGENCY PATH
 -----------------------------------------
 Probed where the deployment has them (rows decide, as for hy2t): the DE
 reserve (``de``) and the SSH path to the ssh-exit container on exit
-(``ssh``, through the mihomo sidecar since 2026-11-15). Each is judged from
-its own rows and counts in the exit code and the ИТОГ line, but neither is
-a cascade protocol (``probe_rules.NON_CASCADE_TAGS``): neither takes part in
-"every protocol dark", and neither proves the channel up — the reserve is
-meant to outlive exit, the SSH path reaches exit without entry. The pager
-agrees.
+(``ssh``, through the mihomo sidecar since 2026-11-15), and the same SSH
+server through the relay on entry (``ssh-entry``, since 2026-11-16). Each is
+judged from its own rows and counts in the exit code and the ИТОГ line, but
+none is a cascade protocol (``probe_rules.NON_CASCADE_TAGS``): none takes
+part in "every protocol dark", and none proves the channel up — the reserve
+is meant to outlive exit, the SSH path reaches exit without entry. The pager
+agrees. Where the bot's .env sets SSH_ENTRY_PORT, layer B also checks the
+relay's container (``ssh-relay``, scripts/setup_ssh_entry_relay.sh).
 
 PROTOCOLS SWITCHED OFF IN THE CASCADE ARE "OFF"
 -----------------------------------------------
@@ -150,18 +152,25 @@ probe_rules = _load_probe_rules()
 PROBED = ['reality', 'hy2', 'ws', 'stls']      # what the probe sidecar ALWAYS speaks
 # Probed only where the deployment has them — decided per run by
 # probed_tags(): hy2t with HY2T_PORT, the DE reserve with FALLBACK_NODE_*,
-# xhr with XHR_SNI, the SSH emergency path with SSH_EXIT_HOST & co.
-PROBED_OPTIONAL = ['hy2t', probe_rules.RESERVE_TAG, 'xhr', probe_rules.SSH_TAG]
+# xhr with XHR_SNI, the SSH emergency path with SSH_EXIT_HOST & co., the
+# same path through entry's relay with SSH_ENTRY_PORT.
+PROBED_OPTIONAL = ['hy2t', probe_rules.RESERVE_TAG, 'xhr', probe_rules.SSH_TAG,
+                   probe_rules.SSH_ENTRY_TAG]
 PROTOCOLS = ['reality', 'hy2', 'hy2t', 'ws', 'stls']   # what we always report on
 # ...plus the DE reserve (B6), xhr and the SSH path (E4) where they are
 # probed: each joins the report only with probe rows of its own, judged from
 # them (the DE reserve and the SSH path are no cascade protocols:
 # probe_rules.NON_CASCADE_TAGS, outside "every protocol dark").
-REPORT_ORDER = PROTOCOLS + [probe_rules.RESERVE_TAG, 'xhr', probe_rules.SSH_TAG]
+REPORT_ORDER = PROTOCOLS + [probe_rules.RESERVE_TAG, 'xhr', probe_rules.SSH_TAG,
+                            probe_rules.SSH_ENTRY_TAG]
 # The sidecar each probe goes through (layer B inspects both): xhr and the
-# SSH path ride the mihomo one (scripts/gen_probe_config_mihomo.py).
+# SSH paths ride the mihomo one (scripts/gen_probe_config_mihomo.py).
 MIHOMO_SIDECAR = 'probe-proxy-mihomo'
-SIDECAR_FOR = {'xhr': MIHOMO_SIDECAR, probe_rules.SSH_TAG: MIHOMO_SIDECAR}
+SIDECAR_FOR = {'xhr': MIHOMO_SIDECAR, probe_rules.SSH_TAG: MIHOMO_SIDECAR,
+               probe_rules.SSH_ENTRY_TAG: MIHOMO_SIDECAR}
+# The relay on entry in front of ssh-exit (scripts/setup_ssh_entry_relay.sh):
+# expected where the bot's .env sets SSH_ENTRY_PORT.
+SSH_RELAY = 'ssh-relay'
 
 # One definition with the pager, the monitor and /protocols (probe_rules,
 # IMPROVEMENT_PLAN F, B5). Until 2026-11 this script called a window
@@ -702,10 +711,29 @@ def collect_layer_b() -> dict:
         out['nat_prerouting'] = so.splitlines()
     else:
         errors.append(f'iptables: {se.strip()[:120] or rc}')
+    out['ssh_relay'] = collect_ssh_relay()
     if errors:
         out['ok'] = False
         out['error'] = '; '.join(errors)
     return out
+
+
+def collect_ssh_relay() -> dict:
+    """The relay on entry: the port the bot hands out (SSH_ENTRY_PORT from
+    its .env, that key only) and the container's state. ``state`` is the
+    docker status, ``missing`` for no such container, None when docker
+    could not be asked."""
+    port = _read_env_value(BOT_ENV, 'SSH_ENTRY_PORT')
+    if not port:
+        return {'port': None, 'state': None}
+    rc, so, se = _run(['docker', 'inspect', '-f', '{{.State.Status}}', SSH_RELAY], 10)
+    if rc == 0 and so.strip():
+        state = so.strip()
+    elif 'no such' in (se or '').lower():
+        state = 'missing'
+    else:
+        state = None
+    return {'port': port, 'state': state}
 
 
 def collect_layer_c(sni: str) -> dict:
@@ -1486,6 +1514,31 @@ def exit_servers(c: dict, off) -> Tuple[List[dict], List[str]]:
     return findings, unjudged
 
 
+def entry_relay(b: dict) -> Tuple[List[dict], List[str]]:
+    """(findings, unjudged keys) for the relay on entry in front of ssh-exit
+    (``entry_relay:ssh``). Nothing to say where the bot hands no such path
+    out (no SSH_ENTRY_PORT). A container that is not running is a warn: the
+    path is the emergency profile's last server. Docker that could not be
+    asked leaves the key as it was."""
+    key = 'entry_relay:ssh'
+    relay = b.get('ssh_relay')
+    if not isinstance(relay, dict):
+        return [], [key]                       # a collector without this fact
+    if not relay.get('port'):
+        return [], []
+    state = relay.get('state')
+    if state is None:
+        return [], [key]
+    if state == 'running':
+        return [], []
+    what = 'нет контейнера' if state == 'missing' else f'контейнер {state}'
+    return [{'key': key, 'layer': 'b', 'severity': 'warn',
+             'title': (f'SSH через entry: ретранслятор {SSH_RELAY} не работает ({what}), '
+                       f'а бот отдаёт этот путь на порту {relay["port"]}'),
+             'next': f"docker ps -a --filter name={SSH_RELAY}; docker logs --tail 30 {SSH_RELAY}; "
+                     f"/opt/vpn-bot/scripts/setup_ssh_entry_relay.sh"}], []
+
+
 def _cascade_off(layers: dict):
     """The protocols switched off in the cascade, or None without layer A."""
     a = layers.get('a') or {}
@@ -1494,10 +1547,14 @@ def _cascade_off(layers: dict):
 
 def unjudged_for(layers: dict) -> List[str]:
     """Finding keys this run could not look at, while their layer did look."""
+    b = layers.get('b') or {}
     c = layers.get('c') or {}
-    if not c.get('ok'):
-        return []
-    return exit_guard(c)[1] + exit_servers(c, _cascade_off(layers))[1]
+    out: List[str] = []
+    if b.get('ok'):
+        out += entry_relay(b)[1]
+    if c.get('ok'):
+        out += exit_guard(c)[1] + exit_servers(c, _cascade_off(layers))[1]
+    return out
 
 
 # Findings (IMPROVEMENT_PLAN F, D1): facts that break users BEFORE the probes
@@ -1564,6 +1621,7 @@ def findings_for(layers: dict) -> List[dict]:
                             'severity': 'critical' if tag == 'hy2' else 'warn',
                             'title': f'{tag}: нет UDP DNAT {", ".join(missing)} на entry',
                             'next': "iptables -t nat -S PREROUTING | grep -E '8400|8402|dport 443'"})
+        out.extend(entry_relay(b)[0])
         stls = (b.get('services') or {}).get('shadow-tls')
         if stls and stls != 'active':
             out.append({'key': 'unit:shadow-tls', 'severity': 'critical', 'layer': 'b',
@@ -1898,6 +1956,15 @@ def assess(layers: dict, now: Optional[datetime] = None) -> dict:
                              'next': "ssh exit-node 'docker ps -a --filter name=ssh-exit; "
                                      "docker logs --tail 40 ssh-exit; "
                                      "journalctl -u ssh-exit-sync -n 20 --no-pager'"})
+        if (states.get(probe_rules.SSH_ENTRY_TAG) == 'DOWN'
+                and states.get(probe_rules.SSH_TAG) in ('OK', 'DEGRADED')):
+            # The same server answers directly: what is left is the relay
+            # on entry (when both are down, the ssh suspect above names it).
+            suspects.append({'rank': 40, 'protocol': probe_rules.SSH_ENTRY_TAG,
+                             'title': 'SSH через entry молчит, а напрямую на exit пускает — ретранслятор '
+                                      f'{SSH_RELAY} на entry: контейнер, порт SSH_ENTRY_PORT, файрвол entry',
+                             'next': f"docker ps -a --filter name={SSH_RELAY}; docker logs --tail 30 {SSH_RELAY}; "
+                                     "grep SSH_ENTRY_PORT /opt/vpn-bot/.env; ufw status | head -20"})
 
         rows_cmd = ('docker exec vpn-bot python3 -c "import sqlite3; c=sqlite3.connect(\'/var/lib/vpn-bot/bot.db\'); '
                     '[print(r) for r in c.execute(\\"SELECT ts,target_domain,status,latency_ms,error_msg FROM outbound_health '

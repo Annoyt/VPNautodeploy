@@ -19,8 +19,15 @@ exit that only forwards (no shell, no tty).
   ``ForceCommand /bin/false`` and forwarding only, users synced from that
   endpoint by a timer, its host key pinned in the profile
   (``SSH_HOST_KEY``).
+* **Through entry** (``entry_outbound``, 2026-11-16): the same server
+  once more, at entry's Russian address, through a TCP relay
+  (``scripts/setup_ssh_entry_relay.sh``, port ``SSH_ENTRY_PORT``): no TLS
+  name, no UDP, no foreign hosting on the client's side. The session still
+  ends in ssh-exit, so the user, password and pinned host key are the
+  same. The very last server of the profile, after ssh-exit itself.
 
-Off while SSH_EXIT_HOST, SSH_USER_SECRET or SSH_HOST_KEY is empty.
+Off while SSH_EXIT_HOST, SSH_USER_SECRET or SSH_HOST_KEY is empty; the
+server through entry also needs ENTRY_NODE_IP and SSH_ENTRY_PORT.
 """
 
 import base64
@@ -55,6 +62,27 @@ def _port(config) -> int:
         return 22022
 
 
+def entry_port(config) -> Optional[int]:
+    """The relay's port on entry, or None: SSH_ENTRY_PORT unset or not a
+    port, or no ENTRY_NODE_IP to reach it at. Anything whose text is not a
+    whole number — a Mock attribute in tests too — is "not configured"."""
+    host = getattr(config, 'ENTRY_NODE_IP', '')
+    raw = getattr(config, 'SSH_ENTRY_PORT', '')
+    if not (isinstance(host, str) and host.strip()):
+        return None
+    try:
+        port = int(str(raw).strip())
+    except ValueError:
+        return None
+    return port if 0 < port < 65536 else None
+
+
+def entry_enabled(config) -> bool:
+    """The path through entry is handed out: the SSH path itself, plus the
+    relay's port and entry's address."""
+    return enabled(config) and entry_port(config) is not None
+
+
 def eligible(user, now: Optional[datetime] = None) -> bool:
     try:
         from bot.services.ru_exit import is_eligible
@@ -79,6 +107,19 @@ def outbound(config, user, now: Optional[datetime] = None) -> Optional[dict]:
         'password': password_for(config, uuid),
         'host_key': [config.SSH_HOST_KEY.strip()],
     }
+
+
+def entry_outbound(config, user, now: Optional[datetime] = None) -> Optional[dict]:
+    """The same server through entry's relay: ``outbound`` with entry's
+    address and the relay's port, tag ``<prefix>-ssh-entry``. None when the
+    relay is not configured or ``outbound`` is None. The relay only copies
+    bytes, so the credentials and the pinned host key are exit's."""
+    port = entry_port(config)
+    ob = outbound(config, user, now) if port is not None else None
+    if ob is None:
+        return None
+    return {**ob, 'tag': f"{ob['tag']}-entry",
+            'server': config.ENTRY_NODE_IP.strip(), 'server_port': port}
 
 
 _ITOA64 = './0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'
