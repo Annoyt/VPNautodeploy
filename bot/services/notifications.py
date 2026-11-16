@@ -1425,7 +1425,7 @@ class NotificationService:
         AIHandler already unlinks each photo in its per-request finally
         block; this is a safety net for the case where the bot crashed
         before reaching the cleanup or where the host accumulated files
-        from previous runs / kimi-side experiments.
+        from previous runs / agent-side experiments.
         """
         import os
         import time as _t
@@ -2272,7 +2272,7 @@ class NotificationService:
     def _dpi_daily_summary_sync(self):
         """Daily 09:00: roll up 24h of DPI metrics, persist into the
         long-lived dpi_reports table, post a numeric summary to TOPIC_AI
-        and (if kimi-bridge is configured) attach a Kimi analysis.
+        and (if the agent is configured) attach its analysis.
 
         Why two tables: dpi_metrics keeps a 30-day rolling raw window
         for the heatmap; dpi_reports keeps one row per day for 365 days
@@ -2304,7 +2304,7 @@ class NotificationService:
             logger.exception(f"dpi_daily_summary: db read failed: {e}")
             return
 
-        # Quick numeric summary regardless of kimi availability.
+        # Quick numeric summary regardless of the agent's availability.
         total_conn = sum((r[3] or 0) for r in today)
         total_short = sum((r[4] or 0) for r in today)
         total_hsfail = sum((r[5] or 0) for r in today)

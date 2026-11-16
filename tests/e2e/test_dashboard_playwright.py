@@ -653,14 +653,14 @@ def _alert_reply(page, title):
     """The «🤖» block under the alert titled ``title``."""
     row = page.locator('#alerts-list .alert-row',
                        has=page.locator('.alert-title', has_text=title))
-    return row.locator('.alert-kimi')
+    return row.locator('.alert-agent')
 
 
 def _reply_attributes(box):
     """Sorted «tag[attribute]» of every element inside a reply block, the
     page's own wrappers (the «🤖» head, the reply div) left out."""
     return sorted(set(box.evaluate("""el => [...el.querySelectorAll('*')]
-        .filter(n => !n.matches('.alert-kimi-head, .agent-reply'))
+        .filter(n => !n.matches('.alert-agent-head, .agent-reply'))
         .flatMap(n => [...n.attributes].map(a => `${n.localName}[${a.name}]`))""")))
 
 
@@ -688,7 +688,7 @@ class TestAgentReplies:
             '<style>body { --e2e-styled: 1 }</style>'
         )
         _seed_alert_reply(e2e_stack.db, 'E2E: agent html', reply)
-        page = _open_tab(page_factory, 'alerts', '#alerts-list .alert-kimi')
+        page = _open_tab(page_factory, 'alerts', '#alerts-list .alert-agent')
         _nothing_ran(page)
         box = _alert_reply(page, 'E2E: agent html')
         assert box.locator('b').inner_text() == 'ИТОГ'
@@ -717,7 +717,7 @@ class TestAgentReplies:
                  'СЛЕДУЮЩАЯ КОМАНДА: journalctl -u xray --since <time> | tail\n'
                  + XSS_IMG)
         _seed_alert_reply(e2e_stack.db, 'E2E: agent text', reply)
-        page = _open_tab(page_factory, 'alerts', '#alerts-list .alert-kimi')
+        page = _open_tab(page_factory, 'alerts', '#alerts-list .alert-agent')
         _nothing_ran(page)
         box = _alert_reply(page, 'E2E: agent text')
         assert reply in box.inner_text()
@@ -738,7 +738,7 @@ class TestAgentReplies:
         _nothing_ran(page)          # a collapsed report's markup is live too
         report = page.locator('#reports-list .report-row', has_text='2026-11-09')
         report.locator('.report-head').click()               # expand it
-        box = report.locator('.alert-kimi')
+        box = report.locator('.alert-agent')
         assert box.locator('b').all_inner_texts() == ['AS31133', 'AS12389']
         # Telegram-style inline HTML: its line breaks are the layout
         assert 'к базе\nAS12389: в норме' in box.inner_text()

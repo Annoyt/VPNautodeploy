@@ -71,13 +71,10 @@ services:
     build: .
     container_name: vpn-bot
     restart: unless-stopped
-    # Lets the bot reach the kimi-bridge HTTP service running on the host
-    # (kimi CLI binary + OAuth creds live in /root/.kimi-code, not inside
-    # this container). With this mapping, http://host.docker.internal:7077
+    # Lets the bot reach host-side services: the agent's API (Hermes,
+    # http://host.docker.internal:4097, AGENTS.md §22) and the
+    # xray-reload sidecar (:7079). With this mapping host.docker.internal
     # resolves to the docker bridge gateway from inside the container.
-    # `host.docker.internal` gateway lets the bot reach host-side
-    # sidecars (kimi-bridge on :7077, xray-reload on :7079); they bind
-    # 127.0.0.1 on the host, so this mapping is the only way through.
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
@@ -259,9 +256,9 @@ services:
       # host reads them off the same path. Cleaned by the hourly scheduler
       # in NotificationService.
       - /tmp/tg_media:/tmp/tg_media
-      # Shared out dir: OpenCode (host) writes files it wants to send back
-      # to the admin here; the bot reads them and ships as Telegram docs
-      # (replaces the old kimi-bridge /file endpoint). See AGENT_OUT_DIR.
+      # Shared out dir: the agent (host) writes files it wants to send back
+      # to the admin here; the bot reads them and ships as Telegram docs.
+      # See AGENT_OUT_DIR.
       - /tmp/agent_out:/tmp/agent_out
     depends_on:
       3x-ui:

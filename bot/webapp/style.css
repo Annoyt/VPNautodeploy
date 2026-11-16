@@ -943,7 +943,7 @@ textarea.ktext-input { resize: vertical; min-height: 36px; }
     color: var(--text-secondary);
     white-space: pre-wrap;
 }
-.alert-kimi {
+.alert-agent {
     margin-top: 8px;
     padding: 8px 10px;
     background: var(--bg-glass);
@@ -952,7 +952,7 @@ textarea.ktext-input { resize: vertical; min-height: 36px; }
     line-height: 1.45;
     color: var(--text-primary);
 }
-.alert-kimi-head { font-weight: 700; margin-bottom: 4px; color: var(--text-secondary); }
+.alert-agent-head { font-weight: 700; margin-bottom: 4px; color: var(--text-secondary); }
 /* The agent's plain-text (or inline-only) reply keeps its line breaks:
    app.js agentReplyHtml. */
 .agent-reply.agent-text { white-space: pre-wrap; }
