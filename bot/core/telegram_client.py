@@ -256,9 +256,13 @@ class TelegramClient:
                     time.sleep(delay)
                 else:
                     logger.error(f"API request failed after {self.MAX_RETRIES} attempts")
-                    # Re-raise with sanitized message to prevent token leak in tracebacks
+                    # Re-raise with sanitized message to prevent token leak in tracebacks.
+                    # Telegram's own description rides along: a caller that must
+                    # tell "message thread not found" from a dead proxy reads it.
                     sanitized_error = self._sanitize_url(str(e))
-                    raise requests.RequestException(sanitized_error) from None
+                    failure = requests.RequestException(sanitized_error)
+                    failure.tg_description = tg_description
+                    raise failure from None
         
         return {}  # Should not reach here
     
@@ -691,12 +695,15 @@ class TelegramClient:
         content: bytes,
         caption: Optional[str] = None,
         parse_mode: Optional[str] = None,
+        raise_errors: bool = False,
         **kwargs
     ) -> Optional[dict]:
         """Upload ``content`` as a document named ``filename`` (multipart
         sendDocument) — the offline kit's profile files. Same retry and
         proxy rules as every other call (``_request``). Returns the sent
-        message dict or None; never raises.
+        message dict or None; never raises, unless ``raise_errors``: then a
+        failure raises ``requests.RequestException`` with ``tg_description``
+        (the service backup tells a deleted topic from a dead proxy by it).
         """
         if isinstance(content, str):
             content = content.encode('utf-8')
@@ -716,8 +723,18 @@ class TelegramClient:
             if result.get('ok'):
                 return result.get('result')
             logger.error(f"Failed to send document: {result.get('description')}")
+            if raise_errors:
+                failure = requests.RequestException('sendDocument: not ok')
+                failure.tg_description = str(result.get('description') or '')
+                raise failure
             return None
         except Exception as e:     # RequestException, or a non-JSON reply
+            if raise_errors:
+                if isinstance(e, requests.RequestException):
+                    raise
+                failure = requests.RequestException(self._sanitize_url(str(e)))
+                failure.tg_description = ''
+                raise failure from None
             logger.error(f"Failed to send document: {self._sanitize_url(str(e))}")
             return None
 

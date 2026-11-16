@@ -1,0 +1,27 @@
+[Unit]
+Description=Encrypted backup of the NekoVPN service -> the bot's «Бэкапы» topic (AGENTS.md §58)
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Root on ENTRY: it reads root-only configs, asks the vpn-bot container for a
+# consistent copy of bot.db, and ssh's to exit (alias exit-node, root's key).
+# A root-owned copy, never the rsync target: /opt/vpn-bot belongs to the deploy
+# account, and a root timer must not run a file another account can change
+# (AGENTS.md §36). scripts/install_service_backup.sh installs it; re-run that
+# after the script changes.
+# Exit code 1 = sent without a part (exit, bot.db) or with a problem in one;
+# 2 = nothing sent. Both leave the unit failed; the bot pages backup:stale.
+ExecStart=/usr/bin/python3 /usr/local/lib/nekovpn-backup/service_backup.py
+TimeoutStartSec=45min
+Nice=10
+IOSchedulingClass=idle
+CPUQuota=60%
+MemoryMax=512M
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+UMask=0077
+StateDirectory=nekovpn-backup
+StateDirectoryMode=0700

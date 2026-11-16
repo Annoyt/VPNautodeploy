@@ -43,7 +43,15 @@ jobs:
       - name: Install dependencies
         run: python -m pip install -r requirements.txt -r requirements-dev.txt
 
+      # The service backup's restore stand (tests/unit/test_service_backup.py,
+      # AGENTS.md §58) decrypts with a real age, the way the owner will.
+      - name: age and zstd for the backup restore stand
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends age zstd
+
       - name: pytest tests/
+        env:
+          # Without it a runner that lost age would go green on skips.
+          BACKUP_REQUIRE_AGE: '1'
         run: >-
           python -m pytest tests/ -q -p no:cacheprovider
           -m "not requires_docker and not requires_network"

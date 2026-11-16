@@ -1,0 +1,13 @@
+[Unit]
+Description=Daily encrypted backup of the NekoVPN service (AGENTS.md §58)
+
+[Timer]
+# 04:40 Moscow: the quiet hours. Persistent: a run missed while entry was down
+# happens at the next boot.
+OnCalendar=*-*-* 01:40:00 UTC
+RandomizedDelaySec=10min
+AccuracySec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

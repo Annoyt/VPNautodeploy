@@ -2195,11 +2195,46 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
             ),
         )])
 
+    def check_backup():
+        """The daily service backup (AGENTS.md §58, bot/services/backups.py):
+        ``backup:stale`` (critical) when no COMPLETE archive went to the
+        «Бэкапы» topic for STALE_H hours, or a run failed before the first
+        complete one, or the installed timer never ran. The verdict is
+        ``backups.alert_verdict``; its detail names the last run's reason.
+
+        No ``backup_state`` row = the timer is not installed: nothing to say.
+        A failed read judges nothing (the key keeps its state): "could not
+        look" is never "fixed"."""
+        try:
+            from bot.services.backups import STATE_KEY, alert_verdict
+            import json as _json
+            import sqlite3
+            from datetime import datetime, timezone
+            db_path = getattr(config, 'DB_PATH', None) or '/var/lib/vpn-bot/bot.db'
+            with sqlite3.connect(db_path) as conn:
+                row = conn.execute(
+                    "SELECT value FROM app_settings WHERE key = ?", (STATE_KEY,),
+                ).fetchone()
+            try:
+                state = _json.loads(row[0]) if row else None
+            except (TypeError, ValueError):
+                state = None
+            verdict = alert_verdict(state, datetime.now(timezone.utc))
+        except Exception as e:
+            logger.warning(f"backup alert read failed: {e}")
+            return ("backup:", [], frozenset())
+        if not verdict:
+            return ("backup:", [])
+        return ("backup:", [Alert(
+            key=verdict['key'], severity=verdict['severity'], min_cycles=2,
+            title=verdict['title'], detail=verdict['detail'],
+        )])
+
     checks.extend([
         check_cpu, check_ram, check_disk,
         check_opencode, check_xray_reload_sidecar, check_xui_inbounds,
         check_protocol_probe_down, check_inbound_drop, check_healthcheck,
         check_dpi_short_sessions, check_dpi_handshake_spike, check_dpi_rst_spike,
-        check_lockdown_active,
+        check_lockdown_active, check_backup,
     ])
     return checks
