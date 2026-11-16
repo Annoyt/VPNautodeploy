@@ -1,12 +1,29 @@
 """User repository for user-related database operations."""
 
 import logging
+import sqlite3
 from typing import Optional, List
 
 from bot.models import User
 from .base import BaseRepository
 
 logger = logging.getLogger(__name__)
+
+# The columns save() writes, in this order, each from the user's attribute
+# of the same name. Any other column of the row keeps its value:
+# traffic_up / traffic_down (the traffic mirror's), xui_synced, and
+# whatever else an older prod schema carries. A new column the bot should
+# save goes here.
+SAVE_COLUMNS = (
+    'chat_id', 'username', 'previous_state', 'reject_count', 'uuid', 'email',
+    'status', 'lang', 'platform', 'support_topic_id', 'created_at',
+    'subscription_expiry', 'limit_ip', 'quota_gb', 'last_traffic_update',
+    'next_protocol_idx', 'last_country', 'last_asn', 'last_city',
+    'last_lat', 'last_lon', 'contact_email',
+)
+# UNIQUE in the repo's schema: one key (uuid) and one panel id (email) per
+# user. Prod's older table has neither constraint (checked 2026-11-15).
+KEY_COLUMNS = ('uuid', 'email')
 
 
 class UserRepository(BaseRepository):
@@ -93,43 +110,115 @@ class UserRepository(BaseRepository):
         return self.get_by_status('pending_demo')
     
     def save(self, user: User) -> bool:
-        """Save or update user.
-        
-        Args:
-            user: User object to save
-            
-        Returns:
-            True if successful
+        """Write the user's row: update it in place, or insert it when
+        there is none. True when it was written.
+
+        It never touches another user's row. Until 2026-11-15 this was an
+        INSERT OR REPLACE. A uuid or panel email that another row held
+        silently deleted that row where both are UNIQUE (the repo's schema;
+        prod's older table has neither constraint), and every save reset
+        the columns it does not write to their defaults. Now such a clash
+        is refused and nothing is written. The log names the column and
+        the user who holds it, never the value: the uuid is the user's
+        key.
+
+        A NULL for a NOT NULL column that has a default is written as that
+        default, as REPLACE did, so a row of an older schema saves the way
+        it always has.
         """
+        values = self._save_values(user)
+        # A row without a chat_id is nobody's: nothing finds it, and every
+        # such save would add another (a NULL never matches a NULL).
+        if values['chat_id'] is None or values['chat_id'] == '':
+            logger.error("Refused to save a user without a chat_id. Nothing was written.")
+            return False
         try:
             with self._transaction() as c:
-                c.execute('''
-                    INSERT OR REPLACE INTO users
-                    (chat_id, username, previous_state, reject_count, uuid, email, status, lang, platform,
-                     support_topic_id, created_at, subscription_expiry, limit_ip,
-                     quota_gb, last_traffic_update, next_protocol_idx,
-                     last_country, last_asn, last_city, last_lat, last_lon,
-                     contact_email)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (
-                    user.chat_id, user.username, user.previous_state, user.reject_count,
-                    user.uuid, user.email,
-                    user.status, user.lang, user.platform,
-                    user.support_topic_id, user.created_at,
-                    user.subscription_expiry, user.limit_ip,
-                    user.quota_gb, user.last_traffic_update,
-                    getattr(user, 'next_protocol_idx', 0) or 0,
-                    getattr(user, 'last_country', None),
-                    getattr(user, 'last_asn', None),
-                    getattr(user, 'last_city', None),
-                    getattr(user, 'last_lat', None),
-                    getattr(user, 'last_lon', None),
-                    getattr(user, 'contact_email', None),
-                ))
+                exprs = self._value_exprs(c)
+                rest = SAVE_COLUMNS[1:]
+                c.execute(
+                    'UPDATE users SET '
+                    + ', '.join(f'{col} = {exprs[col]}' for col in rest)
+                    + ' WHERE chat_id = ?',
+                    tuple(values[col] for col in rest) + (values['chat_id'],),
+                )
+                # The UPDATE took the write lock, matched or not: no other
+                # writer can insert this chat_id before the INSERT.
+                if c.rowcount == 0:
+                    c.execute(
+                        f'INSERT INTO users ({", ".join(SAVE_COLUMNS)}) VALUES ('
+                        + ', '.join(exprs[col] for col in SAVE_COLUMNS) + ')',
+                        tuple(values[col] for col in SAVE_COLUMNS),
+                    )
             return True
+        except sqlite3.IntegrityError as e:
+            holders = self._key_holders(values)
+            if holders:
+                logger.error(
+                    "Refused to save user %s: %s. Nothing was written.",
+                    user.chat_id,
+                    '; '.join(f"its {col} belongs to user {other}"
+                              for col, other in holders),
+                )
+            else:
+                logger.error(f"Failed to save user {user.chat_id}: {e}")
+            return False
         except Exception as e:
             logger.error(f"Failed to save user {user.chat_id}: {e}")
             return False
+
+    @staticmethod
+    def _save_values(user: User) -> dict:
+        """The value save() writes for each of SAVE_COLUMNS: the user's
+        attribute of that name."""
+        values = {col: getattr(user, col, None) for col in SAVE_COLUMNS}
+        values['next_protocol_idx'] = values['next_protocol_idx'] or 0
+        # An empty string is no key. Stored, it is a value like any other,
+        # so a second user with '' would clash with the first.
+        for col in KEY_COLUMNS:
+            if values[col] == '':
+                values[col] = None
+        return values
+
+    @staticmethod
+    def _value_exprs(c) -> dict:
+        """The SQL for each column's value: '?', or COALESCE(?, <default>)
+        for a NOT NULL column with a default. REPLACE wrote the default
+        for a NULL there, while a plain INSERT or UPDATE refuses the NULL.
+        The repo's schema has no such column; an older prod table may."""
+        info = {row[1]: row for row in c.execute('PRAGMA table_info(users)')}
+        exprs = {}
+        for col in SAVE_COLUMNS:
+            row = info.get(col)
+            # (cid, name, type, notnull, dflt_value, pk)
+            if row is not None and row[3] and row[4] is not None:
+                exprs[col] = f'COALESCE(?, {row[4]})'
+            else:
+                exprs[col] = '?'
+        return exprs
+
+    def _key_holders(self, values: dict) -> list:
+        """(column, chat_id) for each key column whose value another
+        user's row holds. Empty when that cannot be read."""
+        found = []
+        try:
+            conn = self._connect()
+            try:
+                for col in KEY_COLUMNS:
+                    if values[col] is None:
+                        continue
+                    row = conn.execute(
+                        f'SELECT chat_id FROM users WHERE {col} = ? '
+                        'AND chat_id != ? LIMIT 1',
+                        (values[col], values['chat_id']),
+                    ).fetchone()
+                    if row:
+                        found.append((col, row[0]))
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            return []
+        return found
     
     def update_status(self, chat_id: str, status: str) -> bool:
         """Update user status.
