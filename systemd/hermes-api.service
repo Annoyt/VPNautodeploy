@@ -6,13 +6,15 @@ After=network.target docker.service
 Type=simple
 User=root
 WorkingDirectory=/root/hermes-work
-Environment=HERMES_HOME=/root/.hermes
-Environment=PATH=/usr/local/lib/hermes-agent/venv/bin:/usr/local/bin:/usr/bin:/bin
-EnvironmentFile=/root/.hermes/.env
-ExecStart=/usr/local/lib/hermes-agent/venv/bin/hermes gateway run
+# v0.23.1 managed install (2026-11-16): code in /usr/local/lib/hermes-agent-v0.23,
+# runtime (Python 3.14, uv, node) in $HERMES_HOME/tools. /root/.hermes is a
+# symlink to this home, so the guard and the skills deploy keep their paths.
+Environment=HERMES_HOME=/root/.hermes-v023
+Environment=PATH=/usr/local/lib/hermes-agent-v0.23/.hermes/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=/root/.hermes-v023/.env
+ExecStart=/usr/local/lib/hermes-agent-v0.23/.hermes/bin/hermes gateway run
 Restart=always
 RestartSec=5
-# Hermes is heavier than opencode; entry frees ~455M once opencode is removed.
 MemoryMax=1200M
 StandardOutput=journal
 StandardError=journal

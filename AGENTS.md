@@ -170,7 +170,7 @@ Files with this mark: `test_database.py`, `test_security.py`, `test_state_machin
 ## Deployment
 
 **Active production (as of 2026-08-30; flipped since the May notes — the bot moved to ENTRY on 2026-07-19):**
-- **Entry node** (`ssh entry`) — the **vpn-bot container** lives HERE (`/opt/vpn-bot`), plus a LOCAL `3x-ui` for CF-fronted inbounds, ingress :443, dashboard API :8080 (and the same app over HTTPS on :8448 for exit, §53), and the Hermes `/ai` agent (:4097, systemd `hermes-api.service`).
+- **Entry node** (`ssh entry`) — the **vpn-bot container** lives HERE (`/opt/vpn-bot`), plus a LOCAL `3x-ui` for CF-fronted inbounds, ingress :443, dashboard API :8080 (and the same app over HTTPS on :8448 for exit, §53), and the Hermes `/ai` agent (:4097, systemd `hermes-api.service`; v0.23.1 since 2026-11-16, update and rollback in `docs/runbooks/hermes_update.md`).
 - **Exit node** (`ssh vpn-exit`) — the real x-ui panel :2026 + xray :443 (the backend the bot manages over HTTP API), Caddy :9443 → entry (dashboard TLS; the hop to entry is TLS to :8448 with a pinned certificate since the §53 cutover of 2026-11-11, and :8080 is closed to exit since 2026-11-12), tinyproxy :8888 (bot's Telegram egress).
 - **GitHub**: `git@github.com:Annoyt/VPNautodeploy.git` — `origin/main` is the source of truth.
 - **`/opt/vpn-bot` on entry is NOT a git checkout** — it's an rsync target. `git pull/reset` there is impossible; code that isn't rsynced doesn't exist in prod (a fix once sat undeployed for 11 days while everyone debugged "a bug").
@@ -463,6 +463,11 @@ A user-report ("получил ключ, но его нет в списке") un
 - **`grant_paid` is a real billing grant** (transition + subscriptions row + `grant_paid_access` in the main handler, not in the notification side-effect path which is skipped when NotificationService is down). The detail modal has its own ⭐ paid button (list-card buttons are invisible to mobile admins).
 - **Test strategy (4 levels)** — each catches a class the others can't: unit+mutmut (function logic) / `tests/integration/test_web_actions_integration.py` on REAL sqlite (cross-layer row semantics — mocks can't see stale-row overwrites by construction) / `tests/e2e` Playwright (dead frontend JS) / deploy sha-smoke in `deploy_to_entry.sh` (repo-vs-prod drift). Trust a new suite only after re-introducing the bug and watching it fail.
 - **Hermes `/ai`**: model switched to `minimax/minimax-m3:free` with a `fallback_providers` chain (nemotron-3-super), skills deploy via `scripts/deploy_hermes_skills.sh` (placeholder substitution; hand-rsync caused drift), watchdog defers restarts while an /ai request is in flight.
+  - **v0.23.1 since 2026-11-16** (v0.18.2 before, from July). From about v0.21 on, Hermes needs Python 3.14, so it is now the official managed install:
+    - code in `/usr/local/lib/hermes-agent-v0.23`;
+    - the home in `/root/.hermes-v023`. `/root/.hermes` is a symlink to it, so the guard and `deploy_hermes_skills.sh` keep their paths.
+
+    `config.yaml` needs `terminal.cwd: /root/hermes-work`. Without it, the workspace AGENTS.md, which carries the healthcheck-first rule, never reaches the system prompt. The procedure, its traps and the rollback are in `docs/runbooks/hermes_update.md`.
 - **Cleanup**: removed the embedded 930MB ChatDev clone (authored workflow preserved in `docs/archive/`), `.archive/`, `scratch/`, mempalace artifacts, `htmlcov`/`mutants`; `AGENT.md` and `PROJECT_CONTEXT.md` deleted (stale — their live content moved here).
 
 ### 28. Agent runbook, alert→agent diagnosis, free-model guard (2026-09-05 session)
