@@ -1068,7 +1068,13 @@ The bulk probe (§48) has read ws `partial` in every run since it began: 210 of 
 
 Both hysteria instances asked the bot on every new connection (`/api/hy2/auth`, `/api/hy2t/auth` over the pinned hop, §53). While the bot did not answer (15–30 s per deploy, longer in an outage), hysteria refused every new hy2 and hy2t connection.
 
-**Code only, not deployed.** Nothing runs on exit until the owner rolls it out (`docs/runbooks/hy2_auth_relay.md`). Hysteria's configs change only on the owner's word: a hysteria restart makes every hy2 user reconnect.
+**Deployed 2026-11-16, on the owner's word.**
+- 18:52 UTC: the bot with `/api/hy2/keys` (6a0eef9).
+- 18:56 UTC: the relay on exit.
+- 19:17:43 UTC: both hysteria `url:` lines ask the relay. Backups: `/etc/hysteria/*.yaml.bak-a6-20261116-190751` and `-191735`, both holding the hop URL.
+- Not yet checked: the memory while the bot is down. The next ordinary deploy checks it (runbook step 4).
+
+Hysteria's configs change only on the owner's word: a hysteria restart makes every hy2 user reconnect.
 
 - **What runs where.**
   - Entry, the bot: `GET /api/hy2/keys`, behind the exit's token (`_dpi_token_ok`). It answers `{"ok", "hy2": {hash: id}, "hy2t": {hash: id}}`: the keys each callback lets in right now.
@@ -1107,6 +1113,11 @@ Both hysteria instances asked the bot on every new connection (`/api/hy2/auth`, 
   - After deploying, re-run `install_protocol_healthcheck.sh` on entry: the timer runs a root-owned copy.
 - **Rollout and rollback:** `docs/runbooks/hy2_auth_relay.md`; its file-editing blocks run in the tests.
   - Order: the bot (deploy), then the relay on exit (users unaffected: hysteria still asks the bot), then hysteria's two `url:` lines and a restart in a quiet hour. The check that memory works is the next ordinary deploy.
+  - **Judge a hysteria restart by a fresh client**: the runbook's check connects a new hysteria client on exit to each instance over loopback, with the probe account's key.
+    - Never judge it by the probe through probe-proxy. The probe's long-lived QUIC connection to the old process is dead until the idle timeout (about 30 s for sing-box; the server's `quic.maxIdleTimeout` is 60 s), so the probe reads `000` while the relay works.
+    - On 2026-11-16 the first switch was rolled back after a minute for exactly that.
+    - The client's SNI must be a name in the server's certificate: with no matching SNI, hysteria 2.9's `sniGuard` (default `dns-san`) answers `tls: internal error`.
+    - Real clients take the same 30–60 s to reconnect. In the evening hy2 sees 0–8 connects per 10 min, so a minute without an allow proves nothing.
   - Rollback: the hysteria configs from their `.bak-a6-<ts>` and a restart; the §53 drop-in stays, so the hop URL works at once. Then the relay.
   - The relay also works with a bot that has no `/api/hy2/keys` (404): then only the live allows count.
 - **Tests:**
