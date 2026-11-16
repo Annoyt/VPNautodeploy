@@ -10,6 +10,7 @@ Hermes **v0.23.1**, the official *managed* install:
 - **Home:** `/root/.hermes-v023` holds `config.yaml`, `.env`, the skills and the state.
   - Its `tools/` holds the runtime: Python 3.14, uv, node, ffmpeg, ripgrep (~1.2 GB). There is no Chromium: the install ran with `--skip-browser`.
   - **`/root/.hermes` is a symlink to it**, so the free-model guard, `deploy_hermes_skills.sh` and the watchdog keep their paths.
+  - **Hermes's own launcher goes through the symlink too.** The gateway rewrote `.hermes/bin/hermes` at its first start from the unit (20:27:25), and the launcher now runs `/root/.hermes/tools/python-3.14…/bin/python3`. Never repoint or remove `/root/.hermes` while v0.23 runs.
 - **Unit:** `/etc/systemd/system/hermes-api.service`, the same as `systemd/hermes-api.service` in the repo (`HERMES_HOME=/root/.hermes-v023`, `MemoryMax=1200M`). The gateway's RSS is ~290 MB; v0.18.2 used 153 MB.
 - **Kept for rollback:** the previous v0.18.2 in `/usr/local/lib/hermes-agent` (its venv is Python 3.11) and its home `/root/.hermes-v0182`.
   - Backups: `/opt/backups/hermes-api.service.bak-<TS>`, `hermes-wrapper.bak-<TS>` and `hermes-home-v0182-<TS>.tar.gz`. `<TS>` is in `/root/.hermes-update-ts`.
@@ -91,8 +92,12 @@ The install took ~12 min on entry's single vCPU (8.5 min CPU, 1.0 GB memory peak
 
 ## The next update
 
-- **Is there one?** `hermes update --check` says whether a newer release is out, and installs nothing. `hermes update --plan` shows what an update would do, again changing nothing. That includes how it would restart the running gateway.
-- **In place:** `hermes update --yes` pulls the code, syncs the dependencies and migrates the config. That is enough for a minor release, once two things are done:
+- **Is there one?** The `hermes-release-notice` timer on entry posts each newer stable release to the AI topic once, with the first line of its notes.
+  - It runs daily at 06:00 UTC: `scripts/hermes_release_notice.py`, installed by `scripts/deploy_hermes_host.sh`.
+  - It asks GitHub: Hermes's own check had not seen v0.23.2 12 minutes after it was published (`hermes --version` on entry still said «Up to date»).
+  - By hand: `hermes update --check` says whether a newer release is out, and installs nothing. `hermes update --plan` shows what an update would do, again changing nothing. That includes how it would restart the running gateway.
+- **The version number says little about the size.** v0.23.2 calls itself a patch release, yet it rolls up ~2,000 PRs merged since v0.23.1. Judge by the notes, and never skip the stand run.
+- **In place:** `hermes update --yes` pulls the code, syncs the dependencies and migrates the config. That is enough for a small release, once two things are done:
   - the release has had a stand run;
   - the home and the install dir are backed up.
 
