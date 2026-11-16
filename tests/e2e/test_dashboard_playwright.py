@@ -869,3 +869,104 @@ class TestBotTokenSettings:
         assert token_stack.saved_token() is None
         assert page.input_value('#bottoken-input') == TB_NEW   # left to fix a typo
         page.close()
+
+
+# ------------------------------------------------- users added by email ----
+
+EMAIL_USER_MAIL = 'ivan@example.com'
+
+
+def _seed_email_user(stack):
+    """A user as /addmail makes one: no username, a synthetic chat_id and
+    panel email, the real address in contact_email."""
+    from bot.models.user import User
+    stack._seq += 1
+    cid = f"ext_e2e{stack._seq:04d}"
+    stack.db.save_user(User(
+        chat_id=cid, username=None, status='paid', quota_gb=100.0,
+        email=f'user_{cid}@nekovo.ru',
+        uuid=f'5555{stack._seq:04d}-2222-4333-8444-555555555555',
+        contact_email=EMAIL_USER_MAIL,
+    ))
+    return cid
+
+
+def _open_detail(page, chat_id):
+    _card(page, chat_id).click()
+    page.wait_for_function(
+        "() => !document.getElementById('detail-body').textContent"
+        ".includes('Загрузка')")
+
+
+class TestEmailUsers:
+    """A user added by email is named by its address, never by its
+    synthetic ext_… id (owner's request, 2026-11-15)."""
+
+    @pytest.fixture(autouse=True)
+    def _fresh_admin_budget(self):
+        # The stage shares one admin rate-limit budget (60 requests a minute
+        # from 127.0.0.1), and each of these tests opens several pages.
+        from bot.utils import rate_limit
+        rate_limit._admin_rate_limiter.reset('127.0.0.1')
+
+    def test_list_card_and_detail_name_the_address(self, page_factory, e2e_stack):
+        cid = _seed_email_user(e2e_stack)
+        page = page_factory()
+        _find_user_card(page, e2e_stack, cid)
+        assert f'✉️ {EMAIL_USER_MAIL}' in _card(page, cid).inner_text()
+        _open_detail(page, cid)
+        assert page.inner_text('#detail-title') == \
+            f'Пользователь ✉️ {EMAIL_USER_MAIL} · #{cid}'
+        body = page.inner_text('#detail-body')
+        assert f'Почта для связи\n{EMAIL_USER_MAIL}' in body
+        assert f'Email в панели\nuser_{cid}@nekovo.ru' in body
+        page.close()
+
+    def test_the_search_finds_it_by_the_address(self, page_factory, e2e_stack):
+        cid = _seed_email_user(e2e_stack)
+        page = page_factory()
+        page.fill('#search-input', 'IVAN@EXAMPLE')
+        page.wait_for_selector(f'.user-card[data-chat-id="{cid}"]')
+        page.close()
+
+    def test_other_users_keep_their_titles(self, page_factory, e2e_stack):
+        from bot.models.user import User
+        named = e2e_stack.seed_user('demo')
+        e2e_stack._seq += 1
+        nameless = f'e2e_nameless_{e2e_stack._seq}'
+        e2e_stack.db.save_user(User(chat_id=nameless, username=None, status='demo'))
+        page = page_factory()
+        _find_user_card(page, e2e_stack, named)
+        _open_detail(page, named)
+        assert page.inner_text('#detail-title') == f'Пользователь @{named} · #{named}'
+        assert 'Почта для связи' not in page.inner_text('#detail-body')
+        page.close()
+        page = page_factory()
+        _find_user_card(page, e2e_stack, nameless)
+        assert 'no_username' in _card(page, nameless).inner_text()
+        _open_detail(page, nameless)
+        assert page.inner_text('#detail-title') == f'Пользователь #{nameless}'
+        page.close()
+
+    def test_signals_report_and_subscription_name_the_address(
+            self, page_factory, e2e_stack):
+        cid = _seed_email_user(e2e_stack)
+        with e2e_stack.db._connect() as conn:
+            rid = conn.execute(
+                "INSERT INTO user_failure_reports (chat_id, country, asn) "
+                "VALUES (?, 'RU', 'AS31133')", (cid,)).lastrowid
+            conn.execute(
+                "INSERT INTO subscriptions (chat_id, plan_type, started_at, "
+                "expires_at, is_active) VALUES (?, 'paid', '2026-11-01', "
+                "'2099-01-01', 1)", (cid,))
+            conn.commit()
+        page = page_factory(users_tab=False)
+        page.click('[data-tab="signals"]')
+        row = page.locator('#signals-reports-list .alert-row', has_text=f'#{rid} ')
+        row.wait_for()
+        assert f'✉️ {EMAIL_USER_MAIL} (paid)' in row.inner_text()
+        page.click('[data-tab="stats"]')
+        sub = page.locator(f'.subs-row[onclick*="{cid}"]')
+        sub.wait_for()
+        assert sub.locator('.subs-user').inner_text() == f'✉️ {EMAIL_USER_MAIL}'
+        page.close()

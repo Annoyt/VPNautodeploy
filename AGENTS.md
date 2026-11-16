@@ -156,6 +156,7 @@ Files with this mark: `test_database.py`, `test_security.py`, `test_state_machin
 |------------------|----------------|
 | `bot/core/state_machine.py` | `tests/unit/test_state_machine.py` |
 | `bot/handlers/callbacks/user*.py` | Corresponding unit + integration callback tests |
+| `bot/utils/user_label.py` (how an admin sees a user) | `userLabel` in `bot/webapp/app.js` (the same rule), `tests/integration/test_email_user_labels.py`, `TestEmailUsers` in `tests/e2e/test_dashboard_playwright.py` |
 | `bot/services/xui_service.py` | `tests/integration/test_xui_service.py`, `tests/integration/test_code_review_fixes.py` |
 | `bot/services/billing.py` | `tests/unit/test_billing.py`, `tests/integration/test_limit_ip.py`, `tests/integration/test_mykey_lost_key.py` (the key re-add uses its values) |
 | `bot/core/database.py` schema | `tests/integration/test_migration.py`, `tests/unit/test_database.py` |
@@ -442,7 +443,11 @@ RU App Store purged proxy clients in waves: first Hiddify, then Happ (verified g
 
 A user-report ("получил ключ, но его нет в списке") unravelled into three latent dashboard bugs and a testing overhaul. PR #1 (`dashboard-hardening-e2e`) has the full story; highlights every agent should know:
 
-- **ext_* (email-only) users**: no Telegram username; their real address lives in `contact_email` (`users.email` is the synthetic panel id `user_ext_…@nekovo.ru` — never mail to it). `/users`, `/find`, and the dashboard now surface `contact_email`. Provisioning goes ONLY through `AdminHandler._provision_email_user` / `/addmail` — a raw SQL INSERT into `users` once produced a zombie `chat_id=NULL` row (agent incident; the Hermes `user-ops` skill now forbids it).
+- **ext_* (email-only) users**: no Telegram username; their real address lives in `contact_email` (`users.email` is the synthetic panel id `user_ext_…@nekovo.ru` — never mail to it). Every admin surface names them by that address (2026-11-15):
+  - `user_label()` in `bot/utils/user_label.py` is the one rule for the bot's messages: `@username`, else `✉️ <contact_email>`, else the message's old fallback (`user_<chat_id>`, `no_username`, …). `userLabel()` in `bot/webapp/app.js` is its copy for the dashboard.
+  - Before that, only `/users`, `/find` and the dashboard's user list showed the address. `/onlines`, the SOS reports, admin command answers and the rest of the dashboard showed `user_ext_…`.
+  - Name a user through one of the two, never with a new `f"@{username}" if username else …`. The dashboard's search matches `contact_email` too.
+  - Provisioning goes ONLY through `AdminHandler._provision_email_user` / `/addmail` — a raw SQL INSERT into `users` once produced a zombie `chat_id=NULL` row (agent incident; the Hermes `user-ops` skill now forbids it).
 - **Dead confirm modal**: `hideModal()` nulled `modalCallback` before the confirm handler called it — EVERY confirm-gated dashboard action (paid/ban/approve/reject/revoke/reset) silently did nothing, since the repo-root merge. Fixed in app.js; pinned by Playwright E2E.
 - **Dead POSTs (same class, fixed 2026-11-11)**: `apiFetch(path)` took one argument and always sent a GET, so callers passing `{method: 'POST', …}` were silently ignored. Five actions were affected:
   - The Settings tab's plans and reminders saves read the values back and printed «✅ сохранено» with nothing stored.

@@ -12,6 +12,7 @@ from typing import Optional
 from bot.config import UserState
 from bot.models import User
 from .base import AdminHandlerBase
+from bot.utils.user_label import user_label
 
 logger = logging.getLogger(__name__)
 
@@ -154,7 +155,7 @@ class AdminBroadcastMixin(AdminHandlerBase):
         go = bool(args) and str(args[0]).lower() == 'go'
         if not go:
             sample = ', '.join(
-                html.escape(f"@{u.username}" if u.username else str(u.chat_id))
+                user_label(u, fallback=str(u.chat_id))
                 for u in reachable[:self.NUDGE_SAMPLE]) or '—'
             last = self._last_nudge()
             lines = [

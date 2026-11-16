@@ -10,7 +10,7 @@ import asyncio
 import socket
 import threading
 import time
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -80,7 +80,13 @@ def e2e_stack(tmp_path_factory):
     config.PAID_TRAFFIC_GB = 100
     config.is_admin = lambda uid: str(uid) == E2E_ADMIN_ID
 
-    server = WebAppServer(config, db, xui_service=Mock())
+    # The panel stays out of the picture: no traffic for anyone. A bare
+    # Mock answered a Mock for a user with a panel email, and the users
+    # list failed on it (Mock + Mock).
+    xui = Mock()
+    xui.get_all_traffic = Mock(return_value={})
+    xui.get_client_traffic = AsyncMock(return_value=None)
+    server = WebAppServer(config, db, xui_service=xui)
     server.notification_service = Mock()
     base = serve_in_thread(server)
     token = make_admin_token(E2E_BOT_TOKEN, E2E_ADMIN_ID)

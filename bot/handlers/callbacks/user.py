@@ -1563,11 +1563,12 @@ class MyKeyAnswerHandler(BaseCallbackHandler):
             forum_group = getattr(self.config, 'FORUM_GROUP_ID', 0)
             topic = getattr(self.config, 'TOPIC_SUPPORT', 0)
             if forum_group and topic:
-                uname = getattr(user, 'username', None) or user_id or chat_id
+                from bot.utils.user_label import user_label
+                who = user_label(user, fallback=f"@{user_id or chat_id}")
                 cat_label = self.FAILURE_CATEGORIES[category].get('ru', category)
                 msg = '\n'.join([
                     f"🆘 <b>Failure report #{report_id or '?'}</b>",
-                    f"User: <code>@{uname}</code> ({user_id or chat_id})",
+                    f"User: <code>{who}</code> ({user_id or chat_id})",
                     f"Problem: {cat_label}",
                     *self._format_report_facts(facts, country, asn, _utc_now()),
                 ])

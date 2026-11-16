@@ -8,6 +8,7 @@ from bot.config import Settings, UserState
 from bot.core.state_machine import StateMachine
 from bot.handlers.base import BaseHandler
 from bot.utils.exceptions import PermissionDeniedError, UserNotFoundError, InvalidStateError
+from bot.utils.user_label import user_label
 
 if TYPE_CHECKING:
     from bot.core.bot import Bot
@@ -94,8 +95,8 @@ class ForumMessageService:
         self.config = config
     
     def _get_username_display(self, user: 'User') -> str:
-        """Get formatted username for display."""
-        return f"@{user.username}" if user.username else "no_username"
+        """How the request card names the user (HTML)."""
+        return user_label(user, fallback="no_username")
     
     def update_request_message(
         self,

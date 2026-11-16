@@ -23,6 +23,7 @@ import time
 from bot.handlers.callbacks.base import BaseCallbackHandler
 from bot.services import rule_lists as rl
 from bot.utils.exceptions import PermissionDeniedError
+from bot.utils.user_label import user_label
 
 logger = logging.getLogger(__name__)
 
@@ -137,8 +138,7 @@ class SiteReportFlow:
         n_window = len(group['users_window']) if group else 1
         threshold = rl.auto_threshold(self.db)
         guard = rl.auto_guard(item['domain'], lists, queue['ignored'], now)
-        uname = getattr(user, 'username', None)
-        who = f"@{html.escape(uname)}" if uname else "без username"
+        who = user_label(user, fallback="без username")
         where = " ".join(html.escape(str(v)) for v in (
             getattr(user, 'last_asn', None), getattr(user, 'last_country', None)) if v)
         lines = [
