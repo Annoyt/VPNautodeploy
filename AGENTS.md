@@ -138,6 +138,7 @@ Files with this mark: `test_database.py`, `test_security.py`, `test_state_machin
 | `bot/core/database.py` schema | `tests/integration/test_migration.py`, `tests/unit/test_database.py` |
 | `bot/models/vpn_node.py` | All cluster tests using `VPNNode` |
 | `bot/services/hop_tls.py`, `scripts/caddy_entry_hop.py`, `systemd/hysteria-entry-hop.conf` | `tests/integration/test_hop_tls.py`, `tests/integration/test_hop_tls_stand.py`, `docs/runbooks/entry_hop_tls.md` (its blocks run in the tests) |
+| `bot/services/hy2_keys.py`, the hy2 callback in `bot/core/web_server.py`, `scripts/hy2_auth_relay.py`, `scripts/install_hy2_auth_relay.sh`, `systemd/hy2-auth-relay.service` | `tests/integration/test_hy2_auth_relay.py` (the key list must equal what the live callback lets in), `tests/unit/test_hy2_auth_relay.py`, `tests/unit/test_install_hy2_auth_relay_sh.py`, `tests/integration/test_hy2_auth_relay_stand.py`, `docs/runbooks/hy2_auth_relay.md` (its blocks run in the tests) |
 
 ---
 
@@ -726,7 +727,7 @@ Until now every user's UDP (Telegram calls) went through hy2 alone, so a network
   - the users row is read on a worker thread (`_hy2_user_row` → `_hy2_lookup_user`). On the event loop a locked bot.db (5-s busy timeout) held every request the web server had in flight;
   - the last-geo update and the `hy2_auth_log` row are written after the answer, on a thread of their own (`_spawn_hy2_record`; not asyncio's default pool, which the lookups use). Past 500 queued writes a new one is dropped;
   - when the read fails, the decision uses the last row this key resolved to (`bot/services/hy2_auth_rows.py`), if it is under 15 min old. The status, tier and expiry gates still run on it. A key not seen since the start fails closed, as before. The row is dropped by a good read without a row, by `revoke_user_key` and by every `StateMachine` status change, so a key banned or downgraded while its client stays connected is read again, never let in from memory.
-  - Not done: a cache on the exit, so a bot restart does not refuse new hy2 connections (A6, later).
+  - A bot restart no longer refuses new hy2 connections once exit runs the auth relay (A6, §56).
 - **Tests:** `tests/integration/test_calls_udp_paths.py` (builders, `/sub` and the kit on a real sqlite, the hy2 callback with a broken and a slow bot.db), the stand above, updated cases in `test_clash_profile.py`, `test_clash_channels.py` and `test_web_server.py`. 23 mutants killed (hy2-only collapse, priority order, tolerance at 50 and past the wrap, fallback vs url-test, filter anchor, `network: tcp`, demotions on each path, the remembered row, writes before the answer, lookup on the loop), restored by reverse text replacement with a hash check.
 
 ### 48. Probes and alerts: one definition, users' connections, state that survives a restart (2026-11-11, plan F, package B)
@@ -811,7 +812,7 @@ Until now a demotion took effect only in the Clash profile's Cascade/Auto. Karin
 Package D of `docs/IMPROVEMENT_PLAN.md` section F. Each part runs only once installed: the healthcheck timer on entry and the reporter on exit, both in place since 2026-11-11.
 
 - **D1, the healthcheck on its own.** `scripts/protocol_healthcheck.py` gets `findings` (`findings_for(layers)`, pure): facts that break users before the probes go dark, judged whatever the probe verdict says.
-  - The facts: the Reality dest cert (> 7000 B warn, > 8000 B critical), missing entry UDP DNAT for hy2 (critical) or hy2t (warn), missing exit hop REDIRECTs (warn), hysteria / hysteria-turbo / shadow-tls units not active, a BROKEN panel field audit (critical). Since 2026-11-11 also what a tunnel user can reach on exit itself: `hy2_acl:<unit>`, `xray_api_exposed`, `xray_api_polling`, `exit_guard_unreadable` (§52).
+  - The facts: the Reality dest cert (> 7000 B warn, > 8000 B critical), missing entry UDP DNAT for hy2 (critical) or hy2t (warn), missing exit hop REDIRECTs (warn), hysteria / hysteria-turbo / shadow-tls units not active, a BROKEN panel field audit (critical). Since 2026-11-11 also what a tunnel user can reach on exit itself: `hy2_acl:<unit>`, `xray_api_exposed`, `xray_api_polling`, `exit_guard_unreadable` (§52). Since 2026-11-15, `hy2_relay`: a running hysteria asks the auth relay and the relay is down (§56).
   - Since 2026-11-13, the two servers `setup_ssh_exit.sh` and `setup_xhr_exit.sh` run on exit (§51), each a container plus a root timer that syncs its users from the bot every 2 min (`exit_servers()`, `EXIT_SERVERS`):
     - `exit_server:<name>`: the container is not running (a crash loop is named), or it is gone while its sync timer is still installed. Critical for `xhr-exit` while xhr is on in the cascade (every xhr user is cut off); warn for `ssh-exit` (the emergency path only).
     - `exit_sync:<name>`: the sync timer is not active, the last run failed (`Result` other than success), or no run finished for 10 min (`EXIT_SYNC_STALE_S`, from the service's monotonic exit time and exit's `/proc/uptime`). Warn: a stuck sync only freezes the user list.
@@ -1033,3 +1034,57 @@ The bulk probe (§48) has read ws `partial` in every run since it began: 210 of 
   - Stale probes freeze it, as they freeze R1 and R2.
 - **The structural fix** is a second front (plan B2/B3): a hostname or CDN that Russian DPI does not cut.
 - **Tests:** `TestProbeBulk` in `tests/integration/test_dpi_monitor.py` (real sqlite, 16 cases). 20 mutants killed, restored by positional replacement with a hash check.
+
+### 56. The hy2 auth relay on exit: hysteria keeps letting users in while the bot is down (2026-11-15, plan F, A6)
+
+Both hysteria instances asked the bot on every new connection (`/api/hy2/auth`, `/api/hy2t/auth` over the pinned hop, §53). While the bot did not answer (15–30 s per deploy, longer in an outage), hysteria refused every new hy2 and hy2t connection.
+
+**Code only, not deployed.** Nothing runs on exit until the owner rolls it out (`docs/runbooks/hy2_auth_relay.md`). Hysteria's configs change only on the owner's word: a hysteria restart makes every hy2 user reconnect.
+
+- **What runs where.**
+  - Entry, the bot: `GET /api/hy2/keys`, behind the exit's token (`_dpi_token_ok`). It answers `{"ok", "hy2": {hash: id}, "hy2t": {hash: id}}`: the keys each callback lets in right now.
+    - The hash is `bot/services/hy2_keys.py:key_hash`, sha256 over a fixed prefix and the key. The prefix keeps it apart from the SSH exit's `n<12 hex>` names, which hash the uuid too.
+    - The gates are the live callback's own: `hy2_keys.allows` (status, expiry, tier) and `_hy2_quota_denies` (the cached panel reading). The list starts no panel lookup.
+    - A uuid two users rows share is left out: the live lookup takes whichever row sqlite returns first.
+    - A read failure answers 503, never an empty list.
+  - Exit: `hy2-auth-relay.service` runs `scripts/hy2_auth_relay.py` on `127.0.0.1:9979`. It is stdlib only, tested on Python 3.11 and 3.12; exit runs 3.13.
+    - hysteria's `auth.http.url` becomes `http://127.0.0.1:9979/api/hy2/auth`; turbo's, `/api/hy2t/auth`.
+    - The relay asks the bot over the pinned hop with the reporter's settings (`BOT_URL`, `BOT_CA_FILE`, `DPI_REPORT_TOKEN` from `/etc/exit-dpi.env`). The pin is the only trust anchor; TLS 1.3.
+    - It keeps its connections to the bot alive: a new TLS connection per auth would add two round trips exit → entry to every hy2 handshake (the 2026-09-30 "slow hysteria" complaint).
+- **What the relay answers.**
+  - When the bot answers (HTTP 200, a boolean `ok`, an id for an allow), that answer goes back as it is. The relay never answers from memory while the bot answers.
+  - When it does not (refused, 3 s to connect or 6 s in all, TLS refused, 5xx, junk), the relay answers from memory, per route. Hysteria gives the callback 10 s.
+    - Memory holds the allows the bot gave, each counted from the moment the bot was asked, and the bot's key list, counted from the start of its fetch. The list is fetched every 60 s, every 10 s while that fails.
+    - Either counts for 15 min (`MEMORY_S`, A4's bound). `HY2_RELAY_MEMORY_S` in `/etc/hy2-auth-relay.env` may only lower it; 0 = no memory, the relay only passes requests on.
+    - A deny from the bot drops the key on that route; a deny on hy2 drops it on hy2t too (turbo lets in a subset). The newer word wins: a list never overrides what the bot answered after the list was asked for.
+    - A key the bot never let in is refused, as before. So a banned or downgraded key gets in from memory at most 15 min after the bot last let it in.
+  - Why a list and not only the allows: users authenticate a few times a day (4–8 allows per user, §29). Most new connections in a deploy's window come from keys the bot has not seen for hours.
+  - After a refused or timed-out connect, the relay answers from memory for 5 s (`SKIP_S`) without asking. During an entry blackhole a handshake then does not wait 3 s each time. Any answer from the bot, the list's fetch included, ends that window.
+  - Allows from memory are not in the bot's `hy2_auth_log`; `journalctl -u hy2-auth-relay` has each, with the id and the age.
+  - An over-quota key the bot's cache had not seen gets in from the list during an outage, as on the first connect after a bot restart. hy2-traffic-collector kicks it.
+- **Tunnel users cannot reach it.**
+  - It binds loopback addresses only. An IPv4-mapped one is refused: Pythons disagree on whether it is loopback (3.11.18 yes, 3.12.3 no).
+  - Through hysteria, the §52 ACL rejects every spelling of loopback. Users of xray and of the SSH and xhr exits are in network namespaces of their own.
+  - The stand shows it: with the ACL, `127.0.0.1`, `localhost`, a name resolving to 127.0.0.1, `0.0.0.0`, `[::ffff:127.0.0.1]` and `127.1.2.3` are all `rejected`, and the server's own address gets `connection refused`. Without the ACL the first five reach the relay. The runbook's switch refuses a config without `reject(127.0.0.0/8)`.
+- **The unit** (`systemd/hy2-auth-relay.service`).
+  - `DynamicUser`, no capabilities, `ProtectSystem=strict`, ordered before both hysteria units.
+  - `Restart=always` with `StartLimitIntervalSec=0`: while it is down, hysteria refuses every new hy2 connection, so it never stops restarting.
+  - It runs a root-owned copy in `/usr/local/lib/nekovpn-hy2-relay/` with `python3 -I`, never the rsync target (§36).
+  - `scripts/install_hy2_auth_relay.sh` installs it and fails when the relay does not stay up. It never touches hysteria, and `--remove` refuses while a hysteria config still asks the relay.
+  - Re-run the installer after the script changes, while the bot answers: a restart empties the memory (the list refills it within a second), and new hy2 connections are refused for that second.
+- **Watched.**
+  - `curl -s 127.0.0.1:9979/status` on exit: counts and ages, no key, hash or id.
+  - The healthcheck (§50) pages `healthcheck:hy2_relay` (critical) when a running hysteria asks the relay and the relay is `inactive`, `failed` or `activating` (its restart loop). A state or config it cannot read keeps the alert as it is. Layer C sends only whether each config asks the relay (`auth_relay`), never the URL.
+  - After deploying, re-run `install_protocol_healthcheck.sh` on entry: the timer runs a root-owned copy.
+- **Rollout and rollback:** `docs/runbooks/hy2_auth_relay.md`; its file-editing blocks run in the tests.
+  - Order: the bot (deploy), then the relay on exit (users unaffected: hysteria still asks the bot), then hysteria's two `url:` lines and a restart in a quiet hour. The check that memory works is the next ordinary deploy.
+  - Rollback: the hysteria configs from their `.bak-a6-<ts>` and a restart; the §53 drop-in stays, so the hop URL works at once. Then the relay.
+  - The relay also works with a bot that has no `/api/hy2/keys` (404): then only the live allows count.
+- **Tests:**
+  - `tests/unit/test_hy2_auth_relay.py`: the memory, the parsing, the hop against servers of the test's own (the pin, keep-alive, a dropped connection, refused, hanging and silent bots), the listener, the config, the process.
+  - `tests/integration/test_hy2_auth_relay.py`: the key list on a real sqlite equals what the live callback lets in, over a 21-user population; the relay in front of the real bot over TLS; the runbook's blocks.
+  - `tests/unit/test_install_hy2_auth_relay_sh.py`: the installer with a fake `systemctl` and tripwires first in PATH, run first in `nekovpn-tests:py311`.
+  - `TestAuthRelay` in `tests/unit/test_healthcheck_exit_guard.py`.
+  - Stand `tests/integration/test_hy2_auth_relay_stand.py` (`requires_docker`): hysteria 2.9.2 → the relay → the real bot. Bot up: allow, and an unknown key refused by the bot. Bot stopped: the remembered key and a key only the list held pass, an unknown one does not, and past the bound neither does. Plus the ACL part above.
+  - 81 mutants killed: the memory's bound, newer-word and deny rules; the parsing; the hop's keep-alive, retry, timeouts, pin and memory-only window; the listener and config checks; the key list's gates and token; the healthcheck verdict; the installer, the unit and the runbook's guards. Each ran on a fresh bytecode cache and was restored by positional replacement with a hash check.
+  - Four survived the first run and got tests. One showed that `users.uuid` is `UNIQUE` (a second save replaces the row), so the shared-uuid guard in `read_rows` is tested on a table of an older schema.
