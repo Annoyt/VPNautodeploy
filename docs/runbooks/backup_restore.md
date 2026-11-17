@@ -40,8 +40,9 @@
   - ключи хоста.
 - `README.md`, `MANIFEST.json` — каждый файл с размером и sha256.
 
-Не входят: логи, кэши, venv, образы, бинарники из `/usr/local/bin` (только их список), резервная
-DE-нода (бот сам переустанавливает её клиентов).
+Не входят: логи, кэши, venv, образы, бинарники из `/usr/local/bin` (только их список), файлы
+больше 20 МБ (только в списке; это GeoIP City, 127 МБ, — бот скачает его сам), резервная DE-нода
+(бот сам переустанавливает её клиентов).
 
 ## Ключ
 
@@ -65,6 +66,9 @@ DE-нода (бот сам переустанавливает её клиент�
 
 ## Установка (один раз, по слову владельца)
 
+Сделано 17.11.2026: бот `a963b2c`, age 1.1.1 из apt, zstd уже стоял. Шаги ниже — для
+переустановки или нового entry.
+
 С машины владельца, из checkout репо; ssh-алиасы `entry` и `vpn-exit` (root).
 
 ### 0. Предпроверка (только чтение)
@@ -77,13 +81,17 @@ ssh entry 'df -h /var/lib | tail -1'
 ```
 
 Нужно: python3 на обоих узлах (alias `exit-node` у root на entry уже есть — его использует
-healthcheck, §50) и около 300 МБ свободного места на entry под одну сборку.
+healthcheck, §50) и около 1 ГБ свободного места на entry. Сборка занимает до ~0,5 ГБ, семь
+хранимых архивов — ~410 МБ (сейчас архив ~58 МБ, растёт вместе с `state.db` Hermes).
 
 ### 1. Пакеты на entry
 
 ```bash
-ssh entry 'apt-get install -y age zstd && age --version'
+ssh entry 'apt-get install -y age && age --version && { command -v zstd || apt-get install -y zstd; }'
 ```
+
+Уже стоящий zstd не переустанавливать: `apt-get install` обновил бы его, а с ним libzstd, общую
+для всего узла.
 
 ### 2. Бот с отправителем
 
@@ -123,7 +131,8 @@ ssh entry 'systemctl start nekovpn-backup.service; journalctl -u nekovpn-backup 
 ssh entry 'docker exec vpn-bot python3 /app/scripts/backup_send.py status'
 ```
 
-В группе появится топик «Бэкапы» с первым архивом. Код выхода сервиса:
+В топике «Бэкапы» появится архив (топик бот создаёт сам при первой отправке; он есть
+с 17.11.2026). Код выхода сервиса:
 - `0` — архив полный;
 - `1` — ушёл без части (причина — в подписи и в журнале);
 - `2` — не ушёл ничего.
@@ -142,7 +151,8 @@ KEY=~/.config/nekovpn-signing/nekovpn-backup-age.key
 ARCHIVE=~/Downloads/nekovpn-backup-20261117T014012Z.tar.zst.age    # файл из топика «Бэкапы»
 ```
 
-Если архив пришёл частями (`.001`, `.002`…, только когда он больше 45 МБ), сначала склеить:
+Если архив пришёл частями (`.001`, `.002`…, когда он больше 45 МБ; при нынешних ~58 МБ частей
+всегда две), сначала склеить:
 
 ```bash
 cat "$ARCHIVE".[0-9][0-9][0-9] > "$ARCHIVE"
@@ -271,11 +281,13 @@ ssh vpn-exit 'rm -f /root/restore-exit.tar'
    - `etc/hysteria/*`;
    - юниты `hysteria*` с drop-in `entry-hop`;
    - `etc/nekovpn-hop/*`;
-   - релей авторизации (`etc/hy2-auth-relay.env`, затем `install_hy2_auth_relay.sh`, §56).
+   - релей авторизации: `install_hy2_auth_relay.sh` (§56). `etc/hy2-auth-relay.env` — только если
+     он есть в архиве: файл необязателен, и на exit его нет.
 4. Caddy: `etc/caddy`, `var/lib/caddy/.local/share/caddy`.
 5. acme.sh: `root/.acme.sh`, `etc/ssl/sub`, `etc/ssl/cdn` и crontab из архива.
-6. tinyproxy (`etc/tinyproxy`), правила (`etc/iptables`, `etc/ufw`,
-   `usr/local/bin/exit_firewall.sh`), sysctl, `etc/gai.conf`.
+6. tinyproxy (`etc/tinyproxy`), правила (`etc/ufw`, `usr/local/bin/exit_firewall.sh`), sysctl,
+   `etc/gai.conf`. `/etc/iptables` на exit нет: живые правила для сверки —
+   `nekovpn-facts/iptables-save.txt`.
 7. xhr-exit и ssh-exit: `etc/xhr-exit*`, `etc/ssh-exit*`, затем `setup_xhr_exit.sh` и
    `setup_ssh_exit.sh`. Ключи берутся из этих каталогов, так что клиентам менять ничего не надо.
 8. DPI-репортёр, коллектор hy2, watchdog: файлы из `usr/local/bin`, юниты, `etc/exit-dpi.env`.
@@ -284,7 +296,8 @@ ssh vpn-exit 'rm -f /root/restore-exit.tar'
 
 1. Ключи хоста и `root/.ssh`: алиас `exit-node` и ключ, которым entry ходит на exit.
 2. docker, haproxy (`etc/haproxy`), shadow-tls: юнит из архива, команда и пароль — в
-   `nekovpn-facts/systemctl-cat.txt`. Затем `etc/iptables/rules.v4`.
+   `nekovpn-facts/systemctl-cat.txt` (`/etc/shadow-tls*` на entry нет). Затем
+   `etc/iptables/rules.v4`.
 3. `/opt/vpn-bot`: код из репо (`scripts/deploy_to_entry.sh`), `.env` и `docker-compose.yml` из
    архива. Том бота — по шагу «bot.db» выше, затем сам бот.
 4. RU-зона (`etc/ru-exit`, затем `setup_ru_exit.sh`) и ssh-relay (`etc/ssh-relay`, затем
@@ -322,7 +335,7 @@ ssh entry 'docker exec vpn-bot python3 /app/scripts/backup_send.py status'
 | `отправка: Telegram: …` | архив собран, лежит в `/var/lib/nekovpn-backup/archives`, бот не смог отдать его в Telegram: прокси (§24), права бота в группе |
 | `не смог создать топик «Бэкапы»` | нет связи с Telegram (прокси, §24) или у бота нет права Manage Topics в группе. Что ответил Telegram, покажет `ssh entry 'docker exec vpn-bot python3 /app/scripts/backup_send.py topic --create'` |
 | `топик «Бэкапы» закрыт` | открыть топик в группе |
-| `на entry нет age` / `zstd` | `apt-get install age zstd` |
+| `на entry нет age` / `zstd` | поставить недостающий: `apt-get install age` или `apt-get install zstd`. Уже стоящий не переустанавливать (см. «Пакеты на entry») |
 | `в … лежит СЕКРЕТНЫЙ ключ age` | удалить файл получателей, поставить заново с открытым ключом, сделать новую пару ключей |
 | `другой запуск бэкапа ещё идёт` | подождать: запуски не пересекаются |
 | `прерван сигналом SIGTERM` | юнит не уложился в 45 мин или его остановили: журнал покажет, на каком шаге |
