@@ -3,8 +3,8 @@
 
 Hermes, the /ai backend, ran v0.18.2 from July until 2026-11-16 because
 nothing said that a newer release existed. This oneshot (systemd timer,
-daily) says so, once per version. Updating stays a manual procedure with
-a stand run first: docs/runbooks/hermes_update.md.
+weekly: Mondays at 06:00 UTC) says so, once per version. Updating stays a
+manual procedure with a stand run first: docs/runbooks/hermes_update.md.
 
   1) RUNNING VERSION. The binary hermes-api.service runs (the path= of its
      ExecStart) is asked for --version. The first line of its answer reads
@@ -30,8 +30,10 @@ a stand run first: docs/runbooks/hermes_update.md.
      an undelivered notice goes out on the next run.
 
 A run that cannot read one of the two versions decides nothing.
-FAIL_NOTIFY_AFTER such runs in a row (a week of daily runs) post one
-warning, once per streak; a good run ends the streak.
+FAIL_NOTIFY_AFTER such runs in a row post one warning, once per streak; a
+good run ends the streak. With the weekly timer that is two Mondays: one
+bad run (GitHub down for that minute) stays quiet, and the warning comes a
+week after the first failure.
 
 Usage:
     hermes_release_notice.py [--dry-run] [--state-dir DIR] [--bot-env F]
@@ -79,7 +81,7 @@ STATE_DIR = "/var/lib/hermes-release-notice"
 RUNBOOK = "docs/runbooks/hermes_update.md"
 HTTP_TIMEOUT = guard.HTTP_TIMEOUT
 VERSION_TIMEOUT = 60
-FAIL_NOTIFY_AFTER = 7
+FAIL_NOTIFY_AFTER = 2
 SUMMARY_MAX = 240
 # A "version" whose first number is this big is a date (v2026.9.24).
 CALENDAR_MAJOR = 1000
@@ -200,8 +202,15 @@ def format_notice(running: Version, release: Release) -> str:
     return "\n".join(lines)
 
 
+def times_ru(n: int) -> str:
+    """'1 раз', '2 раза', '5 раз', '12 раз', '22 раза'."""
+    if n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14):
+        return f"{n} раза"
+    return f"{n} раз"
+
+
 def format_failure(failures: int, why: str) -> str:
-    return (f"⚠️ <b>Проверка релизов Hermes не сработала {failures} раз подряд</b>\n"
+    return (f"⚠️ <b>Проверка релизов Hermes не сработала {times_ru(failures)} подряд</b>\n"
             f"Последняя причина: {html.escape(why)}\n"
             f"Лог: <code>journalctl -u hermes-release-notice</code>")
 

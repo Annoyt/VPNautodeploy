@@ -1,10 +1,11 @@
 [Unit]
-Description=Check once a day for a new stable Hermes release
+Description=Check once a week for a new stable Hermes release
 
 [Timer]
-# 06:00 UTC is 11:00 for the owner (+05). Persistent: a run missed while
-# entry was down happens at the next boot.
-OnCalendar=*-*-* 06:00:00 UTC
+# Weekly, the owner's choice (2026-11-17): Mondays at 06:00 UTC, 11:00 for
+# the owner (+05). Persistent: a run missed while entry was down happens at
+# the next boot.
+OnCalendar=Mon *-*-* 06:00:00 UTC
 RandomizedDelaySec=30min
 Persistent=true
 

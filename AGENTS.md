@@ -469,10 +469,10 @@ A user-report ("получил ключ, но его нет в списке") un
     - the home in `/root/.hermes-v023`. `/root/.hermes` is a symlink to it, so the guard and `deploy_hermes_skills.sh` keep their paths.
 
     `config.yaml` needs `terminal.cwd: /root/hermes-work`. Without it, the workspace AGENTS.md, which carries the healthcheck-first rule, never reaches the system prompt. The procedure, its traps and the rollback are in `docs/runbooks/hermes_update.md`.
-  - **New releases are announced** in TOPIC_AI, once per version, by `scripts/hermes_release_notice.py`: a root timer on entry, daily at 06:00 UTC, installed by `scripts/deploy_hermes_host.sh` next to the guard, whose Telegram path it uses.
+  - **New releases are announced** in TOPIC_AI, once per version, by `scripts/hermes_release_notice.py`: a root timer on entry, weekly on Mondays at 06:00 UTC (the owner's choice), installed by `scripts/deploy_hermes_host.sh` next to the guard, whose Telegram path it uses.
     - It compares the version `hermes-api.service` runs (its binary's `--version`) with GitHub's latest release of NousResearch/hermes-agent.
     - It reads the version from the release name: the tags from August to September 2026 were dates (`v2026.9.24` = v0.21.5).
-    - A version counts as announced only once Telegram took the message. Seven runs in a row that cannot check post one warning.
+    - A version counts as announced only once Telegram took the message. Two runs in a row that cannot check post one warning: one bad Monday stays quiet.
 
     Updating stays manual.
 - **Cleanup**: removed the embedded 930MB ChatDev clone (authored workflow preserved in `docs/archive/`), `.archive/`, `scratch/`, mempalace artifacts, `htmlcov`/`mutants`; `AGENT.md` and `PROJECT_CONTEXT.md` deleted (stale — their live content moved here).

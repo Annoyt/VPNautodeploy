@@ -9,6 +9,7 @@ a local HTTP server instead of GitHub.
 import importlib.util
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -229,6 +230,14 @@ class TestTexts:
         assert '&lt;b&gt;timeout&lt;/b&gt;' in text
         assert 'journalctl -u hermes-release-notice' in text
 
+    @pytest.mark.parametrize('n, count', [
+        (1, '1 раз'), (2, '2 раза'), (3, '3 раза'), (4, '4 раза'), (5, '5 раз'),
+        (11, '11 раз'), (12, '12 раз'), (13, '13 раз'), (14, '14 раз'), (20, '20 раз'),
+        (21, '21 раз'), (22, '22 раза'), (104, '104 раза'), (112, '112 раз'),
+    ])
+    def test_the_count_reads_right(self, n, count):
+        assert f'не сработала {count} подряд' in notice.format_failure(n, 'x')
+
 
 class TestRunOnce:
     def test_up_to_date(self, tmp_path):
@@ -268,14 +277,14 @@ class TestRunOnce:
         assert len(io.sent) == 1
 
     @pytest.mark.parametrize('side', ['github', 'binary'])
-    def test_a_week_blind_warns_once(self, tmp_path, side):
+    def test_a_blind_streak_warns_once(self, tmp_path, side):
         io = FakeIO(**({'latest': False} if side == 'github' else {'running': None}))
         for run in range(1, notice.FAIL_NOTIFY_AFTER):
             assert notice.run_once(io, str(tmp_path), dry_run=False) == 2
             assert io.sent == [], run
         assert notice.run_once(io, str(tmp_path), dry_run=False) == 2
         assert len(io.sent) == 1
-        assert f'не сработала {notice.FAIL_NOTIFY_AFTER} раз подряд' in io.sent[0]
+        assert 'не сработала 2 раза подряд' in io.sent[0]
         why = io.why_release if side == 'github' else io.why_running
         assert why in io.sent[0]
         notice.run_once(io, str(tmp_path), dry_run=False)
@@ -467,21 +476,29 @@ class TestDeployArtifacts:
         assert 'TimeoutStartSec=' in unit and 'MemoryMax=' in unit
         assert 'User=' not in unit                     # root: the bot's .env, /root/.hermes
 
-    def test_a_week_of_daily_runs(self):
-        # The warning says the check failed this many runs in a row; with a
-        # daily timer that is a week. Change one, change the other.
-        assert notice.FAIL_NOTIFY_AFTER == 7
-        assert 'OnCalendar=*-*-* 06:00:00 UTC' in self._read('systemd/hermes-release-notice.timer')
+    def test_two_mondays(self):
+        # The warning comes after this many runs in a row that could not
+        # check. With the weekly timer, 2 lets one bad Monday pass and warns
+        # a week after the first failure. Change one, change the other.
+        assert notice.FAIL_NOTIFY_AFTER == 2
+        assert 'OnCalendar=Mon *-*-* 06:00:00 UTC\n' in self._read('systemd/hermes-release-notice.timer')
 
     def test_timer_unit(self):
         timer = self._read('systemd/hermes-release-notice.timer')
-        assert 'OnCalendar=*-*-* 06:00:00 UTC' in timer
+        calendar = [line.split('=', 1)[1] for line in timer.splitlines()
+                    if line.startswith('OnCalendar=')]
+        assert calendar == ['Mon *-*-* 06:00:00 UTC']
         assert 'Persistent=true' in timer
         assert 'WantedBy=timers.target' in timer
         if shutil.which('systemd-analyze'):
-            r = subprocess.run(['systemd-analyze', 'calendar', '*-*-* 06:00:00 UTC'],
-                               capture_output=True, text=True, timeout=30)
+            r = subprocess.run(['systemd-analyze', 'calendar', '--iterations=3', calendar[0]],
+                               capture_output=True, text=True, timeout=30,
+                               env={**os.environ, 'TZ': 'UTC'})
             assert r.returncode == 0, r.stderr
+            elapses = re.findall(r'(?:Next elapse|Iteration #\d+): (.+)', r.stdout)
+            assert len(elapses) == 3, r.stdout
+            for when in elapses:                       # once a week, Monday 06:00 UTC
+                assert when.startswith('Mon ') and when.endswith(' 06:00:00 UTC'), when
 
     def test_deploy_script_ships_it_next_to_the_guard(self):
         sh = self._read('scripts/deploy_hermes_host.sh')

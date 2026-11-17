@@ -93,7 +93,7 @@ The install took ~12 min on entry's single vCPU (8.5 min CPU, 1.0 GB memory peak
 ## The next update
 
 - **Is there one?** The `hermes-release-notice` timer on entry posts each newer stable release to the AI topic once, with the first line of its notes.
-  - It runs daily at 06:00 UTC: `scripts/hermes_release_notice.py`, installed by `scripts/deploy_hermes_host.sh`.
+  - It runs once a week, on Mondays at 06:00 UTC (the owner's choice): `scripts/hermes_release_notice.py`, installed by `scripts/deploy_hermes_host.sh`. Two runs in a row that cannot check post one warning.
   - It asks GitHub: Hermes's own check had not seen v0.23.2 12 minutes after it was published (`hermes --version` on entry still said «Up to date»).
   - By hand: `hermes update --check` says whether a newer release is out, and installs nothing. `hermes update --plan` shows what an update would do, again changing nothing. That includes how it would restart the running gateway.
 - **The version number says little about the size.** v0.23.2 calls itself a patch release, yet it rolls up ~2,000 PRs merged since v0.23.1. Judge by the notes, and never skip the stand run.
