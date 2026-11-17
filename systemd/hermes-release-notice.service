@@ -1,0 +1,21 @@
+[Unit]
+Description=Hermes release notice (oneshot, timer-driven): a newer stable release -> the AI topic
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# The script reads /opt/vpn-bot/.env (bot token + proxy) itself, asks the
+# binary hermes-api.service runs for --version and GitHub for the newest
+# release. It loads hermes_model_guard.py from /usr/local/bin for the
+# Telegram path. Nothing secret lives in this unit. Root: the bot's .env,
+# the dashboard's token file and the Hermes runtime under /root are root's.
+ExecStart=/usr/local/bin/hermes_release_notice.py
+# /var/lib/hermes-release-notice: the last version announced and the
+# failure streak. No secrets.
+StateDirectory=hermes-release-notice
+# Worst case: systemctl 15 s + --version 60 s + GitHub 30 s + Telegram 30 s.
+TimeoutStartSec=5min
+
+MemoryMax=256M
+CPUQuota=30%

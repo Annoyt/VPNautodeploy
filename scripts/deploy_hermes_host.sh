@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Deploy the Hermes HOST-side helpers from the repo to entry: the API
-# watchdog, the free-model billing guard and their four systemd units.
+# watchdog, the free-model billing guard, the release notice and their six
+# systemd units. The notice loads the guard from its own directory, so both
+# always land in /usr/local/bin together.
 #
 # These run on the entry host itself, not in the vpn-bot container: the
 # guard rewrites /root/.hermes/config.yaml and restarts hermes-api, which
@@ -15,8 +17,8 @@
 #
 # Idempotent: rsync ships only changed bytes, daemon-reload is harmless,
 # `enable --now` is a no-op for an already-enabled timer. Ends with a
-# --dry-run of the guard on entry so the first plan is visible right
-# away (reads only, changes nothing, sends nothing).
+# --dry-run of the guard and of the notice on entry, so their first plans
+# are visible right away (reads only, changes nothing, sends nothing).
 #
 # Clobber guard: rsync -a preserves mtimes, so after a deploy the remote
 # copy carries the repo file's mtime. A remote script whose content
@@ -30,12 +32,14 @@ ENTRY="${ENTRY:-entry}"
 FORCE="${FORCE:-}"
 
 for f in scripts/hermes_api_watchdog.sh scripts/hermes_model_guard.py \
+         scripts/hermes_release_notice.py \
          systemd/hermes-api-watchdog.service systemd/hermes-api-watchdog.timer \
-         systemd/hermes-model-guard.service systemd/hermes-model-guard.timer; do
+         systemd/hermes-model-guard.service systemd/hermes-model-guard.timer \
+         systemd/hermes-release-notice.service systemd/hermes-release-notice.timer; do
     [ -f "$f" ] || { echo "ERROR: $f missing — run from the repo root" >&2; exit 1; }
 done
 
-python3 -m py_compile scripts/hermes_model_guard.py
+python3 -m py_compile scripts/hermes_model_guard.py scripts/hermes_release_notice.py
 
 # check_drift LOCAL REMOTE — abort when the remote copy is newer AND different.
 check_drift() {
@@ -62,24 +66,32 @@ check_drift() {
 echo "==> Drift check against $ENTRY"
 check_drift scripts/hermes_api_watchdog.sh /usr/local/bin/hermes-api-watchdog.sh
 check_drift scripts/hermes_model_guard.py  /usr/local/bin/hermes_model_guard.py
+check_drift scripts/hermes_release_notice.py /usr/local/bin/hermes_release_notice.py
 
 echo "==> Syncing scripts to $ENTRY:/usr/local/bin"
 rsync -a --chmod=F0755 scripts/hermes_api_watchdog.sh "$ENTRY:/usr/local/bin/hermes-api-watchdog.sh"
 rsync -a --chmod=F0755 scripts/hermes_model_guard.py  "$ENTRY:/usr/local/bin/hermes_model_guard.py"
+rsync -a --chmod=F0755 scripts/hermes_release_notice.py "$ENTRY:/usr/local/bin/hermes_release_notice.py"
 
 echo "==> Syncing systemd units to $ENTRY:/etc/systemd/system"
 rsync -a --chmod=F0644 \
     systemd/hermes-api-watchdog.service systemd/hermes-api-watchdog.timer \
     systemd/hermes-model-guard.service  systemd/hermes-model-guard.timer \
+    systemd/hermes-release-notice.service systemd/hermes-release-notice.timer \
     "$ENTRY:/etc/systemd/system/"
 
 echo "==> daemon-reload + enable timers"
 ssh "$ENTRY" 'systemctl daemon-reload \
     && systemctl enable --now hermes-api-watchdog.timer hermes-model-guard.timer \
+        hermes-release-notice.timer \
     && systemctl list-timers --no-pager --all | grep hermes'
 
 echo "==> Guard dry-run on $ENTRY (reads only, sends nothing; exit 1/2 = see plan above)"
 ssh "$ENTRY" '/usr/local/bin/hermes_model_guard.py --dry-run' \
     || echo "    guard --dry-run exited $? (1 = critical condition, 2 = could not check)"
 
-echo "==> Done. Logs: ssh $ENTRY journalctl -u hermes-model-guard --no-pager -n 50"
+echo "==> Release notice dry-run on $ENTRY (reads only, sends nothing)"
+ssh "$ENTRY" '/usr/local/bin/hermes_release_notice.py --dry-run' \
+    || echo "    notice --dry-run exited $? (2 = could not check)"
+
+echo "==> Done. Logs: ssh $ENTRY journalctl -u hermes-model-guard -u hermes-release-notice --no-pager -n 50"
