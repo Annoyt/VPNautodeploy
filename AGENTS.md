@@ -1203,7 +1203,15 @@ Hysteria's configs change only on the owner's word: a hysteria restart makes eve
 
 Until now entry's live `bot.db` (67 MB) had no automated backup, only the copies taken by hand before deploys in entry's `/opt/backups`. Exit's `vpn-bot-backup.timer` (`scripts/backup.sh`, §17) kept 7 local tarballs. Nothing left either host. The owner's decisions (2026-11-17): a forum topic «Бэкапы» in the admin group, age with the private key on his machine only, and everything that makes recovery simpler, Hermes' settings included. The DE reserve stays out (the bot re-provisions its clients).
 
-**Code only, not installed.** The install is `docs/runbooks/backup_restore.md`, «Установка», on the owner's word.
+**Installed on entry on 2026-11-17,** on the owner's word, by `docs/runbooks/backup_restore.md`, «Установка». That section stays as the procedure for a reinstall or a new entry.
+- The bot was deployed at `a963b2c`, and age 1.1.1 came from apt. zstd was already there and was left alone: `apt-get install` upgrades an installed package, and here it would have pulled a new libzstd onto prod.
+- The first archive went out at 04:58 UTC: 58.4 MB, in two parts. It opened with the owner's key, and every file's sha256 and every database's `integrity_check` matched.
+- **Size:** ~58 MB a day after zstd, so it always comes in two parts. Most of it is Hermes' `state.db` (183 MB raw) and `bot.db` (64 MB); it grows with `state.db`. A run takes ~2 min and 25 s of CPU. The work directory peaks at ~0.5 GB, and seven kept archives take ~410 MB at today's size, so keep about 1 GB free on entry.
+- **Absent, and that is normal:**
+  - entry has no `/etc/shadow-tls*`: its settings are in the unit's ExecStart, which is in the archive and in the facts;
+  - exit has no `/etc/iptables`: its live `iptables-save` is in the facts;
+  - exit has no `/etc/hy2-auth-relay.env`: the file is optional (§56);
+  - the GeoIP city database (127 MB) is over the 20-MB cap, so it is only listed. The bot downloads a missing one itself. The ASN and country databases (18 MB) are packed.
 
 - **What runs where.**
   - Entry, as root: `scripts/service_backup.py`, from the root-owned copy `scripts/install_service_backup.sh` puts in `/usr/local/lib/nekovpn-backup/` (never the rsync target, §36). Timer `nekovpn-backup.timer`: daily 01:40 UTC ± 10 min, `Persistent=true`. Work and local copies go to `/var/lib/nekovpn-backup` (0700).
