@@ -131,3 +131,68 @@ class TestBotWrapper:
                                caption='c') == {'message_id': 1}
         b.client.send_document_bytes.assert_called_once_with(
             '42', 'a.yaml', b'x', caption='c', parse_mode=None)
+
+
+def _refused(description, status=400):
+    r = requests.Response()
+    r.status_code = status
+    r._content = json.dumps({'ok': False, 'description': description}).encode()
+    return r
+
+
+class TestRaiseErrors:
+    """``raise_errors=True`` (the service backup, AGENTS.md §58): a failure
+    raises with Telegram's own description, so the sender tells a deleted
+    topic from a dead proxy. The default stays "None, never raises"."""
+
+    def test_telegram_refusal_carries_the_description(self, client):
+        with patch.object(client.session, 'post',
+                          return_value=_refused('Bad Request: message thread not found')):
+            with pytest.raises(requests.RequestException) as err:
+                client.send_document_bytes('42', 'b.age', b'x', message_thread_id=9,
+                                           raise_errors=True)
+        assert err.value.tg_description == 'Bad Request: message thread not found'
+        assert '123:tok' not in str(err.value)
+
+    def test_dead_proxies_carry_no_description(self, client):
+        with patch.object(client.session, 'post',
+                          side_effect=requests.ConnectionError('proxy down')):
+            with pytest.raises(requests.RequestException) as err:
+                client.send_document_bytes('42', 'b.age', b'x', raise_errors=True)
+        assert err.value.tg_description == ''
+
+    def test_a_non_json_answer_raises_too(self, client):
+        bad = requests.Response()
+        bad.status_code = 200
+        bad._content = b'<html>proxy page</html>'
+        with patch.object(client.session, 'post', return_value=bad):
+            with pytest.raises(requests.RequestException) as err:
+                client.send_document_bytes('42', 'b.age', b'x', raise_errors=True)
+        assert err.value.tg_description == ''
+
+    def test_not_ok_with_200(self, client):
+        weird = requests.Response()
+        weird.status_code = 200
+        weird._content = json.dumps({'ok': False, 'description': 'odd'}).encode()
+        with patch.object(client.session, 'post', return_value=weird):
+            with pytest.raises(requests.RequestException) as err:
+                client.send_document_bytes('42', 'b.age', b'x', raise_errors=True)
+        assert err.value.tg_description == 'odd'
+
+    def test_the_flag_is_no_api_parameter(self, client):
+        calls = []
+        with patch.object(client.session, 'post',
+                          side_effect=lambda *a, **kw: calls.append(kw) or _ok()):
+            client.send_document_bytes('42', 'b.age', b'x', raise_errors=True)
+        assert 'raise_errors' not in calls[0]['data']
+
+    def test_default_still_never_raises(self, client):
+        with patch.object(client.session, 'post',
+                          return_value=_refused('Bad Request: message thread not found')):
+            assert client.send_document_bytes('42', 'b.age', b'x') is None
+
+    def test_other_calls_keep_the_description_too(self, client):
+        with patch.object(client.session, 'post', return_value=_refused('Bad Request: x')):
+            with pytest.raises(requests.RequestException) as err:
+                client._request('sendMessage', chat_id='42', text='t')
+        assert err.value.tg_description == 'Bad Request: x'
