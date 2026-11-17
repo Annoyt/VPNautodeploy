@@ -1996,7 +1996,7 @@ class AdminOpsMixin(AdminHandlerBase):
         if not notifier:
             self.bot.send_message(
                 chat_id=chat_id,
-                text="❌ NotificationService недоступен — попробуй /restart_bot через kimi.",
+                text="❌ NotificationService недоступен — попроси агента (/ai) перезапустить бота.",
             )
             return
         try:

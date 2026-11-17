@@ -1,6 +1,6 @@
-"""AI commands + auto-routing to kimi-code.
+"""AI commands + auto-routing to the agent (Hermes, AGENTS.md §22, §28).
 
-Three ways the admin can talk to Kimi from Telegram:
+Three ways the admin can talk to the agent from Telegram:
 
 1. /ai <prompt>           — any chat (PM, forum group, even a non-AI topic).
 2. /ai_reset              — forget the current session for THIS chat/topic.
@@ -50,14 +50,14 @@ logger = logging.getLogger(__name__)
 # Telegram limit is 4096 chars; leave headroom for HTML tags + a footer.
 TELEGRAM_TEXT_LIMIT = 4000
 
-# Kimi can emit one or more file markers in its reply: the bot strips the
+# The agent can emit one or more file markers in its reply: the bot strips the
 # marker out of the text and sends each file as a Telegram document.
-# Format the system prompt asks Kimi to use:   [[SEND_FILE: /path/to/file]]
+# Format the system prompt asks the agent to use:   [[SEND_FILE: /path/to/file]]
 # (optional caption on the same line, before the closing brackets).
 FILE_MARKER_RE = re.compile(r"\[\[SEND_FILE:\s*(?P<path>[^\]\|]+?)(?:\s*\|\s*(?P<caption>[^\]]+))?\]\]")
 
 # Telegram cancels a typing indicator after ~5 seconds. Refresh it every
-# 4 seconds while Kimi is thinking so the admin sees a continuous "typing".
+# 4 seconds while the agent is thinking so the admin sees a continuous "typing".
 TYPING_REFRESH_SEC = 4.0
 
 
@@ -79,7 +79,7 @@ def _start_typing_keepalive(bot, chat_id: str, thread_id) -> threading.Event:
             # Don't busy-wait; the Event lets us interrupt the sleep cleanly.
             stop.wait(TYPING_REFRESH_SEC)
 
-    t = threading.Thread(target=_loop, name="kimi-typing", daemon=True)
+    t = threading.Thread(target=_loop, name="agent-typing", daemon=True)
     t.start()
     return stop
 
@@ -177,7 +177,7 @@ class AIHandler(BaseHandler):
             return
 
         # Download photo (if any) to the shared /tmp/tg_media volume so
-        # Kimi can read it off the host. We delete it again in the
+        # the agent can read it off the host. We delete it again in the
         # `finally` block at the bottom of this method — temp files
         # should not pile up.
         photo_path: Optional[str] = None
@@ -233,10 +233,10 @@ class AIHandler(BaseHandler):
         else:
             prompt = text
 
-        # Splice the photo path into the prompt so Kimi knows where
+        # Splice the photo path into the prompt so the agent knows where
         # the screenshot lives. If the admin sent a photo without any
         # caption (e.g. drag-and-drop), fall back to a generic question
-        # so Kimi has something to respond to.
+        # so the agent has something to respond to.
         if photo_path:
             attach = f"[Вложение от админа: {photo_path}]"
             prompt = (
@@ -247,7 +247,7 @@ class AIHandler(BaseHandler):
         try:
             self._handle_prompt(chat_id, thread_id, prompt, mode=mode)
         finally:
-            # Always delete the local photo, even if Kimi errored out.
+            # Always delete the local photo, even if the agent errored out.
             # The hourly scheduler is a safety net — this is the primary
             # cleanup so /tmp/tg_media doesn't accumulate.
             if photo_path:

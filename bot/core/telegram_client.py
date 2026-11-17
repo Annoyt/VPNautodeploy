@@ -428,7 +428,7 @@ class TelegramClient:
         Two steps: ``getFile`` returns a relative ``file_path``; then we
         GET ``https://api.telegram.org/file/bot<token>/<file_path>`` and
         stream the bytes to disk. Used by AIHandler to ship admin-sent
-        screenshots into ``/tmp/tg_media`` so Kimi can read them off
+        screenshots into ``/tmp/tg_media`` so the agent can read them off
         the shared mount.
 
         Returns True on success, False on any failure (logged).
@@ -580,7 +580,7 @@ class TelegramClient:
         """Show a 'typing…' (or other) status indicator in the chat.
 
         Used by AIHandler so the admin sees something is happening while
-        Kimi takes its 5–30s to produce a long answer.
+        The agent takes its 5–30s to produce a long answer.
         """
         kwargs = {"chat_id": chat_id, "action": action}
         if message_thread_id:

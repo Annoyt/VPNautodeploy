@@ -1995,8 +1995,8 @@
         }
         box.innerHTML = alerts.map(a => {
             const acked = !!a.acked_at;
-            const kimiHtml = a.kimi_analysis
-                ? `<div class="alert-kimi"><div class="alert-kimi-head">🤖 Kimi</div>${agentReplyHtml(a.kimi_analysis)}</div>`
+            const agentHtml = a.kimi_analysis
+                ? `<div class="alert-agent"><div class="alert-agent-head">🤖 Агент</div>${agentReplyHtml(a.kimi_analysis)}</div>`
                 : '';
             const actionsHtml = !acked
                 ? `<div class="alert-actions"><button class="btn-ack" data-id="${a.id}">✅ Подтвердить</button></div>`
@@ -2007,7 +2007,7 @@
                     <div class="alert-key">${esc(a.key)}</div>
                 </div>
                 ${a.detail ? `<div class="alert-detail">${esc(a.detail)}</div>` : ''}
-                ${kimiHtml}
+                ${agentHtml}
                 <div class="alert-meta">
                     <span>${esc(a.fired_at)} · ${esc(a.severity)}</span>
                     ${acked ? `<span>acked ${esc(a.acked_at)} by ${esc(a.acked_by || '?')}</span>` : ''}
@@ -2050,15 +2050,15 @@
         }
         box.innerHTML = reports.map((r, idx) => {
             const t = r.totals || {};
-            const kimiHtml = r.kimi_analysis
-                ? `<div class="alert-kimi"><div class="alert-kimi-head">🤖 Kimi</div>${agentReplyHtml(r.kimi_analysis)}</div>`
+            const agentHtml = r.kimi_analysis
+                ? `<div class="alert-agent"><div class="alert-agent-head">🤖 Агент</div>${agentReplyHtml(r.kimi_analysis)}</div>`
                 : '';
             return `<div class="report-row" data-idx="${idx}">
                 <div class="report-head">
                     <div class="report-date">${esc(r.period_start?.slice(0, 10) || '?')} → ${esc(r.period_end?.slice(0, 10) || '?')}</div>
                     <div class="report-totals">conn:${t.conn || 0} · short:${t.short || 0} · hsfail:${t.hsfail || 0}</div>
                 </div>
-                <div class="report-body">${kimiHtml || '<div class="placeholder-text">Kimi-анализ не сохранён</div>'}</div>
+                <div class="report-body">${agentHtml || '<div class="placeholder-text">Анализ агента не сохранён</div>'}</div>
             </div>`;
         }).join('');
         box.querySelectorAll('.report-head').forEach(head => {

@@ -751,11 +751,11 @@ class Database:
     def _init_alert_history(self) -> None:
         """Persistent alert history for the dashboard. Replaces the
         Telegram-only firehose — operator can now scroll/filter past
-        alerts and read Kimi follow-ups without spamming TOPIC_AI.
+        alerts and read the agent's follow-ups without spamming TOPIC_AI.
 
         - ``key`` matches the AlertManager key (e.g. dpi_short:RU:AS8402)
           so we can join with the in-memory tracker if needed.
-        - ``kimi_analysis`` is filled lazily after the Kimi bridge call
+        - ``kimi_analysis`` is filled lazily after the agent's call
           returns; ``NULL`` means "not yet analysed" or "not eligible".
         - ``acked_at`` is set when the operator clicks ✅ in the
           dashboard; old alerts before that just stay un-acked.

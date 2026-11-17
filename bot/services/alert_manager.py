@@ -21,7 +21,7 @@ unacknowledged repeat, 6 hours after admin acks.
 Where alerts go
 ---------------
 - TOPIC_AI in the forum group if ``TOPIC_AI`` is set (this is the
-  same topic Kimi posts into — admin's already watching it).
+  same topic the agent posts into — admin's already watching it).
 - The super-admin's PM only as a FALLBACK for criticals when the forum
   send failed or no forum is configured (house rule: never PM while the
   group is alive).
@@ -527,7 +527,7 @@ class AlertManager:
         A ``None`` is therefore treated as "not delivered" too, so the
         critical fallback still fires in exactly the cases it exists for.
         """
-        # Forum topic — same place Kimi posts so admin watches one channel.
+        # Forum topic — same place the agent posts so admin watches one channel.
         topic = getattr(self.config, 'TOPIC_AI', 0) or 0
         group = getattr(self.config, 'FORUM_GROUP_ID', None)
         if topic and group:
@@ -1630,7 +1630,7 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
             if not (b['country'] or '').strip():
                 # Unattributable sources (geoip miss) are internet
                 # scanners, not a cohort of real users — alerting on
-                # them produced daily noise and a paid Kimi run each
+                # them produced daily noise and a paid agent run each
                 # time. Real DPI shows up under a real country/ASN.
                 continue
             if b['conn_count'] < DPI_MIN_CONNS:
