@@ -294,6 +294,11 @@ class Settings:
         # IPv4 is blocked from Russia, so the users' address lives on entry
         # (AGENTS.md §60; bot/utils/public_url.py).
         self.SUB_PUBLIC_URL: str = os.getenv('SUB_PUBLIC_URL', '').strip()
+        # Transits to exit for the reach check (AGENTS.md §61,
+        # bot/services/exit_reach.py): comma-separated name=ip:port, each
+        # forwarding to exit's Reality port, e.g. de=212.60.153.208:9441.
+        # Empty = only the direct path to EXIT_NODE_IP is watched.
+        self.EXIT_TRANSITS: str = os.getenv('EXIT_TRANSITS', '').strip()
         # TLS on the exit → entry hop (AGENTS.md §53, bot/services/hop_tls.py):
         # the same app over HTTPS for exit's Caddy, hysteria and DPI reporter.
         # On once WEB_TLS_DIR holds cert.pem + key.pem (scripts/hop_tls.py
