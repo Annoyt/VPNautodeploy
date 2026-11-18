@@ -17,7 +17,9 @@ geo stub answers for EVERY address, private ones included, so a test passes
 only because the handler never asked.
 """
 
+import asyncio
 import json
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -282,6 +284,93 @@ class TestIsOwnAddress:
         _served(await _sub(srv, DE))
         assert _network(db) == STORED_NET
         assert geo == []
+
+
+
+# ---- the same guard on the two other paths that see a node's address -------
+
+def _hy2_ready(srv):
+    """The panel's quota reading warm and under quota: only the users row decides."""
+    srv._hy2_quota_cache['u1@x'] = (time.monotonic(),
+                                    {'upload': 1, 'download': 1, 'total': 0, 'enable': True})
+
+
+async def _settle(srv):
+    """Wait for the writes the handlers run after their answer."""
+    for _ in range(100):
+        pending = [task for task in srv._bg_tasks if not task.done()]
+        if not pending:
+            break
+        await asyncio.gather(*pending, return_exceptions=True)
+    await asyncio.sleep(0)
+
+
+async def _hy2(srv, addr):
+    req = Mock()
+    req.json = AsyncMock(return_value={'auth': UUID, 'addr': addr})
+    data = json.loads((await srv.handle_hy2_auth(req)).text)
+    await _settle(srv)
+    return data
+
+
+async def _exit_report(srv, payload):
+    req = Mock()
+    req.headers = {'X-DPI-Token': 'report-token'}
+    req.json = AsyncMock(return_value=payload)
+    resp = await srv.handle_dpi_exit_report(req)
+    await _settle(srv)
+    return resp
+
+
+class TestTransitHostsOnTheOtherPaths:
+    """The hy2 auth callback and the exit report see the address of the node
+    in front of exit: entry's MASQUERADE, or a transit host that SNATs to its
+    own address. On 2026-11-18 exit's IPv4 was blocked from Russia and entry
+    reached exit through the DE reserve, so hysteria and xray saw DE's
+    address. Both paths still knew only ENTRY_NODE_IP and EXIT_NODE_IP: every
+    hy2 auth would have stamped the reserve's network on its user, and the
+    exit report filed the reserve's country as a country of users."""
+
+    NODES = [f'{DE}:5555', f'{ENTRY}:5555', f'{EXIT}:5555',
+             f'[::ffff:{DE}]:5555', '172.20.0.1:5555']
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize('addr', NODES, ids=['de', 'entry', 'exit', 'de-v4-mapped', 'docker'])
+    async def test_hy2_auth_through_a_node_writes_no_network(self, tmp_path, geo, addr):
+        srv, db = _server(tmp_path)
+        _hy2_ready(srv)
+        assert (await _hy2(srv, addr))['ok'] is True
+        assert geo == []
+        assert _network(db) == STORED_NET
+        assert _rows(db, "SELECT chat_id, decision, country, asn FROM hy2_auth_log") == [
+            ('1', 'allow', None, None)]
+
+    @pytest.mark.asyncio
+    async def test_hy2_auth_from_a_real_client_is_recorded(self, tmp_path, geo):
+        srv, db = _server(tmp_path)
+        _hy2_ready(srv)
+        assert (await _hy2(srv, f'{REAL}:5555'))['ok'] is True
+        assert set(geo) == {REAL}
+        assert _network(db) == REAL_NET
+        assert _rows(db, "SELECT country, asn FROM hy2_auth_log") == [REAL_NET[:2]]
+
+    @pytest.mark.asyncio
+    async def test_exit_report_files_a_transit_host_under_the_tunnel(self, tmp_path, geo):
+        srv, db = _server(tmp_path, _config(DPI_REPORT_TOKEN='report-token'))
+        resp = await _exit_report(srv, {
+            'access': [{'tag': 'inbound-8444', 'conns': 7, 'ips': {DE: 5, REAL: 2}}],
+            'rejects': [{'kind': 'ss2022', 'reason': 'bad header', 'count': 3,
+                         'ips': {DE: 3}}],
+        })
+        assert resp.status == 200
+        rows = _rows(db, "SELECT country, asn, as_org, inbound_tag, conn_count, "
+                         "handshake_fail_count, probe_ips_json FROM dpi_metrics "
+                         "ORDER BY country")
+        assert rows == [
+            ('*TUNNEL*', None, 'entry-forward', 'ss2022', 5, 3, None),
+            (REAL_NET[0], REAL_NET[1], 'org', 'ss2022', 2, 0, json.dumps([[REAL, 2]])),
+        ]
+        assert DE not in geo and REAL in geo
 
 
 class TestCdnHop:
