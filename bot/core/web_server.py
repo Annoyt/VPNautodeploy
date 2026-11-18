@@ -1301,6 +1301,9 @@ class WebAppServer:
             from bot.services.geoip import lookup as geo_lookup, lookup_asn
         except Exception:
             geo_lookup = lookup_asn = None
+        # The address the §61 reach check names in its PROXY header: our own
+        # handshake, never a user (bot/services/exit_reach.py).
+        from bot.services.exit_reach import MARK_SRC as reach_mark
 
         def geo_key(ip: str):
             if not ip:
@@ -1342,6 +1345,8 @@ class WebAppServer:
             for ip, n in (entry.get('ips') or {}).items():
                 n = int(n or 0)
                 seen += n
+                if ip == reach_mark:
+                    continue
                 b = bucket((*geo_key(ip), tag))
                 b['conns'] += n
                 if ip and not self._is_own_address(ip):
@@ -1362,6 +1367,8 @@ class WebAppServer:
             for ip, n in (rej.get('ips') or {}).items():
                 n = int(n or 0)
                 seen += n
+                if ip == reach_mark:
+                    continue
                 b = bucket((*geo_key(ip), tag))
                 b['fails'] += n
                 if ip and not self._is_own_address(ip):
@@ -2540,6 +2547,7 @@ class WebAppServer:
             'TOPIC_REJECTED', 'TOPIC_STATS', 'TOPIC_PAYMENTS',
             'TOPIC_SUPPORT', 'TOPIC_SOLVED', 'TOPIC_AI',
             'WEBAPP_URL', 'SUB_PUBLIC_URL', 'XUI_API_URL', 'XUI_CONTAINER_NAME',
+            'EXIT_TRANSITS',
             'OPENCODE_URL', 'AI_DEFAULT_MODE', 'OPENCODE_DEFAULT_MODEL',
         ]
         # SECURITY: never widen this list to BOT_TOKEN, XUI_PASSWORD,

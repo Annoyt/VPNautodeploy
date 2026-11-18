@@ -128,6 +128,9 @@ services:
       # The address users fetch from (subscriptions, rule sets, /open, /app);
       # empty = WEBAPP_URL (AGENTS.md §60).
       - SUB_PUBLIC_URL=${SUB_PUBLIC_URL:-}
+      # Transits to exit the reach check watches besides the direct path,
+      # name=ip:port,... (AGENTS.md §61). Empty = the direct path only.
+      - EXIT_TRANSITS=${EXIT_TRANSITS:-}
       # /sub mirrors on other domains for the FlClash profile's
       # proxy-providers (comma-separated base URLs, E5). Empty = off.
       - SUB_MIRROR_URLS=${SUB_MIRROR_URLS:-}

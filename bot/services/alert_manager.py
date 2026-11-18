@@ -88,6 +88,10 @@ class Alert:
     title: str             # one-line headline shown in the message
     detail: str = ""       # extra paragraph with diagnostic numbers
     min_cycles: int = DEFAULT_MIN_CYCLES  # consecutive failures to fire
+    # False = one message per incident: no repeat every REPEAT_COOLDOWN_S
+    # while the key stays open. Its recovery still closes it (and is posted
+    # for RECOVERY_PREFIXES), so the next incident pages again.
+    repeat: bool = True
 
 
 @dataclass
@@ -126,8 +130,11 @@ INBOUND_DROP_PREFIX = 'inbound_drop:'
 PROTOCOL_FAMILY_PREFIXES = (PROTOCOL_AGENT_PREFIX, INBOUND_DROP_PREFIX)
 # The healthcheck script's findings, posted by its timer (D1).
 HEALTHCHECK_PREFIX = 'healthcheck:'
+# A new connection from entry to exit, every minute (§61,
+# bot/services/exit_reach.py).
+REACH_PREFIX = 'reach:'
 # Families whose recovery is announced where the alert went (B2/B3).
-RECOVERY_PREFIXES = PROTOCOL_FAMILY_PREFIXES + (HEALTHCHECK_PREFIX,)
+RECOVERY_PREFIXES = PROTOCOL_FAMILY_PREFIXES + (HEALTHCHECK_PREFIX, REACH_PREFIX)
 # Keys of that family that are about our own reporting, not a protocol: no
 # agent turn (a 300-s Hermes turn every 2 h while a reporter is down).
 AGENT_SKIP_KEYS = ('inbound_drop:no_reports', 'inbound_drop:empty_reports')
@@ -303,6 +310,8 @@ class AlertManager:
         if t.consecutive_fails < alert.min_cycles:
             return
         if t.acked_until_ts > now:
+            return
+        if not alert.repeat and t.open:
             return
         if now - t.last_fired_ts < REPEAT_COOLDOWN_S:
             return
@@ -2230,11 +2239,54 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
             title=verdict['title'], detail=verdict['detail'],
         )])
 
+    def _exit_report_age_min():
+        """Minutes since exit's newest report (``exit_reports``), or None:
+        no report, or the table cannot be read."""
+        try:
+            import sqlite3
+            from datetime import datetime
+            db_path = getattr(config, 'DB_PATH', None) or '/var/lib/vpn-bot/bot.db'
+            with sqlite3.connect(db_path) as conn:
+                newest = conn.execute("SELECT MAX(ts) FROM exit_reports").fetchone()[0]
+            if not newest:
+                return None
+            ts = datetime.fromisoformat(str(newest).replace('Z', ''))
+            return max(0.0, (datetime.utcnow() - ts).total_seconds() / 60.0)
+        except Exception as e:
+            logger.debug(f"exit report age read failed: {e}")
+            return None
+
+    def check_exit_reach():
+        """§61: a new connection from entry to exit, every minute, directly
+        and through each transit (``bot/services/exit_reach.py``).
+
+        Keys ``reach:exit`` (critical) and ``reach:via:<name>`` (critical
+        while the direct path is closed too, a broken spare otherwise). Each
+        fires after two failed minutes, ONCE per incident (``repeat=False``):
+        a block can last days, and the users' side pages on its own
+        (protocol_down). Its recovery is posted, so the operator learns the
+        address opened again.
+
+        The connections run on threads of their own; the tick waits for the
+        slowest, about 12 s at worst. No target (no EXIT_NODE_IP, no
+        EXIT_TRANSITS) = nothing to watch, every open key heals."""
+        from bot.services import exit_reach as _er
+        targets = _er.targets(config)
+        if not targets:
+            return (REACH_PREFIX, [])
+        results = _er.probe_all(targets)
+        _er.record(targets, results)
+        return (REACH_PREFIX, [
+            Alert(key=v['key'], severity=v['severity'], title=v['title'],
+                  detail=v['detail'], min_cycles=_er.MIN_CYCLES, repeat=False)
+            for v in _er.verdict(targets, results, _exit_report_age_min())
+        ])
+
     checks.extend([
         check_cpu, check_ram, check_disk,
         check_opencode, check_xray_reload_sidecar, check_xui_inbounds,
         check_protocol_probe_down, check_inbound_drop, check_healthcheck,
         check_dpi_short_sessions, check_dpi_handshake_spike, check_dpi_rst_spike,
-        check_lockdown_active, check_backup,
+        check_lockdown_active, check_backup, check_exit_reach,
     ])
     return checks

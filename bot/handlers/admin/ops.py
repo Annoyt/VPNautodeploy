@@ -768,6 +768,9 @@ class AdminOpsMixin(AdminHandlerBase):
         hy2 = self._hy2_sessions_line(now)
         if hy2:
             lines.append(hy2)
+        reach = self._exit_reach_line()
+        if reach:
+            lines.append(reach)
         lines.append("")
         lines.append(self._panel_audit_line())
         lines.append("")
@@ -777,6 +780,18 @@ class AdminOpsMixin(AdminHandlerBase):
         if len(text) > 3900:  # Telegram cap is 4096
             text = text[:3900] + "\n…(обрезано)"
         return text
+
+    @staticmethod
+    def _exit_reach_line() -> Optional[str]:
+        """§61: the alert tick's last new connection to exit, directly and
+        through each transit. None while there is no recent one."""
+        try:
+            from bot.services import exit_reach
+            line = exit_reach.reach_line(exit_reach.snapshot())
+        except Exception as e:
+            logger.warning(f"/protocols: reach line failed: {e}")
+            return None
+        return html.escape(line) if line else None
 
     HY2_SESSIONS_WINDOW_H = 24
     HY2_LONG_SESSION_S = 30 * 60
