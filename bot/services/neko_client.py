@@ -69,9 +69,10 @@ def profile_url(config, user) -> Optional[str]:
 
 
 def open_page_url(config, user) -> Optional[str]:
-    """``<WEBAPP_URL>/open/<token>``: the page the bot's button opens."""
+    """``<public URL>/open/<token>``: the page the bot's button opens."""
     from bot.services.subscription import SubscriptionService
-    base = (getattr(config, 'WEBAPP_URL', '') or '').rstrip('/')
+    from bot.utils.public_url import public_base_url
+    base = public_base_url(config)
     if not base or not getattr(user, 'uuid', None):
         return None
     token = SubscriptionService(config).derive_token(user.uuid)
@@ -94,10 +95,11 @@ def intent_link(url: str, fallback: str = RELEASES_URL) -> str:
 
 
 def download_page_url(config, user=None) -> str:
-    """``<WEBAPP_URL>/app`` (or ``/app/<token>``, which also adds the
+    """``<public URL>/app`` (or ``/app/<token>``, which also adds the
     user's subscription): the download page. The GitHub release page when
     the bot does not know its own address."""
-    base = (getattr(config, 'WEBAPP_URL', '') or '').rstrip('/')
+    from bot.utils.public_url import public_base_url
+    base = public_base_url(config)
     if not base:
         return RELEASES_URL
     if user is not None and getattr(user, 'uuid', None):

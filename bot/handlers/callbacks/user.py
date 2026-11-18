@@ -293,7 +293,7 @@ def build_key_delivery_message(user, config, db=None) -> tuple:
     """    (text, keyboard) for the platform/lang-aware key delivery message.
 
     Returns ``(None, None)`` when the subscription URL can't be built
-    (WEBAPP_URL unset) so the caller can degrade to a raw key. Shared by
+    (no public URL) so the caller can degrade to a raw key. Shared by
     GetKeyHandler (first-time issuance) and SetPlatformHandler
     (re-selection from the /sub message — users switch devices). iOS gets
     Karing instructions (sing-box client — the RU App Store pulled both
@@ -669,9 +669,9 @@ class GetKeyHandler(BaseCallbackHandler):
 
         text, keyboard = build_key_delivery_message(user, self.config, db=self.db)
         if text is None:
-            # WEBAPP_URL missing — degrade gracefully to a single CDN
+            # No public URL — degrade gracefully to a single CDN
             # raw key so onboarding doesn't completely fail.
-            logger.error(f"WEBAPP_URL not configured, no sub URL for {chat_id}")
+            logger.error(f"no public URL (SUB_PUBLIC_URL / WEBAPP_URL), no sub URL for {chat_id}")
             vpn = VPNService(self.config)
             fallback = vpn.generate_vless_ws_link(user.uuid, user.email)
             if not fallback:

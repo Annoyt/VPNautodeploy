@@ -291,7 +291,8 @@ def _public_get(url: str, timeout: float):
 def verify(config, db_path: str, *, host: str = '127.0.0.1',
            timeout: float = 20.0, public_get=None) -> dict:
     """``/health`` and the probe account's profile (``?format=clash`` and
-    the plain ``/sub``) through the hop listener itself, ``WEBAPP_URL`` and
+    the plain ``/sub``) through the hop listener itself, ``WEBAPP_URL``,
+    ``SUB_PUBLIC_URL`` (when it differs) and
     every ``SUB_MIRROR_URLS`` mirror: the same version everywhere and the
     same bytes, 200 each time. Nothing secret is returned: codes, sizes,
     the first 12 hex of each body's SHA-256."""
@@ -317,6 +318,9 @@ def verify(config, db_path: str, *, host: str = '127.0.0.1',
     base = (getattr(config, 'WEBAPP_URL', '') or '').strip().rstrip('/')
     if base:
         targets.append(('webapp', base))
+    public = (getattr(config, 'SUB_PUBLIC_URL', '') or '').strip().rstrip('/')
+    if public and public != base:
+        targets.append(('public', public))
     for i, m in enumerate(u.strip().rstrip('/') for u in
                           (getattr(config, 'SUB_MIRROR_URLS', '') or '').split(',')):
         if m:

@@ -920,7 +920,7 @@ class MailRequestHandler(BaseCallbackHandler):
             return
         if not sub_url:
             update_card("❌ <b>Ключ создан, но ссылка не собралась</b> "
-                        "(проверь WEBAPP_URL).")
+                        "(проверь SUB_PUBLIC_URL / WEBAPP_URL).")
             return
 
         mailer = None

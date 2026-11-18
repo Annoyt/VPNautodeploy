@@ -8,7 +8,7 @@ FlClash refreshes the PROFILE once a day by default, but honours the
 ``interval`` of every ``rule-provider`` in it. So everything urgent —
 "this site got blocked yesterday", "this RU site must go direct" — lives
 in four small lists the profile only POINTS at
-(``build_clash_config`` emits the providers when WEBAPP_URL is set);
+(``build_clash_config`` emits the providers when the public URL is set);
 the bot serves them at ``/lists/clash/<name>.yaml`` and clients pull
 them hourly. Hiddify drops a sing-box profile's rules altogether
 (IMPROVEMENT_PLAN §E), so the lists exist for the Clash profile only —

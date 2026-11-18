@@ -402,7 +402,7 @@ class CommandHandler(BaseHandler):
                 chat_id=chat_id,
                 text="⚠️ Subscription URL временно недоступен. Используйте /mykey.",
             )
-            logger.warning(f"/sub: WEBAPP_URL not set, cannot build URL for {chat_id}")
+            logger.warning(f"/sub: no public URL (SUB_PUBLIC_URL / WEBAPP_URL), cannot build URL for {chat_id}")
             return
 
         # iOS RU App Store lost Hiddify AND Happ; Karing (sing-box)

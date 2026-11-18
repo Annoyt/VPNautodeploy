@@ -103,12 +103,14 @@ class AdminListsMixin(AdminHandlerBase):
             auto = sum(1 for m in entries.values() if _who(m) == 'авто')
             tail = f" (авто: {auto})" if auto else ""
             lines.append(f"• <b>{name}</b> — {html.escape(spec.title)}: {len(entries)}{tail}")
-        base = getattr(self.config, 'WEBAPP_URL', '') or ''
-        if isinstance(base, str) and base.strip():
-            lines.append("раздаются: " + html.escape(base.strip().rstrip('/')
+        from bot.utils.public_url import public_base_url
+        base = public_base_url(self.config)
+        if base:
+            lines.append("раздаются: " + html.escape(base
                          + rl.LIST_URL_PATH.format(name='<список>')))
         else:
-            lines.append("⚠️ WEBAPP_URL не задан — профиль FlClash на списки не ссылается")
+            lines.append("⚠️ Публичный адрес не задан (SUB_PUBLIC_URL / WEBAPP_URL) — "
+                         "профиль FlClash на списки не ссылается")
         lines.append("<i>Hiddify правила профиля не применяет — списки работают только во FlClash</i>")
         lines.append("")
         lines.extend(self._queue_lines(now))

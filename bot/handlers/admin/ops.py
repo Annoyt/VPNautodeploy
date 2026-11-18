@@ -2268,7 +2268,7 @@ class AdminOpsMixin(AdminHandlerBase):
             reply(f"❌ Не удалось создать ключ: {str(e)[:200]}")
             return
         if not sub_url:
-            reply("❌ Ключ создан, но не удалось собрать ссылку (проверь WEBAPP_URL).")
+            reply("❌ Ключ создан, но не удалось собрать ссылку (проверь SUB_PUBLIC_URL / WEBAPP_URL).")
             return
 
         # SMTP handshake is seconds — send off the polling thread.

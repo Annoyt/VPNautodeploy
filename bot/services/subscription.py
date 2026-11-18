@@ -37,6 +37,7 @@ from bot.services.fallback_node import (
     FallbackNodeService,
 )
 from bot.services import rule_lists
+from bot.utils.public_url import public_base_url
 from bot.services import tls_fingerprint
 
 logger = logging.getLogger(__name__)
@@ -116,11 +117,12 @@ class SubscriptionService:
 
     def build_subscription_url(self, user) -> Optional[str]:
         """Public URL the user pastes into Hiddify. ``None`` if the
-        bot doesn't know its own public address (WEBAPP_URL empty).
+        bot doesn't know its own public address (SUB_PUBLIC_URL and
+        WEBAPP_URL both empty; bot/utils/public_url.py).
         """
         if not getattr(user, 'uuid', None):
             return None
-        base = (self.config.WEBAPP_URL or '').rstrip('/')
+        base = public_base_url(self.config)
         if not base:
             return None
         return f"{base}/sub/{self.derive_token(user.uuid)}"
@@ -1120,7 +1122,7 @@ class SubscriptionService:
 
     def _clash_probe_url(self, token: Optional[str], provider: str) -> str:
         """Health-check url of one proxy-provider (E4):
-        ``{WEBAPP_URL}/probe/<token>/<provider>`` — a 204 from our own
+        ``{public URL}/probe/<token>/<provider>`` — a 204 from our own
         endpoint that also leaves a heartbeat "this user's client is
         alive through the tunnel" in ``client_probe``. gstatic when the
         bot has no public address. Telemetry only: the groups using the
@@ -1129,7 +1131,7 @@ class SubscriptionService:
         No ``expected-status`` on purpose: mihomo then counts ANY HTTP
         answer as alive, so a bot restart (Caddy answers 502) does not
         paint the provider's servers dead in the client."""
-        base = (getattr(self.config, 'WEBAPP_URL', '') or '').rstrip('/')
+        base = public_base_url(self.config)
         if not (base and token):
             return self._CLASH_TEST_URL
         return f'{base}/probe/{token}/{provider}'
@@ -1144,7 +1146,7 @@ class SubscriptionService:
         if not token:
             return {}
         providers = {}
-        base = (getattr(self.config, 'WEBAPP_URL', '') or '').rstrip('/')
+        base = public_base_url(self.config)
         if base:
             providers['emergency'] = self._clash_provider(
                 'emergency', 'E',
@@ -1210,7 +1212,7 @@ class SubscriptionService:
         Fetched DIRECT, like the channels (§32): a telemetry fetch routed
         through the tunnel would fail exactly when the data matters. Only
         with a public address and a token: the probe url lives there."""
-        base = (getattr(self.config, 'WEBAPP_URL', '') or '').rstrip('/')
+        base = public_base_url(self.config)
         if not (base and token):
             return {}
         allowed = self.telemetry_protocols()
@@ -1298,11 +1300,11 @@ class SubscriptionService:
         such option (sing-box ``tls.fragment`` on Reality / ws / stls).
         Emitted as JSON — a YAML 1.2 subset mihomo parses as a profile.
 
-        With WEBAPP_URL set the profile also points at the bot's rule
+        With a public URL set the profile also points at the bot's rule
         lists (``bot/services/rule_lists.py``, IMPROVEMENT_PLAN E1): one
         ``rule-provider`` per list, refreshed hourly by the client — the
         profile itself only daily — so a list change reaches FlClash
-        without a profile update. Without WEBAPP_URL there is nothing to
+        without a profile update. Without a public URL there is nothing to
         point at and the profile is exactly what it was before E1.
         """
         demoted = self._demoted_set(demoted)
@@ -1316,7 +1318,7 @@ class SubscriptionService:
         providers = self._clash_providers(token) if names else {}
         use = list(providers)
 
-        base_url = (getattr(self.config, 'WEBAPP_URL', '') or '').rstrip('/')
+        base_url = public_base_url(self.config)
         test_url = (f'{base_url}/probe-big' if big_check and base_url
                     else self._CLASH_TEST_URL)
         groups = [{'name': 'VPN', 'type': 'select',
@@ -1424,8 +1426,8 @@ class SubscriptionService:
     def _clash_rule_providers(self) -> dict:
         """The bot's rule lists as http ``rule-providers`` (E1), or ``{}``
         when the bot does not know its public URL."""
-        base = getattr(self.config, 'WEBAPP_URL', '') or ''
-        if not isinstance(base, str) or not base.strip():
+        base = public_base_url(self.config)
+        if not base:
             return {}
         return rule_lists.clash_rule_providers(base)
 
@@ -1633,9 +1635,8 @@ class SubscriptionService:
 
     def _rule_set_url(self, tag: str) -> str:
         """Return rule-set URL, preferring self-hosted mirror."""
-        base = getattr(self.config, 'WEBAPP_URL', '') or ''
+        base = public_base_url(self.config)
         if base:
-            base = base.rstrip('/')
             return f"{base}/rule-sets/{tag}.srs"
         if tag.startswith('geoip-'):
             return self._GEOIP_URL.format(tag=tag)

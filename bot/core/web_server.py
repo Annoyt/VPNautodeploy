@@ -1975,7 +1975,8 @@ class WebAppServer:
             accept = (request.headers.get('Accept-Language') or '').lower()
             lang = 'en' if accept and not accept.startswith('ru') else 'ru'
         release = await asyncio.to_thread(neko_client.ReleaseCache.get)
-        base = (getattr(self.config, 'WEBAPP_URL', '') or '').rstrip('/')
+        from bot.utils.public_url import public_base_url
+        base = public_base_url(self.config)
         demo_gb = (demo_traffic_gb(self.config, True), demo_traffic_gb(self.config, False))
         if user is not None and user.status != 'demo':
             demo_gb = None
@@ -2538,7 +2539,7 @@ class WebAppServer:
             'TOPIC_REQUESTS', 'TOPIC_USERS', 'TOPIC_DEMO',
             'TOPIC_REJECTED', 'TOPIC_STATS', 'TOPIC_PAYMENTS',
             'TOPIC_SUPPORT', 'TOPIC_SOLVED', 'TOPIC_AI',
-            'WEBAPP_URL', 'XUI_API_URL', 'XUI_CONTAINER_NAME',
+            'WEBAPP_URL', 'SUB_PUBLIC_URL', 'XUI_API_URL', 'XUI_CONTAINER_NAME',
             'OPENCODE_URL', 'AI_DEFAULT_MODE', 'OPENCODE_DEFAULT_MODEL',
         ]
         # SECURITY: never widen this list to BOT_TOKEN, XUI_PASSWORD,
