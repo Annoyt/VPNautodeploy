@@ -243,7 +243,8 @@ def _ago_min(when: Optional[datetime], now: datetime) -> int:
 
 def emergency_urls(config, user) -> Optional[Tuple[str, str]]:
     """``(sing-box URL, FlClash URL)`` of the user's emergency profile, or
-    None when the bot does not know its public address (WEBAPP_URL)."""
+    None when the bot does not know its public address
+    (SUB_PUBLIC_URL / WEBAPP_URL)."""
     from bot.services.subscription import SubscriptionService
     base = SubscriptionService(config).build_subscription_url(user)
     if not base:

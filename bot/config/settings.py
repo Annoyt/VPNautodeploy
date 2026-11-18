@@ -288,6 +288,12 @@ class Settings:
         # showed a button to a dead URL and nobody noticed. Now if it's
         # missing, handle_admin says so out loud.
         self.WEBAPP_URL: str = os.getenv('WEBAPP_URL', '')
+        # The address users fetch from (subscriptions, rule sets, the app's
+        # telemetry, /open, /app, /apk), apart from the admins' dashboard on
+        # WEBAPP_URL. Empty = WEBAPP_URL, as before. Since 2026-11-18 exit's
+        # IPv4 is blocked from Russia, so the users' address lives on entry
+        # (AGENTS.md §60; bot/utils/public_url.py).
+        self.SUB_PUBLIC_URL: str = os.getenv('SUB_PUBLIC_URL', '').strip()
         # TLS on the exit → entry hop (AGENTS.md §53, bot/services/hop_tls.py):
         # the same app over HTTPS for exit's Caddy, hysteria and DPI reporter.
         # On once WEB_TLS_DIR holds cert.pem + key.pem (scripts/hop_tls.py
