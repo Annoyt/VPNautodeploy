@@ -852,16 +852,16 @@ class WebAppServer:
         #
         # Entry-node DNAT+MASQUERADE caveat: the hysteria daemon sits on
         # the exit host and all hy2 traffic arrives via the entry node's
-        # UDP DNAT with SNAT, so ``addr_ip`` is ALWAYS the entry node's
-        # own IP, never the real client IP. Geo-resolving it would pin
-        # the user to the entry node's city (Moscow) and clobber the
-        # accurate geo captured by /sub fetches. Detect our own node IPs
-        # and skip both the geo lookup and the users.last_geo write.
-        node_ips = {
-            (getattr(self.config, 'ENTRY_NODE_IP', '') or '').strip(),
-            (getattr(self.config, 'EXIT_NODE_IP', '') or '').strip(),
-        }
-        is_node_ip = addr_ip in {ip for ip in node_ips if ip}
+        # UDP DNAT with SNAT, so ``addr_ip`` is ALWAYS the address of the
+        # node in front of hysteria, never the real client IP: entry, or
+        # a transit host that SNATs to its own address (the DE reserve
+        # since 2026-11-18, when exit's IPv4 was blocked from Russia and
+        # entry reached exit through it). Geo-resolving it would pin the
+        # user to that node's network and clobber the accurate geo
+        # captured by /sub fetches. Any address of ours (_is_own_address:
+        # the node settings and internal space) skips both the geo lookup
+        # and the users.last_geo write.
+        is_node_ip = self._is_own_address(addr_ip)
 
         cc = asn = org = None
         city = lat = lon = None
@@ -1297,10 +1297,6 @@ class WebAppServer:
         """Geo-bucket the exit report into dpi_metrics row tuples."""
         from datetime import datetime
         ts = datetime.utcnow().isoformat()
-        node_ips = {ip for ip in (
-            (getattr(self.config, 'ENTRY_NODE_IP', '') or '').strip(),
-            (getattr(self.config, 'EXIT_NODE_IP', '') or '').strip(),
-        ) if ip}
         try:
             from bot.services.geoip import lookup as geo_lookup, lookup_asn
         except Exception:
@@ -1309,7 +1305,10 @@ class WebAppServer:
         def geo_key(ip: str):
             if not ip:
                 return (None, None, '')
-            if ip in node_ips:
+            # A connection that came through one of our nodes (entry's
+            # MASQUERADE, or a transit host SNATing to its own address)
+            # carries the node's address, not the client's.
+            if self._is_own_address(ip):
                 return (self.DPI_TUNNEL_BUCKET_CC, None, 'entry-forward')
             cc = asn = None
             org = ''
@@ -1345,7 +1344,7 @@ class WebAppServer:
                 seen += n
                 b = bucket((*geo_key(ip), tag))
                 b['conns'] += n
-                if ip and ip not in node_ips:
+                if ip and not self._is_own_address(ip):
                     b['ips'][ip] = b['ips'].get(ip, 0) + n
             # Connections beyond the reporter's per-bucket top-IP cap
             # still count — they just lose their geo.
@@ -1365,7 +1364,7 @@ class WebAppServer:
                 seen += n
                 b = bucket((*geo_key(ip), tag))
                 b['fails'] += n
-                if ip and ip not in node_ips:
+                if ip and not self._is_own_address(ip):
                     b['ips'][ip] = b['ips'].get(ip, 0) + n
                 if reason:
                     b['reasons'][reason] = b['reasons'].get(reason, 0) + n
