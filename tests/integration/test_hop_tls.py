@@ -392,6 +392,20 @@ class TestCheck:
         server.config.ENTRY_NODE_IP = '198.51.100.99'
         result = hop_tls.check(server.config)
         assert result['state'] == 'fail' and '198.51.100.99' in result['error']
+        assert 'ENTRY_NODE_IP 198.51.100.99' in result['error']
+
+    def test_hop_tls_ip_names_the_address_exit_dials(self, server):
+        # 2026-11-19: entry moved to a new address while exit kept dialing the
+        # old one into the tunnel; the certificate still carries the old one
+        server.config.ENTRY_NODE_IP = '198.51.100.99'
+        server.config.HOP_TLS_IP = f' {ENTRY_IP} '
+        assert hop_tls.check(server.config)['state'] == 'ok'
+        server.config.HOP_TLS_IP = '198.51.100.98'
+        result = hop_tls.check(server.config)
+        assert result['state'] == 'fail' and 'HOP_TLS_IP 198.51.100.98' in result['error']
+        for unset in ('', '  ', None, Mock()):
+            server.config.HOP_TLS_IP = unset
+            assert hop_tls.hop_address(server.config) == ('ENTRY_NODE_IP', '198.51.100.99')
 
     def test_fails_when_another_certificate_answers(self, server, tmp_path):
         other = str(tmp_path / 'other')
@@ -504,6 +518,12 @@ class TestCli:
         assert rc == 1 and json.loads(out)['state'] == 'fail'      # nothing listens
         rc, out = _cli('init', '--ip', '198.51.100.1', '--force', config=cfg)
         assert rc == 0 and 'IP Address:198.51.100.1' in out
+
+    def test_init_takes_hop_tls_ip_first(self, tmp_path):
+        cfg = make_config(WEB_TLS_DIR=str(tmp_path / 'd'), ENTRY_NODE_IP='198.51.100.2',
+                          HOP_TLS_IP='198.51.100.3')
+        rc, out = _cli('init', config=cfg)
+        assert rc == 0 and 'IP Address:198.51.100.3' in out and '198.51.100.2' not in out
 
     def test_init_needs_an_address(self, tmp_path):
         cfg = make_config(WEB_TLS_DIR=str(tmp_path / 'd'), ENTRY_NODE_IP='')

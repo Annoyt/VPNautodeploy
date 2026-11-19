@@ -73,7 +73,8 @@ _INTERNAL_NETS = tuple(ipaddress.ip_network(n) for n in (
 ))
 # Settings that hold the public address of one of our nodes. A value that
 # is a host name rather than an IP is skipped, never resolved.
-_OWN_NODE_SETTINGS = ('ENTRY_NODE_IP', 'EXIT_NODE_IP', 'HY2_HOST', 'FALLBACK_NODE_HOST')
+_OWN_NODE_SETTINGS = ('ENTRY_NODE_IP', 'ENTRY_PUBLIC_HOST', 'EXIT_NODE_IP', 'HY2_HOST',
+                      'FALLBACK_NODE_HOST')
 
 
 def _contact_email(user) -> Optional[str]:
@@ -1748,7 +1749,7 @@ class WebAppServer:
                     user, ru_exit,
                 )
             if abroad_obj is None and abroad_clash is None:
-                # No address to give (no host, no ENTRY_NODE_IP): still
+                # No address to give (no host, no entry address): still
                 # never the home profile under this URL.
                 return web.Response(status=503, text='RU-zone is not available')
         abroad = ru_exit is not None
@@ -2545,7 +2546,7 @@ class WebAppServer:
         cfg = self.config
         public_keys = [
             'MODE', 'FORUM_ENABLED', 'FORUM_GROUP_ID',
-            'ENTRY_NODE_IP', 'SNI_VALUE', 'SID_VALUE',
+            'ENTRY_NODE_IP', 'ENTRY_PUBLIC_HOST', 'HOP_TLS_IP', 'SNI_VALUE', 'SID_VALUE',
             'DEMO_TRAFFIC_GB', 'DEMO_OTHER_TRAFFIC_GB', 'DEMO_DAYS',
             'TOPIC_REQUESTS', 'TOPIC_USERS', 'TOPIC_DEMO',
             'TOPIC_REJECTED', 'TOPIC_STATS', 'TOPIC_PAYMENTS',

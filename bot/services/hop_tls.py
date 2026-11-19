@@ -61,6 +61,19 @@ def settings(config) -> tuple:
     return port, directory
 
 
+def hop_address(config) -> tuple:
+    """``(setting, ip)``: the address the certificate must carry, the one exit
+    dials (its reporter verifies the IP SAN). ``HOP_TLS_IP`` when set, else
+    ``ENTRY_NODE_IP``. They differ once entry's own address has changed while
+    exit still dials the old one: since 2026-11-19 exit dials 130.49.146.10
+    and its nekovpn-revssh REDIRECT sends that into the tunnel, while entry
+    is 157.22.231.40."""
+    value = getattr(config, 'HOP_TLS_IP', '')
+    if isinstance(value, str) and value.strip():
+        return 'HOP_TLS_IP', value.strip()
+    return 'ENTRY_NODE_IP', (getattr(config, 'ENTRY_NODE_IP', '') or '').strip()
+
+
 def files(directory: str) -> tuple:
     """``(cert, key)`` paths in ``directory``."""
     return os.path.join(directory, CERT_FILE), os.path.join(directory, KEY_FILE)
@@ -237,8 +250,9 @@ def _peer_ips(peer: dict) -> set:
 def check(config, *, host: str = '127.0.0.1', timeout: float = 10.0) -> dict:
     """``/health`` over the HTTPS listener as exit sees it: the pinned
     certificate is the only trust anchor and ``entry-hop.invalid`` the name
-    it must carry; entry's address must be on it too (the reporter dials
-    and verifies that). ``state``: off / ok / fail. The deploy smoke."""
+    it must carry; the address exit dials must be on it too (the reporter
+    verifies that; ``hop_address``). ``state``: off / ok / fail. The deploy
+    smoke."""
     port, directory = settings(config)
     cert, _key = files(directory)
     if not port:
@@ -249,12 +263,13 @@ def check(config, *, host: str = '127.0.0.1', timeout: float = 10.0) -> dict:
         status, body, peer = _hop_get(host, port, cert, '/health', timeout=timeout)
     except (OSError, ssl.SSLError, http.client.HTTPException) as e:
         return {'state': 'fail', 'error': f'{type(e).__name__}: {e}'}
-    entry_ip = (getattr(config, 'ENTRY_NODE_IP', '') or '').strip()
-    if entry_ip and entry_ip not in _peer_ips(peer):
+    setting, hop_ip = hop_address(config)
+    if hop_ip and hop_ip not in _peer_ips(peer):
         return {'state': 'fail',
-                'error': f'the certificate does not carry ENTRY_NODE_IP {entry_ip} '
+                'error': f'the certificate does not carry {setting} {hop_ip} '
                          f'(it has {sorted(_peer_ips(peer))}); make a new one '
-                         f'(init --force) and pin it on exit'}
+                         f'(init --force) and pin it on exit, or set HOP_TLS_IP '
+                         f'to the address exit dials'}
     try:
         health = json.loads(body.decode('utf-8'))
     except (UnicodeDecodeError, ValueError):

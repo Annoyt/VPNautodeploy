@@ -74,6 +74,16 @@ class Settings:
         # to the real prod entry node. The validate() call below rejects
         # blank values so the bot won't even start if these are missing.
         self.ENTRY_NODE_IP: str = os.getenv('ENTRY_NODE_IP', '')
+        # Where users' clients connect for the protocols built from entry's
+        # own address (Reality and its server-first twin, the SSH path through
+        # entry, the RU-zone egress, xhr, the share links): an IP or a host
+        # name. Empty = ENTRY_NODE_IP. With a name, the next move of entry's
+        # address is a DNS change (bot/utils/public_url.py, AGENTS.md §63).
+        self.ENTRY_PUBLIC_HOST: str = os.getenv('ENTRY_PUBLIC_HOST', '').strip()
+        # The address on the exit -> entry hop's certificate, the one exit
+        # dials (§53). Empty = ENTRY_NODE_IP; set it when entry's address has
+        # changed and exit still dials the old one (hop_tls.hop_address).
+        self.HOP_TLS_IP: str = os.getenv('HOP_TLS_IP', '').strip()
         # Exit node public IP — optional; used by hy2_auth to recognise
         # our own node traffic (geo lookup must not pin users to it).
         self.EXIT_NODE_IP: str = os.getenv('EXIT_NODE_IP', '')

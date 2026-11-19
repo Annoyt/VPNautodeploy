@@ -37,9 +37,10 @@ def _config():
 
 
 def cmd_init(args, config, out) -> int:
-    ip = (args.ip or getattr(config, 'ENTRY_NODE_IP', '') or '').strip()
+    ip = (args.ip or hop_tls.hop_address(config)[1] or '').strip()
     if not ip:
-        print("no address: pass --ip <entry's public IP> (ENTRY_NODE_IP is empty)", file=out)
+        print("no address: pass --ip <the address exit dials> "
+              "(HOP_TLS_IP and ENTRY_NODE_IP are empty)", file=out)
         return 2
     _port, directory = hop_tls.settings(config)
     try:
@@ -106,7 +107,8 @@ def main(argv=None, *, config=None, out=sys.stdout) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     sub = parser.add_subparsers(dest='cmd', required=True)
     p_init = sub.add_parser('init', help='make the key and the certificate')
-    p_init.add_argument('--ip', help="entry's public address (default ENTRY_NODE_IP)")
+    p_init.add_argument('--ip', help='the address exit dials (default HOP_TLS_IP, '
+                                     'else ENTRY_NODE_IP)')
     p_init.add_argument('--force', action='store_true',
                         help='replace an existing pair (exit must pin the new certificate)')
     p_show = sub.add_parser('show', help='the certificate exit pins')

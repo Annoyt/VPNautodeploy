@@ -109,6 +109,8 @@ services:
       - NO_PROXY=${NO_PROXY:-}
       - no_proxy=${no_proxy:-}
       - ENTRY_NODE_IP=${ENTRY_NODE_IP}
+      - ENTRY_PUBLIC_HOST=${ENTRY_PUBLIC_HOST:-}
+      - HOP_TLS_IP=${HOP_TLS_IP:-}
       - REALITY_PUBLIC_KEY=${REALITY_PUBLIC_KEY}
       # Reality short ID and SNI - must match what x-ui inbound has configured,
       # otherwise the client TLS handshake works (masquerade page from SNI host

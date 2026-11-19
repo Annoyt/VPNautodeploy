@@ -16,6 +16,7 @@ from bot.utils.exceptions import (
 )
 
 from bot.services import tls_fingerprint
+from bot.utils.public_url import entry_public_host
 
 logger = logging.getLogger(__name__)
 
@@ -108,7 +109,7 @@ class VPNService:
         if not email:
             raise VPNGenerationError("Client email is required")
         
-        entry_ip = self.config.ENTRY_NODE_IP
+        entry_ip = entry_public_host(self.config)
         public_key = self.config.REALITY_PUBLIC_KEY
         sni = self.config.SNI_VALUE
         sid = self.config.SID_VALUE
@@ -219,7 +220,7 @@ class VPNService:
         if entry_node:
             entry_ip = entry_node.host
         else:
-            entry_ip = self.config.ENTRY_NODE_IP
+            entry_ip = entry_public_host(self.config)
         
         # Generate link with node-specific parameters
         try:
@@ -474,7 +475,7 @@ class VPNService:
         from urllib.parse import quote
         cfg = self.config
         sni = getattr(cfg, 'XHR_SNI', '') or ''
-        host = getattr(cfg, 'ENTRY_NODE_IP', '') or ''
+        host = entry_public_host(cfg)
         pbk = getattr(cfg, 'XHR_PUBLIC_KEY', '') or getattr(cfg, 'REALITY_PUBLIC_KEY', '') or ''
         if not (isinstance(sni, str) and sni and host and pbk and client_uuid):
             return None
@@ -550,8 +551,8 @@ class VPNService:
         if not self.node_manager:
             # Legacy mode
             return {
-                'entry_ip': self.config.ENTRY_NODE_IP,
-                'exit_ip': self.config.ENTRY_NODE_IP,  # Same in legacy
+                'entry_ip': entry_public_host(self.config),
+                'exit_ip': entry_public_host(self.config),  # Same in legacy
                 'port': 443,
                 'type': 'legacy'
             }
@@ -568,7 +569,7 @@ class VPNService:
             entry_node = await self.node_manager.get_node(user_nodes['entry_node_id'])
         
         return {
-            'entry_ip': entry_node.host if entry_node else self.config.ENTRY_NODE_IP,
+            'entry_ip': entry_node.host if entry_node else entry_public_host(self.config),
             'exit_ip': exit_node.host if exit_node else 'unknown',
             'port': exit_node.vpn_port if exit_node else 443,
             'exit_node_name': exit_node.name if exit_node else 'unknown',
