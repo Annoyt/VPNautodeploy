@@ -1,0 +1,3 @@
+# §17. Backup state
+
+Since 2026-11-17 the whole service is backed up daily, encrypted, into the «Бэкапы» topic (§58); the exit-local timer below stays as a second, local copy. Tarballs live at `/opt/backups/*.tar.gz` on the prod host — manual snapshots taken before each risky migration. Automated job lives in `scripts/backup.sh` + `systemd/vpn-bot-backup.{service,timer}`. The timer runs daily and keeps the last 7 snapshots; older ones are pruned. Volume contents (`vpn-bot_3xui-data`, `vpn-bot_vpn-bot-data`) are dumped via an `alpine` one-shot container that mounts the volume read-only and tars it to the host directory.

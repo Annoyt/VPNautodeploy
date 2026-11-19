@@ -1,0 +1,3 @@
+# §19. Kimi domain-aware skill routing
+
+The original 18-word flat trigger list in `kimi_client.ask()` made Kimi waste a turn on `ls /root/.kimi-code/skills/` and sometimes pick the wrong skill. Replaced with per-domain marker tuples (`VPN_OPS_MARKERS`, `SERVER_ADMIN_MARKERS`, `CODE_REVIEW_MARKERS`) plus a `GENERIC_TROUBLE_MARKERS` fallback. `_detect_skill_domains(prompt)` returns the matched skill names; `_build_skill_reminder(domains)` injects a system-reminder with the **exact SKILL.md path** so Kimi reads only the relevant skill. Negative-test prompts (привет, переведи, анекдот) match nothing → no reminder → no overhead.
