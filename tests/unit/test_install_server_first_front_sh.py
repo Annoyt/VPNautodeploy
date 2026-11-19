@@ -106,6 +106,7 @@ class Env:
         self.lib = root / 'lib' / 'nekovpn-sf-front'
         self.units = root / 'units'
         self.conf = root / 'etc' / 'nekovpn-sf-front.conf'
+        self.haproxy_cfg = root / 'etc' / 'haproxy.cfg'
         for d in (self.bin, self.state, self.units, self.conf.parent):
             d.mkdir(parents=True)
         for name, body in (('systemctl', FAKE_SYSTEMCTL), ('ss', FAKE_SS), ('ufw', FAKE_UFW),
@@ -120,7 +121,8 @@ class Env:
         env.update(PATH=f'{self.bin}:{env["PATH"]}', FAKE_STATE=str(self.state),
                    REAL_INSTALL=shutil.which('install'), SYSTEMCTL='systemctl', SS='ss',
                    SFF_LIB_DIR=str(self.lib), SFF_UNIT_DIR=str(self.units),
-                   SFF_CONF=str(self.conf), SFF_WAIT_S='0', **extra)
+                   SFF_CONF=str(self.conf), SFF_HAPROXY_CFG=str(self.haproxy_cfg),
+                   SFF_WAIT_S='0', **extra)
         return env
 
     def run(self, *args, script=SCRIPT, **extra):
@@ -187,25 +189,59 @@ class TestInstall:
         assert 'does not parse' in r.stderr and 'IP address' in r.stderr
         assert not env.lib.exists() and env.calls('systemctl') == []
 
-    def test_it_says_what_nothing_listens_on_and_the_haproxy_line(self, env):
+    HAPROXY = ('frontend xray_in\n    bind *:8443\n    bind 127.0.0.1:12443 accept-proxy\n'
+               '    mode tcp\n    default_backend nginx_decoy\n')
+
+    def test_it_gives_the_haproxy_line_and_what_nothing_listens_on(self, env):
         r = env.run()
         assert r.returncode == 0, r.stderr
-        assert '  nothing listens on 127.0.0.1:18443 yet' in r.stdout
-        assert "bind 127.0.0.1:18443 accept-proxy" in r.stdout
+        assert "add 'bind 127.0.0.1:12443 accept-proxy' to frontend xray_in" in r.stdout
         assert '  nothing listens on 127.0.0.1:443 yet' in r.stdout
         # shadow-tls's route is no proxy-v2 one: no haproxy line for it
         assert r.stdout.count('accept-proxy') == 1
 
-    def test_targets_that_listen_are_not_reported(self, env):
-        env.set('listen', '127.0.0.1:18443\n0.0.0.0:443\n')
+    def test_a_bound_and_listening_target_is_not_reported(self, env):
+        env.haproxy_cfg.write_text(self.HAPROXY)
+        env.set('listen', '127.0.0.1:12443\n0.0.0.0:443\n')
         r = env.run()
         assert r.returncode == 0, r.stderr
-        assert 'nothing listens' not in r.stdout and 'accept-proxy' not in r.stdout
+        for word in ('nothing listens', 'accept-proxy', 'something else', 'reload'):
+            assert word not in r.stdout, word
+
+    def test_a_port_something_else_holds_is_reported(self, env):
+        # 18443 on entry: the decoy nginx listens there, haproxy binds nothing
+        env.conf.write_text('route = 0.0.0.0:2443 127.0.0.1:18443 proxy-v2\n')
+        env.haproxy_cfg.write_text(self.HAPROXY)
+        env.set('listen', '127.0.0.1:18443\n')
+        r = env.run()
+        assert r.returncode == 0, r.stderr
+        assert 'something else listens on 127.0.0.1:18443' in r.stdout
+        assert "add 'bind 127.0.0.1:18443 accept-proxy'" in r.stdout
+
+    def test_a_bind_line_that_nothing_listens_on_asks_for_a_reload(self, env):
+        env.haproxy_cfg.write_text(self.HAPROXY)
+        env.set('listen', '0.0.0.0:443\n')
+        r = env.run()
+        assert r.returncode == 0, r.stderr
+        assert 'binds 127.0.0.1:12443, but nothing listens there yet: reload haproxy' in r.stdout
+        assert "add 'bind" not in r.stdout
+
+    @pytest.mark.parametrize('line', [
+        '    bind 127.0.0.1:12443',                     # no accept-proxy
+        '    bind 127.0.0.1:12443 tfo maxconn 100',     # other options, no accept-proxy
+        '#   bind 127.0.0.1:12443 accept-proxy',        # commented out
+        '    bind 127.0.0.1:124430 accept-proxy',       # another port
+    ])
+    def test_a_bind_that_is_not_the_accept_proxy_one_does_not_count(self, env, line):
+        env.haproxy_cfg.write_text(f'frontend xray_in\n{line}\n')
+        env.set('listen', '127.0.0.1:12443\n0.0.0.0:443\n')
+        r = env.run()
+        assert "add 'bind 127.0.0.1:12443 accept-proxy'" in r.stdout
 
     def test_a_listener_on_another_address_does_not_count(self, env):
-        env.set('listen', '10.0.0.5:18443\n0.0.0.0:443\n')
+        env.set('listen', '10.0.0.5:443\n')
         r = env.run()
-        assert 'nothing listens on 127.0.0.1:18443 yet' in r.stdout
+        assert 'nothing listens on 127.0.0.1:443 yet' in r.stdout
 
     def test_an_active_ufw_is_mentioned(self, env):
         env.set('ufw', 'Status: active\n')
@@ -306,7 +342,7 @@ class TestUnit:
         r = subprocess.run(['python3', '-I', str(FRONT), '--config', str(EXAMPLE), '--check'],
                            capture_output=True, text=True, timeout=30)
         assert r.returncode == 0, r.stderr
-        assert r.stdout.splitlines() == ['0.0.0.0:2443->127.0.0.1:18443 proxy-v2',
+        assert r.stdout.splitlines() == ['0.0.0.0:2443->127.0.0.1:12443 proxy-v2',
                                          '0.0.0.0:2444->127.0.0.1:443']
 
     def test_systemd_accepts_it(self, tmp_path):

@@ -1370,9 +1370,9 @@ Since about 00:00 UTC on 2026-11-19 users in Russia reach entry's address but no
   - A dead target or a full front gives the client no banner, so the app moves on at once.
   - Nothing is logged per user: a summary line every five minutes.
 - **The routes on entry** (`systemd/nekovpn-sf-front.conf.example`):
-  - `0.0.0.0:2443 → 127.0.0.1:18443 proxy-v2`: haproxy's `bind 127.0.0.1:18443 accept-proxy` in `frontend xray_in`. It routes by SNI exactly like :8443 (Reality, xhr, the decoy), and its `send-proxy-v2` gives exit the user's address.
+  - `0.0.0.0:2443 → 127.0.0.1:12443 proxy-v2`: haproxy's `bind 127.0.0.1:12443 accept-proxy` in `frontend xray_in` (not 18443: the decoy nginx listens there). It routes by SNI exactly like :8443 (Reality, xhr, the decoy), and its `send-proxy-v2` gives exit the user's address.
   - `0.0.0.0:2444 → 127.0.0.1:443`: shadow-tls.
-- **Unit and installer.** `systemd/server-first-front.service` runs a root-owned copy with `python3 -I`, `--check` first, DynamicUser, no capabilities, `Restart=always`. `scripts/install_server_first_front.sh` copies the script into `/usr/local/lib/nekovpn-sf-front` (never the rsync target, §36). It writes the config from the example only when there is none, and never touches haproxy or shadow-tls: it prints the bind line haproxy still needs. Re-run it after the script changes.
+- **Unit and installer.** `systemd/server-first-front.service` runs a root-owned copy with `python3 -I`, `--check` first, DynamicUser, no capabilities, `Restart=always`. `scripts/install_server_first_front.sh` copies the script into `/usr/local/lib/nekovpn-sf-front` (never the rsync target, §36). It writes the config from the example only when there is none, and never touches haproxy or shadow-tls. For a `proxy-v2` route it looks for `bind <target> accept-proxy` in haproxy's config, not just a listener: the first draft pointed at 18443, where the decoy nginx already listens. It prints the bind line haproxy still needs, says when something else holds the port, and asks for a reload when the line is there but nothing listens yet. Re-run it after the script changes.
 - **The profile.** Settings `SF_REALITY_PORT`, `SF_STLS_PORT`, `NEKO_SF_MIN_VERSION`; compose passes them (entry's compose is hand-kept: add the lines there).
   - A NekoVPN app at or above the minimum version (`SubscriptionService.server_first_for`, by User-Agent) gets, in its Clash profile, a twin of each Reality, xhr and stls server. A twin is the same proxy on the front's port, named `<name>-sf`, with `neko-server-first: true`.
   - The twin comes right before its server in VPN, Cascade and Auto, and the Reality twin in Calls.
@@ -1385,7 +1385,7 @@ Since about 00:00 UTC on 2026-11-19 users in Russia reach entry's address but no
   - The filter may learn this too; then change the banner, the ports or the method (plan G3).
 - **Rollout** (each step on the owner's word):
   1. Deploy the bot (`./scripts/deploy_to_entry.sh`).
-  2. On entry, add `bind 127.0.0.1:18443 accept-proxy` to `frontend xray_in`, then `haproxy -c -f /etc/haproxy/haproxy.cfg` and `systemctl reload haproxy`.
+  2. On entry, add `bind 127.0.0.1:12443 accept-proxy` to `frontend xray_in`, then `haproxy -c -f /etc/haproxy/haproxy.cfg` and `systemctl reload haproxy`.
   3. Run `sudo /opt/vpn-bot/scripts/install_server_first_front.sh`.
   4. Add `SF_REALITY_PORT=2443`, `SF_STLS_PORT=2444`, `NEKO_SF_MIN_VERSION=0.9.2-neko.5` to `.env`, the same three lines to entry's compose, then `docker compose up -d --no-deps vpn-bot`.
   5. Check from a Russian network: TLS through :2443 with SNI `www.bing.com` and through :2444 with `www.microsoft.com`, after reading the banner.

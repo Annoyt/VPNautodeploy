@@ -20,6 +20,7 @@ set -euo pipefail
 LIB_DIR="${SFF_LIB_DIR:-/usr/local/lib/nekovpn-sf-front}"
 UNIT_DIR="${SFF_UNIT_DIR:-/etc/systemd/system}"
 CONF="${SFF_CONF:-/etc/nekovpn-sf-front.conf}"
+HAPROXY_CFG="${SFF_HAPROXY_CFG:-/etc/haproxy/haproxy.cfg}"
 SYSTEMCTL="${SYSTEMCTL:-systemctl}"
 SS="${SS:-ss}"
 WAIT_S="${SFF_WAIT_S:-1}"     # tests: 0
@@ -87,6 +88,13 @@ listening() {   # host port: does something listen there (or on every address)?
     "$SS" -Hltn "( sport = :$2 )" 2>/dev/null \
         | awk -v h="$1" -v p="$2" '{ if ($4 == h":"p || $4 == "0.0.0.0:"p || $4 == "*:"p || $4 == "[::]:"p) f = 1 } END { exit !f }'
 }
+# A proxy-v2 route's target must be haproxy's accept-proxy bind, not merely a
+# listener: the first draft pointed at 18443, where the decoy nginx listens.
+haproxy_binds() {   # target: does haproxy's config bind it with accept-proxy?
+    [ -r "$HAPROXY_CFG" ] || return 1
+    awk -v t="$1" '$1 == "bind" && $2 == t { for (i = 3; i <= NF; i++) if ($i == "accept-proxy") f = 1 }
+                   END { exit !f }' "$HAPROXY_CFG"
+}
 while IFS= read -r route; do
     [ -n "$route" ] || continue
     target="${route#*->}"
@@ -94,14 +102,22 @@ while IFS= read -r route; do
     host="${target%:*}"
     port="${target##*:}"
     echo "route $route"
-    if ! listening "$host" "$port"; then
-        echo "  nothing listens on $target yet"
-        case "$route" in
-            *" proxy-v2")
+    case "$route" in
+        *" proxy-v2")
+            if ! haproxy_binds "$target"; then
+                if listening "$host" "$port"; then
+                    echo "  something else listens on $target: give haproxy's accept-proxy bind another port"
+                fi
                 echo "  haproxy: add 'bind $target accept-proxy' to frontend xray_in," \
-                     "then haproxy -c -f /etc/haproxy/haproxy.cfg && systemctl reload haproxy" ;;
-        esac
-    fi
+                     "then haproxy -c -f $HAPROXY_CFG && systemctl reload haproxy"
+            elif ! listening "$host" "$port"; then
+                echo "  $HAPROXY_CFG binds $target, but nothing listens there yet: reload haproxy"
+            fi ;;
+        *)
+            if ! listening "$host" "$port"; then
+                echo "  nothing listens on $target yet"
+            fi ;;
+    esac
 done <<<"$routes"
 if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then
     echo "ufw is active: allow each route's port (ufw allow <port>/tcp)"

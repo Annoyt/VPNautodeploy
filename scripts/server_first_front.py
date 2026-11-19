@@ -19,7 +19,7 @@ still sees the user, not 127.0.0.1.
 Stdlib only. The config is a file of ``key = value`` lines, read as data:
 
     banner = SSH-2.0-OpenSSH_9.6p1 Ubuntu-3ubuntu13.20
-    route = 0.0.0.0:2443 127.0.0.1:18443 proxy-v2
+    route = 0.0.0.0:2443 127.0.0.1:12443 proxy-v2
     route = 0.0.0.0:2444 127.0.0.1:443
     max_conns = 4096
 
