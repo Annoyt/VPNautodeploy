@@ -1780,12 +1780,16 @@ class WebAppServer:
             # speak XHTTP: an older FlClash core may refuse the whole
             # profile over a network type it does not know.
             from bot.services.demo_tiers import neko_app_version
-            clash_cascade = (cascade if neko_app_version(request.headers.get('User-Agent', ''))
+            app_version = neko_app_version(request.headers.get('User-Agent', ''))
+            clash_cascade = (cascade if app_version
                              else tuple(p for p in cascade if p != 'xhr'))
             text_body = self.subscription.build_clash_config(
                 user, clash_cascade, lockdown=lockdown,
                 demoted=await asyncio.to_thread(demoted_here),
                 big_check=self._big_check_for(user),
+                # G4 (AGENTS.md §62): the server-first twins, only for an app
+                # whose core drops the front's banner.
+                server_first=self.subscription.server_first_for(app_version),
             )
         elif fmt == 'links' or (not fmt and 'happ' in ua):
             text_body = self.subscription.build_links(user, cascade)

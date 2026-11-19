@@ -1,0 +1,15 @@
+# /etc/nekovpn-sf-front.conf — the server-first front on entry (AGENTS.md §62).
+# Read as data by scripts/server_first_front.py: key = value lines, anything
+# it does not know is refused. scripts/install_server_first_front.sh writes
+# this file when there is none and never overwrites it.
+#
+# The line the front writes first. The app drops it; keep it looking like
+# entry's own sshd (the line checked from Russia on 2026-11-19).
+banner = SSH-2.0-OpenSSH_9.6p1 Ubuntu-3ubuntu13.20
+# Reality (and xhr): to haproxy's accept-proxy bind, which routes by SNI like
+# :8443 and passes the user's address on to exit. Add to `frontend xray_in`:
+#     bind 127.0.0.1:18443 accept-proxy
+route = 0.0.0.0:2443 127.0.0.1:18443 proxy-v2
+# ShadowTLS: to shadow-tls itself.
+route = 0.0.0.0:2444 127.0.0.1:443
+max_conns = 4096
