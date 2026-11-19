@@ -209,7 +209,7 @@ class HealthChecker:
     def ssh_entry_probe_enabled(config) -> bool:
         """Same gate as the emergency profiles' SSH server through entry
         (ssh_exit.entry_enabled): the SSH path, plus SSH_ENTRY_PORT and
-        ENTRY_NODE_IP."""
+        entry's address (ENTRY_PUBLIC_HOST, else ENTRY_NODE_IP)."""
         from bot.services import ssh_exit
         return ssh_exit.entry_enabled(config)
 

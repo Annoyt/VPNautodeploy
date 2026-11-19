@@ -38,7 +38,7 @@ from bot.services.fallback_node import (
     FallbackNodeService,
 )
 from bot.services import rule_lists
-from bot.utils.public_url import public_base_url
+from bot.utils.public_url import entry_public_host, public_base_url
 from bot.services import tls_fingerprint
 
 logger = logging.getLogger(__name__)
@@ -286,7 +286,7 @@ class SubscriptionService:
 
     def _xray_reality(self, user) -> Optional[dict]:
         cfg = self.config
-        host = getattr(cfg, 'ENTRY_NODE_IP', '') or ''
+        host = entry_public_host(cfg)
         pbk = getattr(cfg, 'REALITY_PUBLIC_KEY', '') or ''
         sni = getattr(cfg, 'SNI_VALUE', '') or ''
         if not (host and pbk and sni and user.uuid):
@@ -877,7 +877,7 @@ class SubscriptionService:
     def _build_ru_zone(self, uuid: Optional[str], ru_exit: dict) -> Optional[dict]:
         """VLESS-Reality to the RU egress on entry. No TLS fragment —
         the client is abroad, there is no ТСПУ on its side to dodge."""
-        host = ru_exit.get('host') or self.config.ENTRY_NODE_IP or ''
+        host = ru_exit.get('host') or entry_public_host(self.config)
         if not (uuid and host and ru_exit.get('port') and ru_exit.get('sni')
                 and ru_exit.get('pbk')):
             return None
@@ -1903,7 +1903,7 @@ class SubscriptionService:
 
     def _build_reality(self, uuid: str, name_prefix: str) -> Optional[dict]:
         cfg = self.config
-        host = cfg.ENTRY_NODE_IP or ''
+        host = entry_public_host(cfg)
         pbk = cfg.REALITY_PUBLIC_KEY or ''
         sni = cfg.SNI_VALUE or 'www.microsoft.com'
         sid = getattr(cfg, 'SID_VALUE', None)
@@ -2045,7 +2045,7 @@ class SubscriptionService:
         is empty."""
         cfg = self.config
         sni = getattr(cfg, 'XHR_SNI', '') or ''
-        host = getattr(cfg, 'ENTRY_NODE_IP', '') or ''
+        host = entry_public_host(cfg)
         pbk = getattr(cfg, 'XHR_PUBLIC_KEY', '') or getattr(cfg, 'REALITY_PUBLIC_KEY', '') or ''
         if not (isinstance(sni, str) and sni and host and pbk and uuid):
             return None
@@ -2175,12 +2175,12 @@ class SubscriptionService:
     def _build_ru_exit(self, user) -> Optional[dict]:
         """RU-exit Reality outbound for EN users accessing RU-geo content.
 
-        Uses the same entry as the primary cascade (ENTRY_NODE_IP) but
+        Uses the same entry as the primary cascade (entry_public_host) but
         as an exit — traffic from foreign users exits to RU sites with
         a Russian IP, bypassing geo-blocks on VK/Yandex/etc.
         """
         cfg = self.config
-        host = cfg.ENTRY_NODE_IP or ''
+        host = entry_public_host(cfg)
         pbk = cfg.REALITY_PUBLIC_KEY or ''
         sni = cfg.SNI_VALUE or 'www.microsoft.com'
         sid = getattr(cfg, 'SID_VALUE', None)

@@ -1,7 +1,7 @@
 # AGENTS.md — VPN Bot
 
 > Agent-focused guidance. For project overview, see `docs/PROJECT.md`.
-> Operational insights §1–§62: index at the end of this file, text in `docs/insights/`.
+> Operational insights §1–§63: index at the end of this file, text in `docs/insights/`.
 
 ---
 
@@ -165,6 +165,7 @@ Files with this mark: `test_database.py`, `test_security.py`, `test_state_machin
 | `bot/models/vpn_node.py` | All cluster tests using `VPNNode` |
 | `scripts/hermes_model_guard.py` (`GuardIO`, `parse_env_file`, `effective_bot_token`, `save_state`) | `scripts/hermes_release_notice.py` loads them from its own directory, `tests/unit/test_hermes_release_notice.py` |
 | `bot/services/exit_reach.py` (the PROXY header's marker, `MARK_SRC`) | `WebAppServer._dpi_exit_rows` drops that source, `tests/integration/test_exit_reach.py` |
+| `bot/utils/public_url.py` (`entry_public_host`), the entry-address builders in `bot/services/subscription.py`, `vpn.py`, `ssh_exit.py` | `tests/integration/test_entry_public_host.py` (every entry server follows `ENTRY_PUBLIC_HOST`; unset is byte-identical) |
 | `bot/services/hop_tls.py`, `scripts/caddy_entry_hop.py`, `systemd/hysteria-entry-hop.conf` | `tests/integration/test_hop_tls.py`, `tests/integration/test_hop_tls_stand.py`, `docs/runbooks/entry_hop_tls.md` (its blocks run in the tests) |
 | `bot/services/hy2_keys.py`, the hy2 callback in `bot/core/web_server.py`, `scripts/hy2_auth_relay.py`, `scripts/install_hy2_auth_relay.sh`, `systemd/hy2-auth-relay.service` | `tests/integration/test_hy2_auth_relay.py` (the key list must equal what the live callback lets in), `tests/unit/test_hy2_auth_relay.py`, `tests/unit/test_install_hy2_auth_relay_sh.py`, `tests/integration/test_hy2_auth_relay_stand.py`, `docs/runbooks/hy2_auth_relay.md` (its blocks run in the tests) |
 | `scripts/service_backup.py` (what goes in), `bot/services/backups.py`, `scripts/backup_send.py`, `scripts/install_service_backup.sh`, `systemd/nekovpn-backup.{service,timer}` | `tests/unit/test_service_backup.py`, `tests/integration/test_backup_send.py`, `tests/integration/test_backup_alert.py`, `tests/unit/test_install_service_backup_sh.py`, `docs/runbooks/backup_restore.md` (its check block runs in the tests); re-run `install_service_backup.sh` on entry after the script changes |
@@ -287,3 +288,4 @@ A new insight goes into `docs/insights/NN-<slug>.md` under the next free number,
 - §60. The users' address apart from the dashboard: `SUB_PUBLIC_URL` (2026-11-18) — [docs/insights/60-the-users-address-apart-from-the.md](docs/insights/60-the-users-address-apart-from-the.md)
 - §61. A new connection to exit every minute: the reach check (2026-11-19) — [docs/insights/61-a-new-connection-to-exit-every.md](docs/insights/61-a-new-connection-to-exit-every.md)
 - §62. The server-first front: a banner first, for the NekoVPN app (2026-11-19, IMPROVEMENT_PLAN G4) — [docs/insights/62-the-server-first-front-a-banner.md](docs/insights/62-the-server-first-front-a-banner.md)
+- §63. Entry's address for clients, apart from the node's own: `ENTRY_PUBLIC_HOST`, `HOP_TLS_IP` (2026-11-19) — [docs/insights/63-entry-s-address-for-clients-apart.md](docs/insights/63-entry-s-address-for-clients-apart.md)

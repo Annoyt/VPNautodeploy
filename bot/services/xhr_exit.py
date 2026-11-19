@@ -67,7 +67,7 @@ _SAMPLE_UUID = '00000000-0000-4000-8000-000000000000'
 def profile_server(config) -> Optional[dict]:
     """What a profile's xhr proxy carries about the server — ``sni``, the
     Reality public key ``pbk`` and short id ``sid``, the XHTTP ``path`` —
-    or None while the builders hand out no xhr (XHR_SNI, ENTRY_NODE_IP or a
+    or None while the builders hand out no xhr (XHR_SNI, entry's address or a
     public key empty). Read off ``_build_xhr`` itself, so the two cannot
     drift apart."""
     from bot.services.subscription import SubscriptionService

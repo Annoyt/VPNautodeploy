@@ -27,7 +27,8 @@ exit that only forwards (no shell, no tty).
   same. The very last server of the profile, after ssh-exit itself.
 
 Off while SSH_EXIT_HOST, SSH_USER_SECRET or SSH_HOST_KEY is empty; the
-server through entry also needs ENTRY_NODE_IP and SSH_ENTRY_PORT.
+server through entry also needs entry's public address (ENTRY_PUBLIC_HOST,
+else ENTRY_NODE_IP) and SSH_ENTRY_PORT.
 """
 
 import base64
@@ -36,6 +37,8 @@ import hmac
 import logging
 from datetime import datetime
 from typing import List, Optional
+
+from bot.utils.public_url import entry_public_host
 
 logger = logging.getLogger(__name__)
 
@@ -64,9 +67,10 @@ def _port(config) -> int:
 
 def entry_port(config) -> Optional[int]:
     """The relay's port on entry, or None: SSH_ENTRY_PORT unset or not a
-    port, or no ENTRY_NODE_IP to reach it at. Anything whose text is not a
-    whole number — a Mock attribute in tests too — is "not configured"."""
-    host = getattr(config, 'ENTRY_NODE_IP', '')
+    port, or no entry address (ENTRY_PUBLIC_HOST, else ENTRY_NODE_IP) to
+    reach it at. Anything whose text is not a whole number — a Mock attribute
+    in tests too — is "not configured"."""
+    host = entry_public_host(config)
     raw = getattr(config, 'SSH_ENTRY_PORT', '')
     if not (isinstance(host, str) and host.strip()):
         return None
@@ -119,7 +123,7 @@ def entry_outbound(config, user, now: Optional[datetime] = None) -> Optional[dic
     if ob is None:
         return None
     return {**ob, 'tag': f"{ob['tag']}-entry",
-            'server': config.ENTRY_NODE_IP.strip(), 'server_port': port}
+            'server': entry_public_host(config).strip(), 'server_port': port}
 
 
 _ITOA64 = './0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'

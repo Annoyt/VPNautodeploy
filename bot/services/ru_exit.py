@@ -46,7 +46,8 @@ script:
     {"port": 8445, "sni": "www.google.com",
      "pbk": "<reality public key>", "sid": "<short id>"}
 
-``host`` is optional and defaults to ENTRY_NODE_IP. A ``chat_ids`` key
+``host`` is optional and defaults to entry's public address (ENTRY_PUBLIC_HOST,
+else ENTRY_NODE_IP). A ``chat_ids`` key
 left over from the allowlist test is ignored.
 
 Not done: the traffic never touches the x-ui panel, so it is NOT counted
