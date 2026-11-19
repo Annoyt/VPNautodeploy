@@ -22,6 +22,7 @@ added later if traffic warrants.
 """
 
 import base64
+import copy
 import hashlib
 import hmac
 import json
@@ -1247,6 +1248,89 @@ class SubscriptionService:
             return []
         return excluded
 
+    # The server-first front on entry (IMPROVEMENT_PLAN G4, AGENTS.md §62;
+    # scripts/server_first_front.py): it writes one banner line before the
+    # client sends anything, then pipes to haproxy (Reality, xhr) or to
+    # shadow-tls. A filter in front of entry drops every connection from
+    # Russia in which the client sends first. The NekoVPN app gets a twin of
+    # each such server on the front's port, marked for its core (client repo,
+    # core/neko_server_first.go): the core dials the twin through its local
+    # helper, which drops the banner, and removes the marker before mihomo
+    # reads the proxy.
+    SERVER_FIRST_MARKER = 'neko-server-first'
+    SERVER_FIRST_SUFFIX = '-sf'
+    _SERVER_FIRST_PORT_SETTING = {
+        'reality': 'SF_REALITY_PORT',
+        'xhr': 'SF_REALITY_PORT',     # haproxy routes it by SNI, like :8443
+        'stls': 'SF_STLS_PORT',
+    }
+    _NEKO_VERSION = re.compile(r'^v?(\d+)\.(\d+)\.(\d+)(?:-neko\.(\d+))?(?:\+[0-9A-Za-z.]+)?$')
+
+    def server_first_ports(self) -> dict:
+        """``{cascade protocol: front port}`` for the protocols the front
+        serves on this deployment. An empty or unusable setting is no
+        twin."""
+        out = {}
+        for proto, setting in self._SERVER_FIRST_PORT_SETTING.items():
+            value = str(getattr(self.config, setting, '') or '').strip()
+            if value.isdigit() and 1 <= int(value) <= 65535:
+                out[proto] = int(value)
+        return out
+
+    @classmethod
+    def _neko_version_key(cls, text) -> Optional[tuple]:
+        """``0.9.2-neko.5`` → ``(0, 9, 2, 5)``; a plain ``0.9.3`` counts as
+        neko.0 of that base. Anything else is None."""
+        if not isinstance(text, str):
+            return None
+        m = cls._NEKO_VERSION.match(text.strip())
+        if not m:
+            return None
+        return tuple(int(g or 0) for g in m.groups())
+
+    def server_first_for(self, app_version) -> bool:
+        """Whether a NekoVPN app of ``app_version`` (None: not the app) gets
+        the twins: the front serves some protocol, ``NEKO_SF_MIN_VERSION``
+        is set, and the app is at least that version — an older app has no
+        helper, and the banner would break its handshake."""
+        if not self.server_first_ports():
+            return False
+        floor = self._neko_version_key(getattr(self.config, 'NEKO_SF_MIN_VERSION', ''))
+        have = self._neko_version_key(app_version)
+        return floor is not None and have is not None and have >= floor
+
+    def _server_first_twins(self, proxies: List[dict], calls: List[str],
+                            protocol_of: dict) -> tuple:
+        """``(proxies, calls, protocol_of)`` with a twin right before each
+        server the front serves: the same proxy on the front's port, named
+        ``<name>-sf``, with the marker. Before, not after: with the filter in
+        place the twin is the one that works, and where there is no filter
+        it costs one round trip more.
+
+        A twin's protocol is ``<proto>-sf``: DPIMonitor's demotions name the
+        plain protocol, and a demotion of the server that the filter kills
+        must not take its twin out of Cascade along with it. A twin of a
+        call server goes right before it in Calls too."""
+        ports = self.server_first_ports()
+        out, twin_of, by_protocol = [], {}, dict(protocol_of)
+        for proxy in proxies:
+            proto = protocol_of.get(proxy.get('name'))
+            if proto in ports:
+                twin = copy.deepcopy(proxy)
+                twin['name'] = f"{proxy['name']}{self.SERVER_FIRST_SUFFIX}"
+                twin['port'] = ports[proto]
+                twin[self.SERVER_FIRST_MARKER] = True
+                out.append(twin)
+                twin_of[proxy['name']] = twin['name']
+                by_protocol[twin['name']] = f'{proto}{self.SERVER_FIRST_SUFFIX}'
+            out.append(proxy)
+        twin_calls = []
+        for name in calls:
+            if name in twin_of:
+                twin_calls.append(twin_of[name])
+            twin_calls.append(name)
+        return out, twin_calls, by_protocol
+
     def build_clash_config(
         self,
         user,
@@ -1255,6 +1339,7 @@ class SubscriptionService:
         lockdown: bool = False,
         demoted: Iterable[str] = frozenset(),
         big_check: bool = False,
+        server_first: bool = False,
     ) -> str:
         """The main profile for Clash/mihomo clients (FlClash) — same
         servers, rules and DNS policy as ``build_singbox_config``. That
@@ -1296,6 +1381,13 @@ class SubscriptionService:
         fails the check and the group moves on. It sits behind exit's
         Caddy: while exit is down the DE reserve fails that check too.
 
+        ``server_first`` (IMPROVEMENT_PLAN G4, AGENTS.md §62; the /sub
+        handler sets it for a NekoVPN app that has the helper,
+        ``server_first_for``): a ``-sf`` twin before each server the
+        server-first front serves (``_server_first_twins``). The telemetry
+        providers stay per plain protocol: ``<proto>-sf`` is no telemetry
+        protocol.
+
         Not carried over: TLS ClientHello fragmentation — mihomo has no
         such option (sing-box ``tls.fragment`` on Reality / ws / stls).
         Emitted as JSON — a YAML 1.2 subset mihomo parses as a profile.
@@ -1310,6 +1402,8 @@ class SubscriptionService:
         demoted = self._demoted_set(demoted)
         proxies, calls, protocol_of = self._clash_proxies(user, enabled_protocols,
                                                           emergency=lockdown)
+        if server_first:
+            proxies, calls, protocol_of = self._server_first_twins(proxies, calls, protocol_of)
         names = [p['name'] for p in proxies]
         uuid = getattr(user, 'uuid', None) if user else None
         token = self.derive_token(uuid) if uuid else None

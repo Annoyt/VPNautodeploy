@@ -335,6 +335,15 @@ class Settings:
         # The same path through entry: the port of the relay on entry
         # (scripts/setup_ssh_entry_relay.sh). Empty = no such server.
         self.SSH_ENTRY_PORT: str = os.getenv('SSH_ENTRY_PORT', '').strip()
+        # The server-first front on entry (IMPROVEMENT_PLAN G4, AGENTS.md
+        # §62; scripts/server_first_front.py): its ports for Reality and xhr
+        # (to haproxy) and for ShadowTLS. The NekoVPN app from
+        # NEKO_SF_MIN_VERSION on drops the front's banner, and its Clash
+        # profile gets a "-sf" twin of each such server. Strings, read by
+        # SubscriptionService.server_first_ports(): empty or bad = no twin.
+        self.SF_REALITY_PORT: str = os.getenv('SF_REALITY_PORT', '').strip()
+        self.SF_STLS_PORT: str = os.getenv('SF_STLS_PORT', '').strip()
+        self.NEKO_SF_MIN_VERSION: str = os.getenv('NEKO_SF_MIN_VERSION', '').strip()
         self.XHR_SNI: str = os.getenv('XHR_SNI', '').strip()
         self.XHR_PATH: str = os.getenv('XHR_PATH', '/xhr').strip() or '/xhr'
         self.XHR_PUBLIC_KEY: str = os.getenv('XHR_PUBLIC_KEY', '').strip()

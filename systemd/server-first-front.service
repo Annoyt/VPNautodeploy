@@ -1,0 +1,53 @@
+# Server-first front on ENTRY (IMPROVEMENT_PLAN G4, AGENTS.md §62). It writes
+# one banner line first, then pipes each connection to haproxy (Reality, with
+# a PROXY v2 header) or to shadow-tls: a filter in front of entry drops every
+# connection from Russia in which the client sends first. The NekoVPN app
+# drops the line and starts its handshake.
+# scripts/install_server_first_front.sh installs it: a root-owned copy of the
+# script in /usr/local/lib/nekovpn-sf-front, never the rsync target
+# (AGENTS.md §36). Re-run the installer after the script changes.
+[Unit]
+Description=NekoVPN server-first front: a banner first, then haproxy / shadow-tls
+After=network-online.target haproxy.service shadow-tls.service
+Wants=network-online.target
+# It carries users' connections: never stop restarting it.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# The config is data (key = value), read by the script itself; one that does
+# not parse keeps the unit from starting at all.
+ExecStartPre=/usr/bin/python3 -I /usr/local/lib/nekovpn-sf-front/server_first_front.py --config /etc/nekovpn-sf-front.conf --check
+ExecStart=/usr/bin/python3 -I /usr/local/lib/nekovpn-sf-front/server_first_front.py --config /etc/nekovpn-sf-front.conf
+Restart=always
+RestartSec=2
+
+# It needs no privilege: ports above 1024, TCP to loopback targets. Nothing
+# on disk is written.
+DynamicUser=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+UMask=0077
+LimitNOFILE=65536
+MemoryMax=256M
+TasksMax=64
+
+[Install]
+WantedBy=multi-user.target
