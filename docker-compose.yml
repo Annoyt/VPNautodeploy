@@ -140,6 +140,10 @@ services:
       - SSH_HOST_KEY=${SSH_HOST_KEY:-}
       - SSH_USER_SECRET=${SSH_USER_SECRET:-}
       - SSH_ENTRY_PORT=${SSH_ENTRY_PORT:-}
+      # The server-first front on entry (AGENTS.md §62): empty = no -sf twins.
+      - SF_REALITY_PORT=${SF_REALITY_PORT:-}
+      - SF_STLS_PORT=${SF_STLS_PORT:-}
+      - NEKO_SF_MIN_VERSION=${NEKO_SF_MIN_VERSION:-}
       - XHR_SNI=${XHR_SNI:-}
       - XHR_PATH=${XHR_PATH:-}
       - XHR_PUBLIC_KEY=${XHR_PUBLIC_KEY:-}
