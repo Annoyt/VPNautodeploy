@@ -1102,7 +1102,12 @@ class NotificationService:
 
     def _reset_demo_quota_db_fallback(self, reset_emails, new_expiry_ms) -> bool:
         """Direct x-ui.db writes — only for deployments where the panel
-        database is local and writable (the bot on entry is API-only)."""
+        database is local and writable (the bot on entry is API-only).
+
+        Until 2026-11-20 ``json`` was not imported here: the NameError was
+        caught per inbound, so no inbound's client list was ever renewed,
+        while the log said the reset went through."""
+        import json
         import sqlite3
 
         xui_db_path = getattr(self.config, 'XUI_DB_PATH', None)
