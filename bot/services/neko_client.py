@@ -217,8 +217,12 @@ def open_button_row(db, config, user) -> Optional[list]:
         return None
     if not url:
         return None
-    label = '📲 Open in NekoVPN' if getattr(user, 'lang', None) == 'en' else '📲 Открыть в NekoVPN'
-    return [{'text': label, 'url': url}]
+    return [{'text': open_button_label(getattr(user, 'lang', None)), 'url': url}]
+
+
+def open_button_label(lang: Optional[str]) -> str:
+    """The text of the button that opens ``/open/<token>``."""
+    return '📲 Open in NekoVPN' if lang == 'en' else '📲 Открыть в NekoVPN'
 
 
 _TEXTS = {

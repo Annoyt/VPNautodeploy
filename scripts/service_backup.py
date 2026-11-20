@@ -391,14 +391,22 @@ def check_sqlite(path: str) -> dict:
     return info
 
 
+# Tables of bot.db that no backup carries. netstat_events: the NekoVPN app's
+# network diagnostics (bot/services/netstat.py, AGENTS.md §67) live 14 days in
+# the live database and nowhere else; a restored bot creates the table anew.
+BOT_DB_LEFT_OUT = ('netstat_events',)
+
 # The consistent copy of bot.db, made INSIDE the vpn-bot container as the bot's
 # user (see the module docstring). Prints DB_MAGIC, then the copy's bytes.
 # The copy is a temporary file in the container's /tmp (TMPDIR), removed at
-# once; one a killed run left behind is removed by the next run.
+# once; one a killed run left behind is removed by the next run. The tables
+# of BOT_DB_LEFT_OUT are dropped from the copy before a byte of it leaves the
+# container: their pages zeroed (secure_delete), then the file rebuilt
+# without them (VACUUM). The live database is only ever read.
 SNAPSHOT_CODE = r'''
 import glob, os, sqlite3, sys, tempfile, time, urllib.parse
 tmpdir = tempfile.gettempdir()
-for old in glob.glob(os.path.join(tmpdir, 'nekovpn-backup-*.db')):
+for old in glob.glob(os.path.join(tmpdir, 'nekovpn-backup-*.db*')):
     try:
         if time.time() - os.path.getmtime(old) > 3600:
             os.unlink(old)
@@ -410,9 +418,17 @@ try:
     src = sqlite3.connect('file:' + urllib.parse.quote(sys.argv[1]) + '?mode=ro', uri=True,
                           timeout=60)
     try:
-        dst = sqlite3.connect(tmp)
+        dst = sqlite3.connect(tmp, isolation_level=None)
         try:
             src.backup(dst)
+            dst.execute('PRAGMA journal_mode=DELETE')
+            dst.execute('PRAGMA secure_delete=ON')
+            for name in %(left_out)r:
+                dst.execute('DROP TABLE IF EXISTS "' + name.replace('"', '""') + '"')
+            try:
+                dst.execute('VACUUM')
+            except sqlite3.Error:
+                pass
         finally:
             dst.close()
     finally:
@@ -427,8 +443,12 @@ try:
             out.write(chunk)
     out.flush()
 finally:
-    os.unlink(tmp)
-''' % {'magic': DB_MAGIC}
+    for path in (tmp, tmp + '-journal', tmp + '-wal', tmp + '-shm'):
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+''' % {'magic': DB_MAGIC, 'left_out': BOT_DB_LEFT_OUT}
 
 
 # ------------------------------------------------------------- collector ----
@@ -1038,7 +1058,8 @@ def render_readme(manifest: dict) -> str:
         'entry': ('`entry/entry.tar`', 'файлы entry по их путям: том бота (bot.db — согласованная '
                   'копия), .env, compose, haproxy, shadow-tls, правила, RU-зона, юниты, Hermes; '
                   '`nekovpn-facts/` — версии, живые правила, контейнеры'),
-        'bot': ('bot.db в `entry/entry.tar`', 'копия снята в контейнере vpn-bot через backup API sqlite'),
+        'bot': ('bot.db в `entry/entry.tar`', 'копия снята в контейнере vpn-bot через backup API sqlite, '
+                'без таблицы netstat_events: диагностика сети живёт 14 дней только в живой базе (§67)'),
         'exit': ('`exit/exit.tar`', 'файлы exit по их путям: x-ui.db (копия), compose, .env, '
                  'hysteria, Caddy, пин перегона, xhr-exit, ssh-exit, tinyproxy, acme.sh; '
                  '`nekovpn-facts/`'),
@@ -1372,7 +1393,8 @@ def _build(args, created: dt.datetime, stem: str, work: str) -> int:
     if bot.get('path'):
         extras.append(Extra(arcname=(BOT_VOLUME + '/bot.db').lstrip('/'), src=bot['path'],
                             like=BOT_VOLUME + '/bot.db', what='bot.db: согласованная копия '
-                            '(backup API sqlite в контейнере vpn-bot)', check=bot.get('check')))
+                            '(backup API sqlite в контейнере vpn-bot), без netstat_events',
+                            check=bot.get('check')))
     entry_tar = os.path.join(tree, 'entry', 'entry.tar')
     dbwork = os.path.join(work, 'db')
     os.makedirs(dbwork)

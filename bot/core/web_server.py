@@ -10,6 +10,7 @@ import asyncio
 import hmac
 import hashlib
 import ipaddress
+import math
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import parse_qs, unquote, urlencode
 from aiohttp import web
@@ -29,6 +30,9 @@ from bot.utils.admin_token import verify_admin_token
 from bot.utils.rate_limit import check_admin_rate_limit, get_admin_rate_limit_remaining
 from bot.utils.prometheus import metrics, set_gauge_users, set_system_gauge
 from bot.utils.user_label import user_label
+from bot.services import netstat
+from bot.utils.request_body import read_body
+from bot.utils.unlogged import install as install_unlogged, unlogged
 
 logger = logging.getLogger(__name__)
 
@@ -177,6 +181,10 @@ class WebAppServer:
         self._probe_tokens_at: float = float('-inf')
         self._probe_tokens_lock: Optional[asyncio.Lock] = None
         self._probe_last: dict = {}
+        # POST /api/neko/netstat: 30 requests an hour per subscription,
+        # and none of its requests in aiohttp's logs (bot/utils/unlogged.py).
+        self._netstat_limiter = netstat.RateLimiter()
+        install_unlogged()
         self._setup_routes()
     
     def _setup_routes(self):
@@ -214,6 +222,11 @@ class WebAppServer:
         self.app.router.add_get('/neko/settings', self.handle_neko_settings)
         # The NekoVPN app's SOS button (client plan E16/E23).
         self.app.router.add_post('/api/neko/sos/{token}', self.handle_neko_sos)
+        # The NekoVPN app's network diagnostics (docs/NEKO6_PLAN.md D2).
+        # Every method reaches the handler, which answers all but POST with
+        # 405 itself: no request to this path leaves the caller's address
+        # in the access log, a router's 405 included.
+        self.app.router.add_route('*', '/api/neko/netstat', self.handle_neko_netstat)
         # Rule lists for Clash/mihomo clients (IMPROVEMENT_PLAN E1). Public
         # like /sub — the Clash profile points its rule-providers here and
         # FlClash pulls them hourly. Not /rule-sets/: that prefix is the
@@ -1929,10 +1942,10 @@ class WebAppServer:
             return web.Response(status=404, text='Not found')
         if user.status not in ('demo', 'paid', 'support_topic'):
             return web.Response(status=410, text='Subscription inactive')
-        if (request.content_length or 0) > NEKO_SOS_MAX_BODY:
-            return web.Response(status=413, text='Too large')
-        raw = await request.content.read(NEKO_SOS_MAX_BODY + 1)
-        if len(raw) > NEKO_SOS_MAX_BODY:        # a body without a length
+        # read to its end (bot/utils/request_body.py): one read() stopped
+        # at the first piece of a body that came in pieces
+        raw = await read_body(request, NEKO_SOS_MAX_BODY)
+        if raw is None:                         # by its length or by what came
             return web.Response(status=413, text='Too large')
         try:
             report = json.loads(raw.decode('utf-8')) if raw else {}
@@ -1942,6 +1955,55 @@ class WebAppServer:
         sos = SosService(self.bot, self.db, self.config)
         answer = await asyncio.to_thread(sos.handle_app_sos, user, report)
         return web.json_response(answer, headers={'Cache-Control': 'no-store'})
+
+    async def handle_neko_netstat(self, request: web.Request) -> web.Response:
+        """``POST /api/neko/netstat`` — the NekoVPN app's network
+        diagnostics (docs/NEKO6_PLAN.md D2, bot/services/netstat.py).
+
+        ``Authorization: NekoToken <token>`` carries the /sub token
+        (``netstat.token_of``): checked against the users table (an active
+        key), then dropped. Neither it nor the caller's address is stored
+        or logged: no row, no log line of this handler, no access-log line
+        (``unlogged()``, before anything else), and the address and
+        forwarding headers are never read. Answers: 204 stored, 400 a bad
+        body (the text names the field), 401 no token or not an active
+        one, 405 not a POST, 413 over 64 KB, 429 over 30 requests an hour
+        for this token (with Retry-After)."""
+        unlogged()
+        token = ''
+        try:
+            if request.method != 'POST':
+                return web.Response(status=405, text='Method not allowed',
+                                    headers={'Allow': 'POST'})
+            token = netstat.token_of(request.headers)
+            user = None
+            if token:
+                user = await asyncio.to_thread(
+                    self.subscription.find_user_by_token, self.db, token,
+                )
+            if user is None or (getattr(user, 'status', '') or '') not in netstat.ACTIVE_STATUSES:
+                return web.Response(status=401, text='Unauthorized',
+                                    headers={'WWW-Authenticate': 'NekoToken'})
+            wait = self._netstat_limiter.check(netstat.key_of(token))
+            user = None
+            token = ''                   # checked; nothing below needs it
+            if wait:
+                return web.Response(status=429, text='Too many requests',
+                                    headers={'Retry-After': str(max(1, math.ceil(wait)))})
+            raw = await read_body(request, netstat.MAX_BODY)
+            if raw is None:
+                return web.Response(status=413, text='Too large')
+            try:
+                rows = netstat.validate(netstat.parse(raw), time.time())
+            except netstat.BadBody as e:
+                return web.Response(status=400, text=f'Bad body: {e}')
+            await asyncio.to_thread(netstat.store, self.db, rows)
+            return web.Response(status=204)
+        except Exception as e:
+            # aiohttp would log an escaping error with the caller's address
+            detail = str(e).replace(token, '[token]') if token else str(e)
+            logger.warning(f'netstat: request failed: {type(e).__name__}: {detail[:200]}')
+            return web.Response(status=500, text='Error')
 
     async def handle_open(self, request: web.Request) -> web.Response:
         """``GET /open/<token>`` — adds the subscription to the NekoVPN app
