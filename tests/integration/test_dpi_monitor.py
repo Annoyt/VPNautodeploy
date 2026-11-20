@@ -22,7 +22,7 @@ hy2_auth_log / user_failure_reports — is exercised, not mocked away.
 import json
 import logging
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
 
@@ -623,6 +623,139 @@ class TestRealityAsn:
         changes = ticks(monitor, 2, before=lambda now: probe_world(db, now))
         assert changes[1][0].target == MEGAFON
         assert MEGAFON in auto(db)['asn']
+
+
+# ---- R3 waits out our own tunnel's jam (AGENTS.md §64, §66) ----------------
+
+JAM = 'healthcheck:entry_tunnel:queue'
+
+
+def set_jam(db, key=JAM, *, now, open_=True, opened_min_ago=60, closed_min_ago=None):
+    """The alert_state row AlertManager keeps for the tunnel watchdog's
+    alert: open now, or closed ``closed_min_ago`` before ``now``."""
+    epoch = now.replace(tzinfo=timezone.utc).timestamp()
+    closed = 0.0 if closed_min_ago is None else epoch - closed_min_ago * 60
+    with db._connect() as c:
+        c.execute("INSERT OR REPLACE INTO alert_state (key, open, opened_ts, closed_ts) "
+                  "VALUES (?, ?, ?, ?)", (key, int(open_), epoch - opened_min_ago * 60, closed))
+        c.commit()
+
+
+class TestTunnelJam:
+    """2026-11-19/20: users' Reality clients failed ~1,850 handshakes
+    retrying through the jammed exit → entry tunnel. R3 counts exactly
+    those per ASN, and would have moved Reality to the end for our path's
+    fault — onto stls and hy2, which the same jam had killed. While the
+    tunnel watchdog's alert is open, or closed within R3's 2-h window, R3
+    has no verdict: frozen like a failed collector. Every other rule runs."""
+
+    def test_without_a_jam_the_failures_demote(self, monitor, db):
+        seed_dpi(db, now=T0, asn=MEGAFON, hsfail=60, conn=0)
+        changes = ticks(monitor, 2, before=lambda now: probe_world(db, now))
+        assert [c.key for c in changes[1]] == [f'asn:{MEGAFON}:reality']
+
+    @pytest.mark.parametrize('key', [JAM, 'healthcheck:entry_tunnel:fd'])
+    def test_nothing_is_demoted_while_the_tunnel_is_jammed(self, monitor, db, caplog, key):
+        seed_dpi(db, now=T0, asn=MEGAFON, hsfail=60, conn=0)
+        set_jam(db, key, now=T0)
+        with caplog.at_level(logging.INFO, logger='bot.services.dpi_monitor'):
+            changes = ticks(monitor, 3, before=lambda now: probe_world(db, now))
+        assert changes == [[], [], []]
+        assert not (auto(db).get('asn') or {})
+        assert f'asn:{MEGAFON}:reality' not in mon_state(db)['targets']
+        said = [r.getMessage() for r in caplog.records if 'tunnel jammed' in r.getMessage()]
+        assert len(said) == 3 and key in said[0] and 'reality_asn' in said[0]
+
+    def test_a_demotion_waits_out_the_jam(self, monitor, db):
+        """Demoted before the jam, quiet during it: no restore while the
+        tunnel is jammed and for R3's 2-h window after it closes; then the
+        good streak counts as usual (6 evaluations)."""
+        seed_dpi(db, now=T0, asn=MEGAFON, hsfail=60, conn=0)
+        ticks(monitor, 2, before=lambda now: probe_world(db, now))
+        assert list(auto(db)['asn'][MEGAFON]) == ['reality']
+        clear(db, 'dpi_metrics')                              # R3 quiet from now on
+        start = T0 + 2 * STEP
+        set_jam(db, now=start)
+        assert ticks(monitor, 8, start=start,
+                     before=lambda now: probe_world(db, now)) == [[]] * 8
+        entry = mon_state(db)['targets'][f'asn:{MEGAFON}:reality']
+        assert (entry['bad'], entry['good'], entry['rule']) == (0, 0, 'reality_asn')
+
+        closed_at = start + 8 * STEP
+        set_jam(db, now=closed_at, open_=False, opened_min_ago=80, closed_min_ago=0)
+        changes = ticks(monitor, 19, start=closed_at,
+                        before=lambda now: probe_world(db, now))
+        flat = [(i, c.action, c.key) for i, run in enumerate(changes) for c in run]
+        # frozen through closed_at + 2 h (13 runs), then 6 good runs
+        assert flat == [(18, 'restore', f'asn:{MEGAFON}:reality')]
+
+    def test_a_pending_streak_waits_and_resumes(self, monitor, db):
+        seed_dpi(db, now=T0, asn=MEGAFON, hsfail=60, conn=0)
+        assert ticks(monitor, 1, before=lambda now: probe_world(db, now)) == [[]]
+        set_jam(db, now=T0 + STEP)
+        assert ticks(monitor, 2, start=T0 + STEP,
+                     before=lambda now: probe_world(db, now)) == [[], []]
+        entry = mon_state(db)['targets'][f'asn:{MEGAFON}:reality']
+        assert (entry['bad'], entry['rule']) == (1, 'reality_asn')
+        later = T0 + 3 * STEP
+        set_jam(db, now=later, open_=False, opened_min_ago=300, closed_min_ago=200)
+        changes = ticks(monitor, 1, start=later, before=lambda now: probe_world(db, now))
+        assert [c.key for c in changes[0]] == [f'asn:{MEGAFON}:reality']
+
+    def test_a_jam_closed_within_the_window_still_freezes(self, monitor, db):
+        seed_dpi(db, now=T0, asn=MEGAFON, hsfail=60, conn=0)
+        set_jam(db, now=T0, open_=False, opened_min_ago=300, closed_min_ago=100)
+        assert ticks(monitor, 2, before=lambda now: probe_world(db, now)) == [[], []]
+
+    def test_a_jam_closed_before_the_window_does_not(self, monitor, db):
+        seed_dpi(db, now=T0, asn=MEGAFON, hsfail=60, conn=0)
+        set_jam(db, now=T0, open_=False, opened_min_ago=300, closed_min_ago=130)
+        changes = ticks(monitor, 2, before=lambda now: probe_world(db, now))
+        assert [c.key for c in changes[1]] == [f'asn:{MEGAFON}:reality']
+
+    @pytest.mark.parametrize('key', ['reach:exit', 'healthcheck:entry_dnat:hy2',
+                                     'healthcheck:entryXtunnel:fd'])
+    def test_other_open_alerts_are_no_jam(self, monitor, db, key):
+        # reach:exit can stay open for days (§61); a LIKE on the prefix
+        # would let the lookalike in ('_' is a wildcard there)
+        seed_dpi(db, now=T0, asn=MEGAFON, hsfail=60, conn=0)
+        set_jam(db, key, now=T0)
+        changes = ticks(monitor, 2, before=lambda now: probe_world(db, now))
+        assert [c.key for c in changes[1]] == [f'asn:{MEGAFON}:reality']
+
+    def test_the_other_rules_still_run(self, monitor, db):
+        """The jam freezes R3 only: R4's storm still demotes hy2 and hy2t."""
+        seed_user(db, 1001, asn=MEGAFON)
+        seed_allows(db, 1001, 40, now=T0)
+        seed_dpi(db, now=T0, asn=MEGAFON, hsfail=60, conn=0)
+        set_jam(db, now=T0)
+        changes = ticks(monitor, 2, before=lambda now: probe_world(db, now))
+        assert sorted(c.key for c in changes[1]) == [f'asn:{MEGAFON}:hy2',
+                                                     f'asn:{MEGAFON}:hy2t']
+
+    def test_an_unreadable_alert_state_freezes_r3(self, monitor, db, caplog):
+        seed_dpi(db, now=T0, asn=MEGAFON, hsfail=60, conn=0)
+        with db._connect() as c:
+            c.execute("DROP TABLE alert_state"); c.commit()
+        with caplog.at_level(logging.WARNING, logger='bot.services.dpi_monitor'):
+            changes = ticks(monitor, 2, before=lambda now: probe_world(db, now))
+        assert changes == [[], []]
+        said = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert any('alert_state unreadable' in m and 'reality_asn' in m for m in said)
+
+    def test_the_watchdogs_own_alert_freezes_it(self, monitor, db):
+        """The contract between the two: AlertManager opens the key when
+        the healthcheck finds the queue, and the monitor reads that row."""
+        from .test_adviser import _manager, _report
+        now = datetime.utcnow()
+        seed_dpi(db, now=now, asn=MEGAFON, hsfail=60, conn=0)
+        _report(db, findings=[{'key': 'entry_tunnel:queue', 'severity': 'critical',
+                               'layer': 'b', 'title': 'очередь на :19441', 'next': 'ss'}])
+        _manager(db).run_once()
+        probe_world(db, now)
+        assert monitor.run_once(now=now) == []
+        assert monitor.run_once(now=now + STEP) == []
+        assert 'reality_asn' in monitor.collect_signals(now + 2 * STEP)['unknown']
 
 
 # ---- R4: hy2 reconnect storm per user → ASN ---------------------------------

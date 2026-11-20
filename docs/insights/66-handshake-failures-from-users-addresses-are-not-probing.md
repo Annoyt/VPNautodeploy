@@ -49,7 +49,15 @@
   - no agent turn starts (`Alert.agent=False`, new; `_fire` honours it for every family).
   - `check_healthcheck` runs earlier in the same tick, so a jam it finds now already counts.
   - `reach:exit` does not count as a jam: it can stay open for days while exit's direct address is blocked (§61).
-- **Unchanged.** DPIMonitor's R3 still counts the total. It asks whether a network's users can use Reality, and their failures are its signal: on 2026-09-01 it saw 879 failures and 0 connections. The heatmap totals and `inbound_drop` are the same too.
+  - The reader is `bot/services/tunnel_jam.py` (`jams(conn, since_ts)`). The alerts and DPIMonitor share it. It filters by prefix in Python, because in SQL `LIKE` the `_` of `entry_tunnel` is a wildcard.
+- **DPIMonitor's R3 still counts the total.** It asks whether a network's users can use Reality, and their failures are its signal: on 2026-09-01 it saw 879 failures and 0 connections.
+- **R3 waits out our tunnel's jam.** While a `healthcheck:entry_tunnel:*` alert is open, or closed within R3's 2-hour window, R3 gives no verdict:
+  - its signal is emptied, and the rule is marked UNKNOWN, as when its collector fails;
+  - a Reality demotion it made earlier is not restored, a bad streak it was building is kept, and nothing new is demoted;
+  - every other rule runs (R4, the probes, R6);
+  - an unreadable `alert_state` freezes R3 too, with a WARNING. The log line names the open key.
+  - Why: during the 2026-11-19/20 jam, R3 could move Reality to the end per network for our path's fault. That would push users onto stls and hy2, which the same jam had killed outright.
+- **Unchanged:** the heatmap totals and `inbound_drop`.
 - **The other readers:**
   - The daily DPI summary says «hsfail: N (у наших юзеров: U)». The `dpi_reports` snapshot and the agent's payload carry `hsfail_users`.
   - In `/api/admin/dpi_metrics`, each operator gains `hsfail_users`, `hsfail_unknown` and `hsfail_not_told`. The DPI tab adds «👤 у наших юзеров: N — не зонд».
@@ -79,4 +87,6 @@
   - `TestUsersAddressesInARun`: the state file, a failed POST, a broken memory.
 - `tests/integration/test_hsfail_users.py` pins the 2026-11-20 shape end to end: the real reporter on log files, the real handler, real sqlite, the real checks and `AlertManager`. It also covers the ingest, baselines, titles, the jam, the dashboard, R3, the daily summary and the migration.
 - `tests/integration/test_sub_own_address.py`: an accepted address is no longer in `probe_ips_json`.
-- 27 mutants were killed and restored by reverse text replacement (§28).
+- `tests/integration/test_dpi_monitor.py::TestTunnelJam`: R3 during a jam on simulated ticks. It covers no demotion, a demotion kept until two hours after the jam closed and restored six runs later, a pending streak, the window edges, other keys, R4 still running, an unreadable `alert_state`, and the alert AlertManager opens itself.
+- `test_hsfail_users.py::TestTheJam::test_the_watchdogs_keys_are_the_jams`: the healthcheck's `TUNNEL_KEYS` still carry the prefix the reader looks for.
+- 27 + 12 mutants were killed and restored by reverse text replacement (§28). One of them, "local time instead of UTC", is killed only on a machine whose clock is not UTC.

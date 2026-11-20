@@ -161,7 +161,7 @@ setting**. `bot/services/dpi_monitor.py` runs inside the bot every 10 min and mo
 order (it never removes one) when the data says it is failing: probes DARK/DEGRADED → globally; the users' own
 FlClash clients (since 2026-10-09: ≥3 clients of one ASN get through other protocols but not this one for 2 h,
 none get through it — `client_probe` rows `p-<proto>`), a Reality handshake-fail storm in `dpi_metrics` for one
-ASN, a hy2-auth reconnect storm from a user of that ASN, or ≥2 "не работает" reports from one ASN → for that ASN
+ASN (not while our exit → entry tunnel is jammed: then users' failures are ours, §66), a hy2-auth reconnect storm from a user of that ASN, or ≥2 "не работает" reports from one ASN → for that ASN
 only. It restores the protocol by itself after ~1 h of clean signals. A `client_dark` demotion also writes once a
 day to that ASN's users who were using the protocol ("перестал работать … обновите профиль / /sos" —
 `admin_actions` action `reverse_sos`, one line in the AI topic). So, BEFORE you "fix" an order that looks wrong:

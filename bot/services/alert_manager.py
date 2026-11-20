@@ -1600,9 +1600,6 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
     # addresses, retrying through the jammed exit → entry tunnel (§64).
     DPI_HSFAIL_FLOOR_H = 5      # below this many an hour: never an alert
     DPI_ADDR_TOP = 10           # a row keeps its top-10 addresses
-    # Our own path to exit, jammed (§64): its alerts open while users'
-    # clients retry through it and fail their handshakes.
-    TUNNEL_JAM_PREFIX = 'healthcheck:entry_tunnel:'
 
     def _read_dpi_buckets():
         """Return list of dicts for last DPI_WINDOW_H, plus baseline lookup."""
@@ -1702,26 +1699,19 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
         return f"{n}{'+' if floor else ''} {kind} {noun}"
 
     def _tunnel_jams(since_ts: float) -> list:
-        """The ``healthcheck:entry_tunnel:*`` alerts (§64) open now or closed
-        after ``since_ts``: ``[(key, opened_ts, closed_ts, still_open)]``,
-        oldest first. The healthcheck check runs earlier in the same tick, so
-        a jam it finds now is already here. [] on a read error: the DPI
-        alerts then read as they would without a jam."""
+        """Our own tunnel's jams that met the window from ``since_ts``
+        (``bot/services/tunnel_jam.py``). The healthcheck check runs earlier
+        in the same tick, so a jam it finds now is already here. [] on a
+        read error: the DPI alerts then read as they would without a jam."""
         try:
             db_path = getattr(config, 'DB_PATH', None) or '/var/lib/vpn-bot/bot.db'
             import sqlite3
+            from bot.services import tunnel_jam
             with sqlite3.connect(db_path) as conn:
-                rows = conn.execute(
-                    "SELECT key, open, opened_ts, closed_ts FROM alert_state "
-                    "WHERE open = 1 OR closed_ts >= ? ORDER BY opened_ts, key",
-                    (since_ts,),
-                ).fetchall()
+                return tunnel_jam.jams(conn, since_ts)
         except Exception as e:
             logger.debug(f"dpi-alert tunnel read failed: {e}")
             return []
-        return [(k, float(opened or 0), float(closed or 0), bool(is_open))
-                for k, is_open, opened, closed in rows
-                if str(k).startswith(TUNNEL_JAM_PREFIX)]
 
     def _jam_note(jams: list) -> str:
         """The detail line on a DPI handshake alert whose window met a jam."""

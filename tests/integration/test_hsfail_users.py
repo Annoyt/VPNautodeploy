@@ -445,6 +445,15 @@ class TestTheJam:
         _jam(db, key='healthcheck:entry_tunnel:fd')
         assert 'healthcheck:entry_tunnel:fd' in users(db)['dpi_hsfail_users:RU:AS31133'].detail
 
+    def test_the_watchdogs_keys_are_the_jams(self):
+        """The healthcheck names its tunnel findings; the bot prefixes them
+        with 'healthcheck:'. A renamed finding must not quietly turn the
+        DPI alerts' note and R3's freeze off."""
+        from bot.services.tunnel_jam import PREFIX
+        from .test_entry_tunnel_watch import _hc
+        keys = _hc().TUNNEL_KEYS
+        assert keys and all(f'healthcheck:{k}'.startswith(PREFIX) for k in keys)
+
 
 # ---------------------------------------------------------------------------
 # AlertManager: dashboard only, and no agent turn during a jam
