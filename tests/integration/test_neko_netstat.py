@@ -223,6 +223,15 @@ class TestAccepted:
         assert [r[0] for r in rows] == [1795190400]
         assert len(netstat.COLUMNS) == len(rows[0]) + 1     # all but the id
 
+    def test_the_window_edges_on_a_fixed_clock(self):
+        # the server's own clock decides; here it is fixed, on a 10-minute
+        # boundary: 14 days back exactly is kept, an hour ahead exactly is
+        # kept (3601 s floors to it), anything past either edge is not
+        now = 1800000000
+        stamps = [now - 14 * DAY - 1, now - 14 * DAY, now + 3600, now + 3601, now + 4200]
+        rows = netstat.validate(body(*[event(ts=t) for t in stamps]), now)
+        assert [r[0] for r in rows] == [now - 14 * DAY, now + 3600, now + 3600]
+
     @pytest.mark.asyncio
     async def test_events_outside_the_14_days_are_valid_but_not_kept(self, srv, db):
         now = bucket()
