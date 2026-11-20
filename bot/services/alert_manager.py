@@ -92,6 +92,10 @@ class Alert:
     # while the key stays open. Its recovery still closes it (and is posted
     # for RECOVERY_PREFIXES), so the next incident pages again.
     repeat: bool = True
+    # False = no agent follow-up for this fire, whatever its family: the
+    # check already knows the cause (a DPI alert during our own tunnel's
+    # jam, §66), and a turn would only re-read the numbers as probing.
+    agent: bool = True
 
 
 @dataclass
@@ -119,9 +123,11 @@ class _Tracker:
 # DPI/handshake/probing signals fire constantly — sending each one to
 # TOPIC_AI spams the chat. The dashboard "Alerts" tab is the authoritative
 # place to review them; daily DPI summary still goes to Telegram.
-DASHBOARD_ONLY_PREFIXES = ('dpi_short:', 'dpi_hsfail:', 'dpi_rst:')
+DASHBOARD_ONLY_PREFIXES = ('dpi_short:', 'dpi_hsfail:', 'dpi_hsfail_users:', 'dpi_rst:')
 
 # Alert families that get an agent follow-up (see module docstring).
+# dpi_hsfail_users: is not one (§66): the failures are our own users' on a
+# bad path, and the probes, the healthcheck and protocol_down look at that.
 DPI_AGENT_PREFIXES = ('dpi_short:', 'dpi_hsfail:', 'dpi_rst:')
 PROTOCOL_AGENT_PREFIX = 'protocol_down:'
 # Users' connections on an exit inbound fell away (B2): the same diagnosis
@@ -509,7 +515,9 @@ class AlertManager:
         # and return at once, and both swallow every failure — an agent
         # outage must never take the pager down with it, and the alert
         # row above is already persisted whatever happens here.
-        if alert.key.startswith(DPI_AGENT_PREFIXES):
+        if not alert.agent:
+            logger.info(f"agent follow-up not asked for {alert.key}")
+        elif alert.key.startswith(DPI_AGENT_PREFIXES):
             self._kick_dpi_agent(alert, alert_db_id)
         elif (alert.key.startswith(PROTOCOL_FAMILY_PREFIXES)
               and alert.key not in AGENT_SKIP_KEYS):
@@ -1581,6 +1589,21 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
     DPI_HSFAIL_BASELINE_X = 5   # 5× baseline = warn
     DPI_RST_SPIKE_PCT = 200     # +200% above baseline = warn
 
+    # Handshake failures in three parts (AGENTS.md §66). The exit reporter
+    # tells a REALITY reject from an address that also logged in as one of
+    # our users ('hs_users': that user's client on a bad path) from the
+    # rest ('unknown': nobody of ours logged in from there — the probe
+    # candidates). Rows it did not tell apart ('hs_not_told': an older
+    # reporter, the hy2 rollup) count as before, with the probe
+    # candidates. 2026-11-19/20: ~1,850 Reality failures paged as "Russian
+    # ISPs are probing Reality"; MegaFon's 1,455 came from 2 users'
+    # addresses, retrying through the jammed exit → entry tunnel (§64).
+    DPI_HSFAIL_FLOOR_H = 5      # below this many an hour: never an alert
+    DPI_ADDR_TOP = 10           # a row keeps its top-10 addresses
+    # Our own path to exit, jammed (§64): its alerts open while users'
+    # clients retry through it and fail their handshakes.
+    TUNNEL_JAM_PREFIX = 'healthcheck:entry_tunnel:'
+
     def _read_dpi_buckets():
         """Return list of dicts for last DPI_WINDOW_H, plus baseline lookup."""
         try:
@@ -1593,14 +1616,18 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
                 cur_rows = conn.execute(
                     "SELECT country, asn, MAX(as_org), "
                     "SUM(conn_count), SUM(short_session_count), "
-                    "SUM(handshake_fail_count), SUM(rst_count) "
+                    "SUM(handshake_fail_count), SUM(rst_count), "
+                    "SUM(COALESCE(hsfail_users, 0)), "
+                    "SUM(CASE WHEN hsfail_users IS NULL "
+                    "    THEN handshake_fail_count ELSE 0 END) "
                     "FROM dpi_metrics WHERE snapshot_at >= ? "
                     "GROUP BY country, asn", (cutoff,),
                 ).fetchall()
                 bl_rows = conn.execute(
                     "SELECT country, asn, "
                     "SUM(conn_count), SUM(short_session_count), "
-                    "SUM(handshake_fail_count), SUM(rst_count) "
+                    "SUM(handshake_fail_count), SUM(rst_count), "
+                    "SUM(COALESCE(hsfail_users, 0)) "
                     "FROM dpi_metrics WHERE snapshot_at >= ? "
                     "GROUP BY country, asn", (bl_cutoff,),
                 ).fetchall()
@@ -1612,7 +1639,9 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
             (r[0], r[1]): {
                 'conn_h':   (r[2] or 0) / bl_hours,
                 'short_h':  (r[3] or 0) / bl_hours,
-                'hsfail_h': (r[4] or 0) / bl_hours,
+                # the probe candidates: every failure not known as a user's
+                'hsfail_h': ((r[4] or 0) - (r[6] or 0)) / bl_hours,
+                'hsfail_users_h': (r[6] or 0) / bl_hours,
                 'rst_h':    (r[5] or 0) / bl_hours,
             }
             for r in bl_rows
@@ -1624,10 +1653,92 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
                 'short_session_count': r[4] or 0,
                 'hs_fail_count': r[5] or 0,
                 'rst_count': r[6] or 0,
+                'hs_users': r[7] or 0,
+                'hs_not_told': r[8] or 0,
             }
             for r in cur_rows
         ]
         return cur, baseline
+
+    def _read_dpi_addresses():
+        """Per (country, asn), the addresses behind the last DPI_WINDOW_H's
+        handshake failures: ``{'unknown': set, 'users': set, 'unknown_floor':
+        bool, 'users_floor': bool}``. A ``*_floor`` is set when some row held
+        its DPI_ADDR_TOP limit, so the count is a floor. {} on a read error:
+        the titles then go without the count."""
+        try:
+            db_path = getattr(config, 'DB_PATH', None) or '/var/lib/vpn-bot/bot.db'
+            import json as _json
+            import sqlite3
+            from datetime import datetime, timedelta
+            cutoff = (datetime.utcnow() - timedelta(hours=DPI_WINDOW_H)).isoformat()
+            with sqlite3.connect(db_path) as conn:
+                rows = conn.execute(
+                    "SELECT country, asn, probe_ips_json, user_ips_json "
+                    "FROM dpi_metrics WHERE snapshot_at >= ? "
+                    "AND handshake_fail_count > 0", (cutoff,),
+                ).fetchall()
+        except Exception as e:
+            logger.debug(f"dpi-alert address read failed: {e}")
+            return {}
+        out: dict = {}
+        for cc, asn, probe_raw, users_raw in rows:
+            entry = out.setdefault((cc, asn), {'unknown': set(), 'users': set(),
+                                               'unknown_floor': False, 'users_floor': False})
+            for part, raw in (('unknown', probe_raw), ('users', users_raw)):
+                try:
+                    pairs = _json.loads(raw) if raw else []
+                    ips = {str(p[0]) for p in pairs if isinstance(p, (list, tuple)) and p}
+                except (TypeError, ValueError):
+                    continue
+                entry[part] |= ips
+                if len(pairs) >= DPI_ADDR_TOP:
+                    entry[f'{part}_floor'] = True
+        return out
+
+    def _addresses(n: int, floor: bool, kind: str) -> str:
+        """'3 unknown addresses', '10+ user addresses', '1 user address'."""
+        noun = 'address' if n == 1 and not floor else 'addresses'
+        return f"{n}{'+' if floor else ''} {kind} {noun}"
+
+    def _tunnel_jams(since_ts: float) -> list:
+        """The ``healthcheck:entry_tunnel:*`` alerts (§64) open now or closed
+        after ``since_ts``: ``[(key, opened_ts, closed_ts, still_open)]``,
+        oldest first. The healthcheck check runs earlier in the same tick, so
+        a jam it finds now is already here. [] on a read error: the DPI
+        alerts then read as they would without a jam."""
+        try:
+            db_path = getattr(config, 'DB_PATH', None) or '/var/lib/vpn-bot/bot.db'
+            import sqlite3
+            with sqlite3.connect(db_path) as conn:
+                rows = conn.execute(
+                    "SELECT key, open, opened_ts, closed_ts FROM alert_state "
+                    "WHERE open = 1 OR closed_ts >= ? ORDER BY opened_ts, key",
+                    (since_ts,),
+                ).fetchall()
+        except Exception as e:
+            logger.debug(f"dpi-alert tunnel read failed: {e}")
+            return []
+        return [(k, float(opened or 0), float(closed or 0), bool(is_open))
+                for k, is_open, opened, closed in rows
+                if str(k).startswith(TUNNEL_JAM_PREFIX)]
+
+    def _jam_note(jams: list) -> str:
+        """The detail line on a DPI handshake alert whose window met a jam."""
+        from datetime import datetime, timezone
+
+        def hhmm(ts: float) -> str:
+            return datetime.fromtimestamp(ts, timezone.utc).strftime('%H:%M') if ts else '?'
+
+        parts = []
+        for key, opened, closed, still_open in jams:
+            span = f"с {hhmm(opened)} UTC" + ("" if still_open else f" до {hhmm(closed)}")
+            parts.append(f"{key} ({span})")
+        return (
+            "Туннель exit → entry был забит в этом окне: " + ", ".join(parts) + ". "
+            "Клиенты повторяют рукопожатия через забитый туннель и не успевают их "
+            "закончить — это сбои нашего пути, а не оператора. Агент не запускается (§64, §66)."
+        )
 
     def check_dpi_short_sessions():
         """Per-(country, ASN): too many short sessions in last hour."""
@@ -1660,9 +1771,26 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
             ))
         return ("dpi_short:", alerts)
 
+    def _hsfail_ratio(fails_h: float, base: float) -> float:
+        """The window's rate against the 7-day one; no baseline at all is
+        infinitely above it once the rate is past 20/h, else not at all."""
+        if base <= 0:
+            return float('inf') if fails_h > 20 else 0
+        return fails_h / base
+
+    def _jam_window():
+        """The tunnel jams that met the alert window (``_tunnel_jams``)."""
+        return _tunnel_jams(time.time() - DPI_WINDOW_H * 3600)
+
     def check_dpi_handshake_spike():
-        """Per-(country, ASN): handshake fails > Nx baseline."""
+        """Per-(country, ASN): handshake failures NOT known as a user's > Nx
+        their baseline (§66). The title says which addresses it counted:
+        unknown ones (nobody of ours logged in from them), or, while the
+        window holds rows the exit reporter did not tell apart, all of them.
+        Failures from users' addresses are ``check_dpi_handshake_users``."""
         cur, bl = _read_dpi_buckets()
+        addrs = None
+        jams = None
         alerts = []
         for b in cur:
             if b['country'] == '*GLOBAL*':
@@ -1670,34 +1798,103 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
             if not (b['country'] or '').strip():
                 # Geoip-less bucket = scanners; see check_dpi_short_sessions.
                 continue
-            fails_h = b['hs_fail_count'] / DPI_WINDOW_H
+            probes = b['hs_fail_count'] - b['hs_users']
+            fails_h = probes / DPI_WINDOW_H
             base = (bl.get((b['country'], b['asn'])) or {}).get('hsfail_h', 0)
-            if fails_h < 5:
+            if fails_h < DPI_HSFAIL_FLOOR_H:
                 continue  # absolute floor — ignore tiny absolute counts
             if b['conn_count'] < 1 and fails_h < 30:
                 # Handshake fails with ZERO real connections in the
                 # bucket is a scanner poking the port, not DPI squeezing
                 # users. Only a massive burst is still worth a look.
                 continue
-            if base <= 0:
-                ratio = float('inf') if fails_h > 20 else 0
-            else:
-                ratio = fails_h / base
+            ratio = _hsfail_ratio(fails_h, base)
             if ratio < DPI_HSFAIL_BASELINE_X:
                 continue
+            if addrs is None:
+                addrs, jams = _read_dpi_addresses(), _jam_window()
             key = f"dpi_hsfail:{b['country']}:{b['asn'] or '-'}"
             severity = 'critical' if ratio > 20 else 'warn'
             r_disp = '∞' if ratio == float('inf') else f"{ratio:.1f}"
+            where = f"{b['country']}/{b['asn']}"
+            seen = addrs.get((b['country'], b['asn'])) or {}
+            if b['hs_not_told']:
+                title = (f"Probing? {where} hsfail {int(fails_h)}/h ({r_disp}× baseline), "
+                         f"users not told apart")
+                counted = (f"{probes} сбоев рукопожатия REALITY за час; "
+                           f"{b['hs_not_told']} из них репортёр exit не разделил "
+                           f"на наших пользователей и незнакомых (старый "
+                           f"exit_dpi_reporter.py?), так что пользователи могут быть среди них.")
+            else:
+                many = _addresses(len(seen.get('unknown') or ()),
+                                  seen.get('unknown_floor', False), 'unknown')
+                title = (f"Probing? {where} hsfail {int(fails_h)}/h from {many} "
+                         f"({r_disp}× baseline)")
+                counted = (f"{probes} сбоев рукопожатия REALITY за час с адресов, "
+                           f"с которых наши пользователи не входили: зонд или сканер.")
+            mine = (f" Ещё {b['hs_users']} — с адресов наших пользователей (у них есть "
+                    f"и удачные сессии), в счёт не идут: dpi_hsfail_users."
+                    if b['hs_users'] else "")
+            detail = (f"{b['as_org']} · {counted}{mine} "
+                      f"IP — /api/admin/dpi_metrics.")
+            if jams:
+                title += " — during an entry tunnel jam"
+                detail += " " + _jam_note(jams)
+                severity = 'warn'
             alerts.append(Alert(
                 key=key, severity=severity, min_cycles=2,
-                title=f"Probing? {b['country']}/{b['asn']} hsfail {int(fails_h)}/h ({r_disp}× baseline)",
-                detail=(
-                    f"{b['as_org']} · {b['hs_fail_count']} REALITY handshake "
-                    f"failures за последний час. Active probing или сканер. "
-                    f"Загляни в /api/admin/dpi_metrics для IP."
-                ),
+                title=title, detail=detail, agent=not jams,
             ))
         return ("dpi_hsfail:", alerts)
+
+    def check_dpi_handshake_users():
+        """Per-(country, ASN): handshake failures from OUR users' addresses
+        (they logged in from there too, §66) > Nx their baseline. Not
+        probing: a user's client failing on a bad path — our tunnel or entry
+        jammed (§64), or the operator cutting handshakes. Dashboard only, no
+        agent turn; DPIMonitor's R3 acts on the same failures per ASN. The
+        tunnel bucket and the geo-less one never count (shared addresses)."""
+        cur, bl = _read_dpi_buckets()
+        addrs = None
+        jams = None
+        alerts = []
+        for b in cur:
+            cc = (b['country'] or '').strip()
+            if not cc or cc.startswith('*'):
+                continue
+            fails_h = b['hs_users'] / DPI_WINDOW_H
+            if fails_h < DPI_HSFAIL_FLOOR_H:
+                continue
+            base = (bl.get((b['country'], b['asn'])) or {}).get('hsfail_users_h', 0)
+            ratio = _hsfail_ratio(fails_h, base)
+            if ratio < DPI_HSFAIL_BASELINE_X:
+                continue
+            if addrs is None:
+                addrs, jams = _read_dpi_addresses(), _jam_window()
+            seen = addrs.get((b['country'], b['asn'])) or {}
+            many = _addresses(len(seen.get('users') or ()), seen.get('users_floor', False), 'user')
+            r_disp = '∞' if ratio == float('inf') else f"{ratio:.1f}"
+            title = (f"Users' handshakes fail, not probing: {b['country']}/{b['asn']} "
+                     f"hsfail {int(fails_h)}/h from {many} ({r_disp}× baseline)")
+            detail = (
+                f"{b['as_org']} · {b['hs_users']} сбоев рукопожатия REALITY за час с "
+                f"адресов, с которых наши пользователи и входят (за последние сутки у "
+                f"каждого есть удачные сессии). Это не зондирование: клиенты "
+                f"переподключаются по плохому пути — туннель exit → entry или entry "
+                f"(§64), либо оператор режет рукопожатия. Сравни с /protocols и "
+                f"отчётом protocol_healthcheck."
+            )
+            severity = 'critical' if ratio > 20 else 'warn'
+            if jams:
+                title += " — during an entry tunnel jam"
+                detail += " " + _jam_note(jams)
+                severity = 'warn'
+            alerts.append(Alert(
+                key=f"dpi_hsfail_users:{b['country']}:{b['asn'] or '-'}",
+                severity=severity, min_cycles=2, title=title, detail=detail,
+                agent=False,
+            ))
+        return ("dpi_hsfail_users:", alerts)
 
     def check_dpi_rst_spike():
         """Host-wide TCP abort delta significantly above baseline."""
@@ -2286,7 +2483,8 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
         check_cpu, check_ram, check_disk,
         check_opencode, check_xray_reload_sidecar, check_xui_inbounds,
         check_protocol_probe_down, check_inbound_drop, check_healthcheck,
-        check_dpi_short_sessions, check_dpi_handshake_spike, check_dpi_rst_spike,
+        check_dpi_short_sessions, check_dpi_handshake_spike, check_dpi_handshake_users,
+        check_dpi_rst_spike,
         check_lockdown_active, check_backup, check_exit_reach,
     ])
     return checks
