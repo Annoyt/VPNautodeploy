@@ -13,6 +13,10 @@ logs. This oneshot (systemd timer, every 5 min):
   2. Aggregates accepted connections per inbound tag (with per-IP
      counts) and reject events per kind/reason (REALITY invalid
      connection, shadowsocks invalid request, httpupgrade failures).
+     A REALITY reject from an address that logged in as one of our
+     users within USER_ADDR_MEMORY_H is reported apart from the rest
+     (``origin``, AGENTS.md §66): that is a user's client failing a
+     handshake on a bad path, not a prober.
   3. POSTs the summary to the bot's /api/dpi/exit_report, which does
      the geoip bucketing and writes dpi_metrics rows.
 
@@ -33,6 +37,8 @@ Environment:
     XRAY_LOG_DIR      Log dir (default: the 3x-ui docker volume)
     STATE_PATH        Offset state file (default /var/lib/exit-dpi/state.json)
     MAX_CHUNK_BYTES   Per-run parse cap; larger backlogs skip to tail
+    USER_ADDR_MEMORY_H  How long an address that logged in as a user stays
+                      a user's address (default 24 h; kept in the state file)
 """
 
 import ipaddress
@@ -59,6 +65,36 @@ LOG_DIR = os.getenv(
 STATE_PATH = os.getenv("STATE_PATH", "/var/lib/exit-dpi/state.json")
 MAX_CHUNK_BYTES = int(os.getenv("MAX_CHUNK_BYTES", str(20 * 1024 * 1024)))
 TOP_IPS = 20
+
+
+def _env_hours(name: str, default: float) -> float:
+    try:
+        value = float(os.getenv(name, "") or default)
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+# ---- users' addresses (AGENTS.md §66) ---------------------------------------
+# 2026-11-19 14:33 → 11-20 07:42 UTC: ~1,850 REALITY handshake failures, most
+# of them from addresses that also had normal sessions in the same hours —
+# our own users' clients retrying through the jammed exit → entry tunnel
+# (§64). The bot's alert read them as "Russian ISPs are probing Reality".
+# An address that logged in as one of our users (an accepted line with a
+# user's email) is remembered for USER_ADDR_MEMORY_S; a REALITY reject from
+# it is reported with origin "user", every other reject with "unknown".
+# A mobile client fails from a new address before its first login there, so
+# the memory errs towards "unknown": that is the bot's probing count.
+USER_ADDR_MEMORY_S = _env_hours("USER_ADDR_MEMORY_H", 24) * 3600
+USER_ADDRS_MAX = 50000           # the newest kept: a bound on the state file
+# Rejects whose logged address is the client's own. REALITY gets it from the
+# PROXY header entry's haproxy sends; ss2022 and the httpupgrade inbound see
+# a front (entry's MASQUERADE, the tunnel's loopback, a Cloudflare edge)
+# that users and strangers share, so a login from it says nothing about the
+# connection that failed: those are always "unknown".
+ORIGIN_KINDS = ("reality",)
+ORIGIN_USER = "user"
+ORIGIN_UNKNOWN = "unknown"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -375,12 +411,82 @@ def pair_sessions(events: list, state: dict, now: float) -> list:
     return sessions[:HY_SESSIONS_MAX]
 
 
-def parse_rejects(lines) -> list:
-    """Aggregate reject/probe events per (kind, reason) with IP counts."""
+def addr_key(ip: str) -> str:
+    """The client an address stands for: an IPv4 address itself (an
+    IPv4-mapped IPv6 one too), an IPv6 address its /64 — a phone's privacy
+    address changes inside its /64 and is still the same subscriber.
+    Anything unparsable is its own key."""
+    raw = (ip or "").strip()
+    try:
+        addr = ipaddress.ip_address(raw.strip("[]"))
+    except ValueError:
+        return raw
+    if addr.version == 6 and addr.ipv4_mapped:
+        return str(addr.ipv4_mapped)
+    if addr.version == 6:
+        return str(ipaddress.ip_network(f"{addr}/64", strict=False))
+    return str(addr)
+
+
+def user_addresses(lines) -> set:
+    """Keys (``addr_key``) of the addresses that logged in as one of our
+    users in these lines: an accepted connection with a user's email. The
+    probe client, the panel's api polling and loopback are no users."""
+    found = set()
+    for line in lines:
+        m = ACCESS_RE.search(line)
+        if not m:
+            continue
+        ip, tag, email = m.group(1), m.group(2), m.group(3) or ""
+        if not email or tag == "api" or ip.startswith("127.") or email.startswith("probe"):
+            continue
+        found.add(addr_key(ip))
+    return found
+
+
+def remember_user_addresses(state: dict, lines, now: float) -> set:
+    """Fold this window's users' addresses into ``state['user_addrs']``
+    (``{addr_key: last login, epoch s}``) and return every key remembered.
+    A key older than USER_ADDR_MEMORY_S is forgotten; above USER_ADDRS_MAX
+    the oldest go. A malformed stored entry is dropped, never fatal."""
+    memory = {}
+    stored = state.get("user_addrs")
+    if isinstance(stored, dict):
+        for key, seen in stored.items():
+            try:
+                seen = float(seen)
+            except (TypeError, ValueError):
+                continue
+            if now - seen < USER_ADDR_MEMORY_S:
+                memory[str(key)] = seen
+    for key in user_addresses(lines):
+        memory[key] = now
+    if len(memory) > USER_ADDRS_MAX:
+        newest = sorted(memory.items(), key=lambda kv: -kv[1])[:USER_ADDRS_MAX]
+        memory = dict(newest)
+    state["user_addrs"] = memory
+    return set(memory)
+
+
+def parse_rejects(lines, user_addrs=None) -> list:
+    """Aggregate reject/probe events per (kind, reason) with IP counts.
+
+    With ``user_addrs`` (``addr_key``s, from ``remember_user_addresses``)
+    every entry also says where its connections came from, ``origin``: a
+    REALITY reject from a user's address is ``user``, every other reject
+    ``unknown`` (ORIGIN_KINDS says why only REALITY). A (kind, reason) seen
+    from both is two entries, each with its own count and top IPs: their
+    sum is what one entry used to say, so a bot that does not read
+    ``origin`` adds them up as before. Without ``user_addrs`` the entries
+    have no ``origin`` (the shape before §66)."""
     buckets: dict = {}
 
     def add(kind: str, reason: str, ip: str):
-        key = (kind, reason)
+        origin = None
+        if user_addrs is not None:
+            mine = kind in ORIGIN_KINDS and ip and addr_key(ip) in user_addrs
+            origin = ORIGIN_USER if mine else ORIGIN_UNKNOWN
+        key = (kind, reason, origin)
         b = buckets.setdefault(key, {"count": 0, "ips": {}})
         b["count"] += 1
         if ip:
@@ -405,8 +511,9 @@ def parse_rejects(lines) -> list:
             reason = WS_PEER_RE.sub("read tcp <peer>", reason)
             reason = re.sub(r"bad path: \S+", "bad path", reason)
             add("ws-upgrade", reason, peer.group(1) if peer else "")
-    return [
-        {
+    out = []
+    for (kind, reason, origin), b in buckets.items():
+        entry = {
             "kind": kind,
             "reason": reason,
             "count": b["count"],
@@ -414,8 +521,10 @@ def parse_rejects(lines) -> list:
                 sorted(b["ips"].items(), key=lambda kv: -kv[1])[:TOP_IPS]
             ),
         }
-        for (kind, reason), b in buckets.items()
-    ]
+        if origin is not None:
+            entry["origin"] = origin
+        out.append(entry)
+    return out
 
 
 def _is_loopback(host: str) -> bool:
@@ -494,14 +603,20 @@ def run_once() -> int:
     access_lines, access_off = read_new_lines(access_path, state, "access")
     error_lines, error_off = read_new_lines(error_path, state, "error")
 
+    # The users' addresses, the journal cursor and the open connects
+    # advance with the offsets, only once the bot took the report. Neither
+    # may cost the report itself: without the addresses the rejects go out
+    # in the old shape, which the bot counts as not told apart.
+    pending = json.loads(json.dumps(state))
+    try:
+        users = remember_user_addresses(pending, access_lines, time.time())
+    except Exception as e:
+        logger.warning(f"users' addresses: {e} — rejects not told apart this run")
+        users = None
     access = parse_access(access_lines)
     presence = parse_presence(access_lines)
     usage = parse_usage(access_lines)
-    rejects = parse_rejects(error_lines)
-    # The journal cursor and the open connects advance with the offsets,
-    # only once the bot took the report. The journal must never cost the
-    # report itself.
-    pending = json.loads(json.dumps(state))
+    rejects = parse_rejects(error_lines, users)
     try:
         hy2_sessions = pair_sessions(read_hysteria_events(pending), pending, time.time())
     except Exception as e:
@@ -524,11 +639,13 @@ def run_once() -> int:
                   "journal_cursor": pending.get("journal_cursor"),
                   "journal_cursor_ts": pending.get("journal_cursor_ts"),
                   "journal_read_ts": pending.get("journal_read_ts"),
-                  "hy2_open": pending.get("hy2_open", {})})
+                  "hy2_open": pending.get("hy2_open", {}),
+                  "user_addrs": pending.get("user_addrs", {})})
     _save_state(state)
+    from_users = sum(r["count"] for r in rejects if r.get("origin") == ORIGIN_USER)
     logger.info(
         f"reported {sum(a['conns'] for a in access)} conns / "
-        f"{sum(r['count'] for r in rejects)} rejects / "
+        f"{sum(r['count'] for r in rejects)} rejects ({from_users} from users' addresses) / "
         f"{len(presence)} present users / {len(hy2_sessions)} hy2 sessions"
     )
     return 0

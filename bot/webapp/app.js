@@ -1846,9 +1846,14 @@
                 const hsRatio = op.hs_baseline_ratio;
                 const hsHint = hsRatio !== null && hsRatio !== undefined
                     ? ` (${hsRatio}× baseline)` : '';
+                // §66: failures from our users' own addresses (they log in
+                // from there too) are a bad path, not probing.
+                const usersFails = op.hsfail_users > 0
+                    ? `<div>👤 у наших юзеров: ${op.hsfail_users} — не зонд</div>` : '';
                 const detailHtml = (op.handshake_fail_count > 0 || probes)
                     ? `<div class="dpi-op-detail">
                           ${probes ? `<div>🎯 probes: ${probes}</div>` : ''}
+                          ${usersFails}
                           ${reasons ? `<div>📋 ${reasons}</div>` : ''}
                        </div>` : '';
                 return `<div class="dpi-op">

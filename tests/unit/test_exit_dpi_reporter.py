@@ -660,3 +660,187 @@ class TestHopTls:
         assert reporter._ssl_context() is sentinel
         monkeypatch.setattr(reporter, 'BOT_URL', 'http://127.0.0.1:8080')
         assert reporter._ssl_context() is None
+
+
+# ---- users' addresses (AGENTS.md §66) ---------------------------------------
+# Documentation addresses only (RFC 5737 / RFC 3849): never a real client's.
+USER_A = '198.51.100.23'
+USER_B = '198.51.100.57'
+STRANGER = '203.0.113.99'
+
+
+def _login(ip, email='user_a_1@nekovo.ru', tag='inbound-443', port=41000):
+    return (f"2026/11/19 21:04:10.000000 from {ip}:{port} accepted "
+            f"tcp:www.google.com:443 [{tag} >> direct] email: {email}")
+
+
+def _hs_fail(ip, port=41234, reason='handshake did not complete successfully'):
+    return (f"2026/11/19 21:04:11.123456 [Info] transport/internet/tcp: REALITY: "
+            f"processed invalid connection from {ip}:{port}: {reason}")
+
+
+class TestUsersAddresses:
+    """A REALITY reject from an address that also logged in as one of our
+    users is that user's client on a bad path, not a prober. 2026-11-19/20:
+    MegaFon's 1,455 failures came from 2 users' addresses retrying through
+    the jammed exit → entry tunnel, and paged as "probing"."""
+
+    def test_an_address_stands_for_its_client(self):
+        assert reporter.addr_key(USER_A) == USER_A
+        assert reporter.addr_key('[2001:db8:1:2::5]') == '2001:db8:1:2::/64'
+        # a phone's privacy address changes inside its /64: the same client
+        assert reporter.addr_key('2001:db8:1:2:aaaa::9') == reporter.addr_key('[2001:db8:1:2::5]')
+        assert reporter.addr_key('::ffff:198.51.100.23') == USER_A
+        assert reporter.addr_key('not-an-ip') == 'not-an-ip'
+
+    def test_only_a_users_login_makes_a_users_address(self):
+        lines = [
+            _login(USER_A),
+            _login(USER_B, email='probe_monitor@nekovo.ru'),          # our probe client
+            "2026/11/19 21:04:12.000000 from 127.0.0.1:38850 accepted "
+            "tcp:127.0.0.1:62789 [api -> api]",                         # the panel's polling
+            _login('127.0.0.1', email='user_x@nekovo.ru'),             # loopback
+            f"2026/11/19 21:04:13.000000 from {STRANGER}:1 accepted "
+            f"tcp:example.com:443 [inbound-443 >> direct]",             # no email
+        ]
+        assert reporter.user_addresses(lines) == {USER_A}
+
+    def test_the_memory_keeps_a_day_and_forgets_after(self, monkeypatch):
+        monkeypatch.setattr(reporter, 'USER_ADDR_MEMORY_S', 24 * 3600)
+        state = {}
+        assert reporter.remember_user_addresses(state, [_login(USER_A)], now=1000.0) == {USER_A}
+        # a run with no login from it: still a user's address 23 h later
+        assert reporter.remember_user_addresses(state, [], now=1000.0 + 23 * 3600) == {USER_A}
+        assert state['user_addrs'] == {USER_A: 1000.0}
+        # a day without a login: forgotten
+        assert reporter.remember_user_addresses(state, [], now=1000.0 + 24 * 3600) == set()
+        assert state['user_addrs'] == {}
+
+    def test_a_new_login_renews_the_address(self, monkeypatch):
+        monkeypatch.setattr(reporter, 'USER_ADDR_MEMORY_S', 3600)
+        state = {'user_addrs': {USER_A: 0.0}}
+        reporter.remember_user_addresses(state, [_login(USER_A)], now=3000.0)
+        assert reporter.remember_user_addresses(state, [], now=6000.0) == {USER_A}
+
+    def test_the_memory_is_bounded_newest_first(self, monkeypatch):
+        monkeypatch.setattr(reporter, 'USER_ADDRS_MAX', 2)
+        state = {'user_addrs': {'198.51.100.1': 10.0, '198.51.100.2': 20.0}}
+        got = reporter.remember_user_addresses(state, [_login(USER_A)], now=30.0)
+        assert got == {'198.51.100.2', USER_A}
+
+    @pytest.mark.parametrize('stored', [None, [], 'x', {USER_A: 'yesterday', USER_B: None}])
+    def test_a_broken_stored_memory_is_dropped(self, stored):
+        state = {'user_addrs': stored}
+        assert reporter.remember_user_addresses(state, [], now=50.0) == set()
+        assert state['user_addrs'] == {}
+
+    def test_rejects_are_told_apart_by_origin(self):
+        lines = [_hs_fail(USER_A)] * 5 + [_hs_fail(STRANGER)] * 2
+        out = {(r['reason'], r.get('origin')): r
+               for r in reporter.parse_rejects(lines, {USER_A})}
+        reason = 'handshake did not complete successfully'
+        assert out[(reason, 'user')]['count'] == 5
+        assert out[(reason, 'user')]['ips'] == {USER_A: 5}
+        assert out[(reason, 'unknown')]['count'] == 2
+        assert out[(reason, 'unknown')]['ips'] == {STRANGER: 2}
+        # an old bot adds the two entries up: the total it always got
+        assert sum(r['count'] for r in out.values()) == 7
+
+    def test_an_ipv6_client_is_matched_by_its_64(self):
+        login = _login('[2001:db8:1:2::5]')
+        users = reporter.user_addresses([login])
+        (entry,) = reporter.parse_rejects([_hs_fail('[2001:db8:1:2:aaaa::9]')], users)
+        assert entry['origin'] == 'user'
+
+    def test_only_reality_names_the_clients_own_address(self):
+        # ss2022 and the ws upgrade see a front (entry, the tunnel, a CF
+        # edge) that users and strangers share: never a user's failure
+        lines = [
+            "2026/11/19 21:29:01.113771 [Info] [3478817167] app/proxyman/inbound: "
+            f"connection ends > shadowsocks: serve TCP from {USER_A}:52756: invalid request",
+            "2026/11/19 21:36:26.623339 [Info] transport/internet/httpupgrade: "
+            f"failed to handle request > read tcp 172.20.0.2:2053->{USER_A}:44204: "
+            "read: connection reset by peer",
+        ]
+        got = reporter.parse_rejects(lines, {USER_A})
+        assert sorted(r['kind'] for r in got) == ['ss2022', 'ws-upgrade']
+        assert {r['origin'] for r in got} == {'unknown'}
+
+    def test_without_addresses_the_old_shape(self):
+        got = reporter.parse_rejects([_hs_fail(USER_A)])
+        assert got == [{'kind': 'reality', 'reason': 'handshake did not complete successfully',
+                        'count': 1, 'ips': {USER_A: 1}}]
+
+
+class TestUsersAddressesInARun:
+    """run_once on log files: the memory rides the state file and advances
+    only with the offsets, like the journal cursor."""
+
+    def _logs(self, tmp_path, monkeypatch):
+        logs = tmp_path / 'logs'
+        logs.mkdir()
+        (logs / 'access.log').write_text('')
+        (logs / 'error.log').write_text('')
+        monkeypatch.setattr(reporter, 'LOG_DIR', str(logs))
+        monkeypatch.setattr(reporter, 'STATE_PATH', str(tmp_path / 'state.json'))
+        monkeypatch.setattr(reporter, 'TOKEN', 'sekret')
+        monkeypatch.setattr(reporter, 'read_hysteria_events', lambda state: [])
+        return logs
+
+    def _append(self, path, lines):
+        with open(path, 'a') as f:
+            f.write(''.join(line + '\n' for line in lines))
+
+    def test_the_2026_11_20_shape(self, tmp_path, monkeypatch):
+        """Two users log in now and then and fail hundreds of handshakes in
+        between (the jammed tunnel); a stranger fails a few. The failures
+        reach the bot apart: users' and unknown."""
+        logs = self._logs(tmp_path, monkeypatch)
+        sent = []
+        monkeypatch.setattr(reporter, 'post_report', lambda p: sent.append(p) or True)
+        assert reporter.run_once() == 0                      # the baseline run
+        self._append(logs / 'access.log', [_login(USER_A), _login(USER_B, port=2)])
+        assert reporter.run_once() == 0                      # they logged in
+        # the next window: no login at all, only failures
+        self._append(logs / 'error.log',
+                     [_hs_fail(USER_A)] * 300 + [_hs_fail(USER_B)] * 200
+                     + [_hs_fail(STRANGER)] * 9)
+        assert reporter.run_once() == 0
+        by_origin = {r['origin']: r for r in sent[-1]['rejects']}
+        assert by_origin['user']['count'] == 500
+        assert by_origin['user']['ips'] == {USER_A: 300, USER_B: 200}
+        assert by_origin['unknown']['count'] == 9
+        assert by_origin['unknown']['ips'] == {STRANGER: 9}
+        saved = json.loads((tmp_path / 'state.json').read_text())
+        assert set(saved['user_addrs']) == {USER_A, USER_B}
+
+    def test_a_failed_post_does_not_advance_the_memory(self, tmp_path, monkeypatch):
+        logs = self._logs(tmp_path, monkeypatch)
+        monkeypatch.setattr(reporter, 'post_report', lambda p: True)
+        assert reporter.run_once() == 0
+        self._append(logs / 'access.log', [_login(USER_A)])
+        monkeypatch.setattr(reporter, 'post_report', lambda p: False)
+        assert reporter.run_once() == 1
+        saved = json.loads((tmp_path / 'state.json').read_text())
+        assert saved.get('user_addrs', {}) == {}
+        # the retry re-reads the same window and learns the address then
+        sent = []
+        monkeypatch.setattr(reporter, 'post_report', lambda p: sent.append(p) or True)
+        assert reporter.run_once() == 0
+        assert set(json.loads((tmp_path / 'state.json').read_text())['user_addrs']) == {USER_A}
+
+    def test_a_broken_memory_never_costs_the_report(self, tmp_path, monkeypatch):
+        logs = self._logs(tmp_path, monkeypatch)
+        sent = []
+        monkeypatch.setattr(reporter, 'post_report', lambda p: sent.append(p) or True)
+        assert reporter.run_once() == 0
+        self._append(logs / 'error.log', [_hs_fail(USER_A)])
+
+        def broken(*a, **kw):
+            raise RuntimeError('boom')
+        monkeypatch.setattr(reporter, 'remember_user_addresses', broken)
+        assert reporter.run_once() == 0
+        # the old shape: the bot counts these as not told apart
+        assert sent[-1]['rejects'] == [{'kind': 'reality',
+                                        'reason': 'handshake did not complete successfully',
+                                        'count': 1, 'ips': {USER_A: 1}}]

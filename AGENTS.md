@@ -1,7 +1,7 @@
 # AGENTS.md — VPN Bot
 
 > Agent-focused guidance. For project overview, see `docs/PROJECT.md`.
-> Operational insights §1–§65: index at the end of this file, text in `docs/insights/`.
+> Operational insights §1–§66: index at the end of this file, text in `docs/insights/`.
 
 ---
 
@@ -165,6 +165,8 @@ Files with this mark: `test_database.py`, `test_security.py`, `test_state_machin
 | `bot/models/vpn_node.py` | All cluster tests using `VPNNode` |
 | `scripts/hermes_model_guard.py` (`GuardIO`, `parse_env_file`, `effective_bot_token`, `save_state`) | `scripts/hermes_release_notice.py` loads them from its own directory, `tests/unit/test_hermes_release_notice.py` |
 | `bot/services/exit_reach.py` (the PROXY header's marker, `MARK_SRC`) | `WebAppServer._dpi_exit_rows` drops that source, `tests/integration/test_exit_reach.py` |
+| `scripts/exit_dpi_reporter.py` (a reject's `origin`, the users' addresses), `WebAppServer._dpi_exit_rows` (`hsfail_users`, `user_ips_json`), the DPI handshake checks in `bot/services/alert_manager.py` | `tests/unit/test_exit_dpi_reporter.py`, `tests/integration/test_hsfail_users.py`, `skills/dpi-analysis/SKILL.md`; the reporter runs on exit, installed by hand (§66) |
+| `bot/services/tunnel_jam.py` (what counts as our tunnel's jam), `TUNNEL_KEYS` in `scripts/protocol_healthcheck.py`, R3's freeze in `bot/services/dpi_monitor.py` (`TUNNEL_JAM_COLLECTORS`) | `tests/integration/test_dpi_monitor.py::TestTunnelJam`, `tests/integration/test_hsfail_users.py` (a test keeps the keys and the prefix equal) |
 | `bot/utils/public_url.py` (`entry_public_host`), the entry-address builders in `bot/services/subscription.py`, `vpn.py`, `ssh_exit.py` | `tests/integration/test_entry_public_host.py` (every entry server follows `ENTRY_PUBLIC_HOST`; unset is byte-identical) |
 | `bot/services/hop_tls.py`, `scripts/caddy_entry_hop.py`, `systemd/hysteria-entry-hop.conf` | `tests/integration/test_hop_tls.py`, `tests/integration/test_hop_tls_stand.py`, `docs/runbooks/entry_hop_tls.md` (its blocks run in the tests) |
 | `bot/services/hy2_keys.py`, the hy2 callback in `bot/core/web_server.py`, `scripts/hy2_auth_relay.py`, `scripts/install_hy2_auth_relay.sh`, `systemd/hy2-auth-relay.service` | `tests/integration/test_hy2_auth_relay.py` (the key list must equal what the live callback lets in), `tests/unit/test_hy2_auth_relay.py`, `tests/unit/test_install_hy2_auth_relay_sh.py`, `tests/integration/test_hy2_auth_relay_stand.py`, `docs/runbooks/hy2_auth_relay.md` (its blocks run in the tests) |
@@ -293,3 +295,4 @@ A new insight goes into `docs/insights/NN-<slug>.md` under the next free number,
 - §63. Entry's address for clients, apart from the node's own: `ENTRY_PUBLIC_HOST`, `HOP_TLS_IP` (2026-11-19) — [docs/insights/63-entry-s-address-for-clients-apart.md](docs/insights/63-entry-s-address-for-clients-apart.md)
 - §64. The exit → entry tunnel: users and control apart, open-file limits, the watchdog (2026-11-20) — [docs/insights/64-the-exit-entry-tunnel-users-and-control-apart.md](docs/insights/64-the-exit-entry-tunnel-users-and-control-apart.md)
 - §65. Credentials out of the access log: the dashboard's Authorization header, initData for a day (2026-11-20) — [docs/insights/65-credentials-out-of-the-access-log.md](docs/insights/65-credentials-out-of-the-access-log.md)
+- §66. Handshake failures from users' own addresses are not probing: `dpi_hsfail` and `dpi_hsfail_users` (2026-11-20) — [docs/insights/66-handshake-failures-from-users-addresses-are-not-probing.md](docs/insights/66-handshake-failures-from-users-addresses-are-not-probing.md)

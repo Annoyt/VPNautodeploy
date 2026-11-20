@@ -13,6 +13,12 @@ You run on **entry** (RU-facing ingress). DPI signals are aggregated into the bo
 - **`dpi_metrics`** table (bot DB) — 5-min snapshots, per `(country, asn)`:
   `country, asn, as_org, snapshot_at, conn_count, short_session_count, handshake_fail_count, rst_count`.
   Country `*GLOBAL*` is the host-wide roll-up (used for RST).
+  - `hsfail_users` — the part of `handshake_fail_count` from addresses that ALSO logged in as one of our
+    users (in the exit reporter's last 24 h): our users' clients failing on a bad path, **not probing**
+    (AGENTS.md §66). NULL = the row was not told apart (an older exit reporter, the hy2 rollup).
+    Probe candidates = `handshake_fail_count - COALESCE(hsfail_users, 0)`.
+  - `probe_ips_json` — the probe candidates' top addresses `[[ip, fails], …]`; `user_ips_json` — the users'
+    addresses that failed. Never print the users' addresses into the chat.
   - `asn` values carry the `AS` prefix (`'AS51088'`) — queries must include it to match.
   - `country`/`asn` can be NULL when geoip fails (localhost, private IPs). `country` may hold an inbound
     tag (e.g. `*TUNNEL*`) with `asn` NULL — that's per-inbound aggregation, `as_org` names the inbound.
@@ -37,7 +43,8 @@ cut = (datetime.utcnow()-timedelta(hours=1)).isoformat()
 for r in c.execute('''
   SELECT country, asn, MAX(as_org),
          SUM(conn_count), SUM(short_session_count),
-         SUM(handshake_fail_count), SUM(rst_count)
+         SUM(handshake_fail_count), SUM(rst_count),
+         SUM(COALESCE(hsfail_users, 0))
   FROM dpi_metrics WHERE snapshot_at >= ? AND country != '*GLOBAL*'
   GROUP BY country, asn HAVING SUM(conn_count) >= 50
   ORDER BY SUM(short_session_count)*1.0/SUM(conn_count) DESC'''), (cut,)):
@@ -48,7 +55,8 @@ for r in c.execute('''
 | Signal | Metric | Warn / Critical | Reading |
 |---|---|---|---|
 | **Short sessions** | `short_session_count / conn_count` | ≥0.40 / >0.70 | DPI is **actively cutting** established connections for that cohort. Users get dropped mid-session. |
-| **Handshake fails** | `handshake_fail_count / h` vs baseline | ≥5× / >20× baseline (floor 5/h) | **Active probing / scanner** hitting REALITY — SNI or the inbound is being fingerprinted. |
+| **Handshake fails** (`dpi_hsfail:`) | probe candidates (`handshake_fail_count - hsfail_users`) / h vs their baseline | ≥5× / >20× baseline (floor 5/h) | **Active probing / scanner** hitting REALITY — SNI or the inbound is being fingerprinted. The title says "from N unknown addresses", or "users not told apart" (old exit reporter: users may be among them). |
+| **Users' handshake fails** (`dpi_hsfail_users:`) | `hsfail_users / h` vs their baseline | same | **NOT probing.** Our users' clients fail on a bad path: the exit → entry tunnel or entry jammed (§64, check `healthcheck:entry_tunnel:*`), or the operator cutting handshakes. 2026-11-20: 1,850 such failures read as "ISPs probing Reality" and helped switch Reality off. |
 | **RST spike** | `*GLOBAL*` `rst_count` delta | +200% over baseline | Host-wide TCP aborts — broad interference or an upstream reset injector. |
 
 Ignore buckets with `conn_count < 50` (noise). Small absolute counts aren't an incident.
@@ -68,6 +76,8 @@ Ignore buckets with `conn_count < 50` (noise). Small absolute counts aren't an i
    and the `/api/admin/dpi_metrics` IP breakdown.
 
 # Do NOT
+- Don't call failures from our users' own addresses (`hsfail_users`, `dpi_hsfail_users:`) probing, and don't
+  read an alert whose title ends "during an entry tunnel jam" as the operator's doing: our own path was jammed.
 - Don't rotate entry IP or swap SNI/inbound params without the admin's OK — it disrupts every connected user.
 - Don't treat a single 5-min snapshot as a trend — always roll up ≥1h and compare to baseline.
 - Don't print raw client IPs into the chat beyond what's needed; summarize by `(country, ASN)`.
