@@ -1959,29 +1959,30 @@ class WebAppServer:
         """``POST /api/neko/netstat`` — the NekoVPN app's network
         diagnostics (docs/NEKO6_PLAN.md D2, bot/services/netstat.py).
 
-        ``X-Neko-Token`` carries the /sub token: checked against the users
-        table (an active key), then dropped. Neither it nor the caller's
-        address is stored or logged: no row, no log line of this handler,
-        no access-log line (``unlogged()``, before anything else), and the
-        address and forwarding headers are never read. Answers: 204
-        stored, 400 a bad body (the text names the field), 401 no token or
-        not an active one, 405 not a POST, 413 over 64 KB, 429 over 30
-        requests an hour for this token (with Retry-After)."""
+        ``Authorization: NekoToken <token>`` carries the /sub token
+        (``netstat.token_of``): checked against the users table (an active
+        key), then dropped. Neither it nor the caller's address is stored
+        or logged: no row, no log line of this handler, no access-log line
+        (``unlogged()``, before anything else), and the address and
+        forwarding headers are never read. Answers: 204 stored, 400 a bad
+        body (the text names the field), 401 no token or not an active
+        one, 405 not a POST, 413 over 64 KB, 429 over 30 requests an hour
+        for this token (with Retry-After)."""
         unlogged()
         token = ''
         try:
             if request.method != 'POST':
                 return web.Response(status=405, text='Method not allowed',
                                     headers={'Allow': 'POST'})
-            tokens = request.headers.getall(netstat.TOKEN_HEADER, [])
-            token = tokens[0] if len(tokens) == 1 else ''
+            token = netstat.token_of(request.headers)
             user = None
             if token:
                 user = await asyncio.to_thread(
                     self.subscription.find_user_by_token, self.db, token,
                 )
             if user is None or (getattr(user, 'status', '') or '') not in netstat.ACTIVE_STATUSES:
-                return web.Response(status=401, text='Unauthorized')
+                return web.Response(status=401, text='Unauthorized',
+                                    headers={'WWW-Authenticate': 'NekoToken'})
             wait = self._netstat_limiter.check(netstat.key_of(token))
             user = None
             token = ''                   # checked; nothing below needs it

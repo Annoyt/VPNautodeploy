@@ -151,11 +151,17 @@ async def serve(server):
             yield session
 
 
+def auth(tok):
+    """The header the app sends the token in."""
+    return {'Authorization': f'NekoToken {tok}'}
+
+
 async def post(session, payload, tok=None, headers=None, method='POST'):
-    """(status, text, headers) of one request to the endpoint."""
+    """(status, text, headers) of one request to the endpoint, the token
+    (when given) in ``Authorization: NekoToken``."""
     hdrs = dict(headers or {})
     if tok is not None:
-        hdrs['X-Neko-Token'] = tok
+        hdrs.update(auth(tok))
     if isinstance(payload, (bytes, str)) or payload is None:
         data = payload
     else:
@@ -253,7 +259,7 @@ class TestAccepted:
         async with serve(srv) as s:
             # chunked: no Content-Length, the body in 1 KB pieces
             async with s.post(PATH, data=pieces(),
-                              headers={'X-Neko-Token': token()}) as resp:
+                              headers=auth(token())) as resp:
                 assert resp.status == 204, await resp.text()
         assert len(rows_of(db)) == 100
 
@@ -282,14 +288,12 @@ class TestRefused:
     @pytest.mark.asyncio
     async def test_401_without_an_active_token(self, srv, db):
         async with serve(srv) as s:
-            assert (await post(s, body()))[0] == 401                        # no header
+            status, _, headers = await post(s, body())                      # no header
+            assert (status, headers.get('WWW-Authenticate')) == (401, 'NekoToken')
             assert (await post(s, body(), ''))[0] == 401                    # empty
             assert (await post(s, body(), '0123456789abcdef' * 2))[0] == 401  # nobody's
             assert (await post(s, body(), token().upper()))[0] == 401       # not its shape
             assert (await post(s, body(), token()[:-1]))[0] == 401
-            async with s.post(PATH, data=json.dumps(body()), headers=[
-                    ('X-Neko-Token', token()), ('X-Neko-Token', token())]) as resp:
-                assert resp.status == 401                                   # said twice
             # the /sub token in the path is no token here
             async with s.post(f'{PATH}?token={token()}', data=json.dumps(body())) as resp:
                 assert resp.status == 401
@@ -297,6 +301,56 @@ class TestRefused:
                 set_status(db, CID, status)                  # a stale uuid
                 assert (await post(s, body(), token()))[0] == 401, status
         assert rows_of(db) == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize('value', [
+        'NekoToken',                       # the scheme alone
+        '{tok}',                           # the token alone
+        'Bearer {tok}',                    # another scheme
+        'Basic {tok}',
+        'NekoAdmin {tok}',                 # the dashboard's
+        'NekoTokens {tok}',
+        'NekoToken: {tok}',
+        'NekoToken={tok}',
+        'NekoToken {tok} {tok}',           # more than the token
+        'NekoToken {tok} x',
+        'NekoToken {tok},NekoToken {tok}',
+    ])
+    async def test_401_for_any_other_authorization(self, srv, db, value):
+        async with serve(srv) as s:
+            hdrs = {'Authorization': value.format(tok=token())}
+            async with s.post(PATH, data=json.dumps(body()), headers=hdrs) as resp:
+                assert resp.status == 401
+        assert rows_of(db) == []
+
+    @pytest.mark.asyncio
+    async def test_401_for_the_header_twice_or_the_old_one(self, srv, db):
+        async with serve(srv) as s:
+            async with s.post(PATH, data=json.dumps(body()), headers=[
+                    ('Authorization', f'NekoToken {token()}'),
+                    ('Authorization', f'NekoToken {token()}')]) as resp:
+                assert resp.status == 401                                   # said twice
+            # the contract's first draft: no longer read
+            async with s.post(PATH, data=json.dumps(body()),
+                              headers={'X-Neko-Token': token()}) as resp:
+                assert resp.status == 401
+            # nor in the way of the real one
+            hdrs = {'X-Neko-Token': token(UUID2), **auth(token())}
+            async with s.post(PATH, data=json.dumps(body()), headers=hdrs) as resp:
+                assert resp.status == 204
+        assert len(rows_of(db)) == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize('value', [
+        'NekoToken {tok}', 'nekotoken {tok}', 'NEKOTOKEN {tok}',   # RFC 7235: any case
+        'NekoToken   {tok}', '  NekoToken {tok}  ',
+    ])
+    async def test_the_scheme_in_any_case_and_spacing(self, srv, db, value):
+        async with serve(srv) as s:
+            hdrs = {'Authorization': value.format(tok=token())}
+            async with s.post(PATH, data=json.dumps(body()), headers=hdrs) as resp:
+                assert resp.status == 204
+        assert len(rows_of(db)) == 1
 
     @pytest.mark.asyncio
     async def test_401_before_the_body_is_read(self, srv, db):
@@ -325,10 +379,10 @@ class TestRefused:
             assert (await post(s, exact, token()))[0] == 204
             assert (await post(s, exact + b' ', token()))[0] == 413        # by its length
             async with s.post(PATH, data=chunked(exact + b' '),
-                              headers={'X-Neko-Token': token()}) as resp:
+                              headers=auth(token())) as resp:
                 assert resp.status == 413                                  # by what arrives
             async with s.post(PATH, data=chunked(exact),
-                              headers={'X-Neko-Token': token()}) as resp:
+                              headers=auth(token())) as resp:
                 assert resp.status == 204
         assert len(rows_of(db)) == 2
 
@@ -341,7 +395,7 @@ class TestRefused:
             reader, writer = await asyncio.open_connection('127.0.0.1', port)
             writer.write(b'POST ' + PATH.encode() + b' HTTP/1.1\r\nHost: t\r\n'
                          b'Connection: close\r\n'
-                         b'X-Neko-Token: ' + token().encode() + b'\r\n'
+                         b'Authorization: NekoToken ' + token().encode() + b'\r\n'
                          b'Content-Length: ' + str(announced).encode() + b'\r\n\r\n' + first)
             await writer.drain()
             head = await asyncio.wait_for(reader.readuntil(b'\r\n\r\n'), 5)
@@ -569,6 +623,9 @@ class TestNothingNamesTheUser:
             assert (await post(s, b' ' * (netstat.MAX_BODY + 1), tok, headers))[0] == 413
             assert (await post(s, None, tok, headers, method='GET'))[0] == 405
             assert (await post(s, body(), tok[::-1], headers))[0] == 401
+            # the token under another scheme, and in the old header
+            assert (await post(s, body(), None, {**headers, 'Authorization': f'Bearer {tok}'}))[0] == 401
+            assert (await post(s, body(), None, {**headers, 'X-Neko-Token': tok}))[0] == 401
             set_status(db, CID, 'banned')
             assert (await post(s, body(), tok, headers))[0] == 401
             set_status(db, CID, 'paid')
@@ -612,7 +669,7 @@ class TestNothingNamesTheUser:
         raw = json.dumps(body()).encode()
         netstat_request = (
             b'POST ' + PATH.encode() + b' HTTP/1.1\r\nHost: t\r\n'
-            b'X-Neko-Token: ' + token().encode() + b'\r\n'
+            b'Authorization: NekoToken ' + token().encode() + b'\r\n'
             b'Content-Type: application/json\r\n'
             b'Content-Length: ' + str(len(raw)).encode() + b'\r\n\r\n' + raw)
         async with listening(srv) as port:

@@ -10,9 +10,9 @@ geohash, about 5 km.
 
 Nothing kept names the user. ``WebAppServer.handle_neko_netstat``:
 
-- checks the subscription token from ``X-Neko-Token`` against the users
-  table (an active key) and drops it; the rate limiter holds a keyed hash
-  of it, in memory only;
+- checks the subscription token from ``Authorization: NekoToken <token>``
+  against the users table (an active key) and drops it; the rate limiter
+  holds a keyed hash of it, in memory only;
 - never reads the caller's address or a forwarding header;
 - keeps the request out of aiohttp's logs (bot/utils/unlogged.py): the
   access line carries the address.
@@ -43,7 +43,12 @@ from bot.services.neko_client import KEY_STATUSES
 
 logger = logging.getLogger(__name__)
 
-TOKEN_HEADER = 'X-Neko-Token'
+# The /sub token rides in ``Authorization: NekoToken <token>``: Caddy's
+# access log and most others leave Authorization out, as for the
+# dashboard's NekoAdmin (AGENTS.md §65). The scheme's name is compared
+# lowercased (RFC 7235). Nothing else carries it: X-Neko-Token, the
+# contract's first draft, is not read.
+AUTH_SCHEME = 'nekotoken'
 # A subscription is active for the statuses that hold a key: the gate of
 # /sub, /open and the app's SOS. A token is only ever derived from a uuid.
 ACTIVE_STATUSES = KEY_STATUSES
@@ -114,6 +119,21 @@ _INDEX = 'CREATE INDEX IF NOT EXISTS idx_netstat_events_ts ON netstat_events(ts)
 
 class BadBody(ValueError):
     """The body is not what D2 describes; the message names the field."""
+
+
+# ---------- the token ----------
+
+def token_of(headers) -> str:
+    """The token of ``Authorization: NekoToken <token>``, '' for anything
+    else: no header, the header twice, another scheme, the scheme alone,
+    more than the token after it."""
+    values = headers.getall('Authorization', [])
+    if len(values) != 1:
+        return ''
+    parts = values[0].split()
+    if len(parts) != 2 or parts[0].lower() != AUTH_SCHEME:
+        return ''
+    return parts[1]
 
 
 # ---------- the body ----------
