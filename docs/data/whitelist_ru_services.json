@@ -1,0 +1,3164 @@
+[
+ {
+  "service": "ВКонтакте и сервисы VK (VK Видео, VK Музыка, VK Клипы, VK Мессенджер, VK Звонки)",
+  "category": "social",
+  "added": "2025-09-05",
+  "source": "https://t.me/mintsifry/2603",
+  "list": "official",
+  "packages": [
+   "com.vkontakte.android",
+   "com.vk.vkvideo",
+   "com.uma.musicvk",
+   "com.vk.clips",
+   "com.vk.im",
+   "com.vk.calls"
+  ],
+  "verified_in": {
+   "com.vkontakte.android": "GP+RS",
+   "com.vk.vkvideo": "GP+RS",
+   "com.uma.musicvk": "GP+RS",
+   "com.vk.clips": "GP+RS",
+   "com.vk.im": "GP+RS",
+   "com.vk.calls": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [
+   "vk.com"
+  ],
+  "notes": "Official text: «Сервисы ВКонтакте». Sub-apps are VK LLC/VKL apps; MegaFon and Beeline name VK Видео/Музыка/Клипы explicitly."
+ },
+ {
+  "service": "Одноклассники",
+  "category": "social",
+  "added": "2025-09-05",
+  "source": "https://t.me/mintsifry/2603",
+  "list": "official",
+  "packages": [
+   "ru.ok.android"
+  ],
+  "verified_in": {
+   "ru.ok.android": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [
+   "ok.ru"
+  ],
+  "notes": ""
+ },
+ {
+  "service": "Mail.ru (Почта, Облако)",
+  "category": "mail",
+  "added": "2025-09-05",
+  "source": "https://t.me/mintsifry/2603",
+  "list": "official",
+  "packages": [
+   "ru.mail.mailapp",
+   "ru.mail.cloud",
+   "com.vk.mail"
+  ],
+  "verified_in": {
+   "ru.mail.mailapp": "GP+RS",
+   "ru.mail.cloud": "GP+RS",
+   "com.vk.mail": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [
+   "mail.ru"
+  ],
+  "notes": "Official text: «Mail.ru». VK Почта (com.vk.mail) is VK's second mail client."
+ },
+ {
+  "service": "Мессенджер Max",
+  "category": "messenger",
+  "added": "2025-09-05",
+  "source": "https://t.me/mintsifry/2603",
+  "list": "official",
+  "packages": [
+   "ru.oneme.app"
+  ],
+  "verified_in": {
+   "ru.oneme.app": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [
+   "max.ru"
+  ],
+  "notes": ""
+ },
+ {
+  "service": "Госуслуги (сервисы Госуслуг)",
+  "category": "gov",
+  "added": "2025-09-05",
+  "source": "https://t.me/mintsifry/2603",
+  "list": "official",
+  "packages": [
+   "ru.rostel",
+   "ru.gosuslugi.goskey",
+   "ru.gosuslugi.school",
+   "ru.gosuslugi.auto",
+   "ru.gosuslugi.culture",
+   "ru.gosuslugi.pos",
+   "ru.gosuslugi.teacher"
+  ],
+  "verified_in": {
+   "ru.rostel": "GP+RS",
+   "ru.gosuslugi.goskey": "GP+RS",
+   "ru.gosuslugi.school": "GP+RS",
+   "ru.gosuslugi.auto": "GP+RS",
+   "ru.gosuslugi.culture": "GP+RS",
+   "ru.gosuslugi.pos": "GP+RS",
+   "ru.gosuslugi.teacher": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [
+   "gosuslugi.ru",
+   "pos.gosuslugi.ru",
+   "gosweb.gosuslugi.ru"
+  ],
+  "notes": "All seven apps are published by «Минцифры России». Госключ is also named separately by MegaFon/T2. Domains from the MTS list."
+ },
+ {
+  "service": "Сервисы Яндекса",
+  "category": "ecosystem (search, taxi, maps, market, media)",
+  "added": "2025-09-05",
+  "source": "https://t.me/mintsifry/2603",
+  "list": "official",
+  "packages": [
+   "com.yandex.searchapp",
+   "ru.yandex.searchplugin",
+   "com.yandex.aliceapp",
+   "com.yandex.browser",
+   "com.yandex.browser.lite",
+   "ru.yandex.taxi",
+   "ru.yandex.yandexmaps",
+   "ru.yandex.yandexnavi",
+   "ru.beru.android",
+   "ru.yandex.music",
+   "ru.kinopoisk",
+   "ru.foodfox.client",
+   "com.yandex.lavka",
+   "ru.yandex.mail",
+   "ru.yandex.disk",
+   "ru.yandex.metro",
+   "ru.yandex.weatherplugin",
+   "com.yandex.mobile.drive",
+   "ru.yandex.taximeter",
+   "ru.yandex.travel",
+   "com.edadeal.android",
+   "ru.yandex.telemost",
+   "ru.plus.bookmate",
+   "ru.auto.ara",
+   "ru.yandex.androidkeyboard",
+   "ru.yandex.key",
+   "ru.yandex.mobile.afisha"
+  ],
+  "verified_in": {
+   "com.yandex.searchapp": "GP+RS",
+   "ru.yandex.searchplugin": "GP+RS",
+   "com.yandex.aliceapp": "GP+RS",
+   "com.yandex.browser": "GP+RS",
+   "com.yandex.browser.lite": "GP+RS",
+   "ru.yandex.taxi": "GP+RS",
+   "ru.yandex.yandexmaps": "GP+RS",
+   "ru.yandex.yandexnavi": "GP+RS",
+   "ru.beru.android": "GP+RS",
+   "ru.yandex.music": "GP+RS",
+   "ru.kinopoisk": "GP+RS",
+   "ru.foodfox.client": "GP+RS",
+   "com.yandex.lavka": "GP+RS",
+   "ru.yandex.mail": "GP+RS",
+   "ru.yandex.disk": "GP+RS",
+   "ru.yandex.metro": "GP+RS",
+   "ru.yandex.weatherplugin": "GP+RS",
+   "com.yandex.mobile.drive": "GP+RS",
+   "ru.yandex.taximeter": "GP+RS",
+   "ru.yandex.travel": "GP+RS",
+   "com.edadeal.android": "GP+RS",
+   "ru.yandex.telemost": "GP+RS",
+   "ru.plus.bookmate": "GP+RS",
+   "ru.auto.ara": "GP",
+   "ru.yandex.androidkeyboard": "GP+RS",
+   "ru.yandex.key": "GP+RS",
+   "ru.yandex.mobile.afisha": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [
+   "ya.ru",
+   "yandex.ru",
+   "go.yandex",
+   "travel.yandex.ru",
+   "360.yandex.ru",
+   "kinopoisk.ru",
+   "eda.yandex.ru",
+   "lavka.yandex.ru",
+   "music.yandex.ru",
+   "market.yandex.ru",
+   "alice.yandex.ru"
+  ],
+  "notes": "Ministry names no individual Yandex apps. Yandex itself only claims Search is listed and says it may differ by operator (yandex.ru/project/search/nolimits). Operators name Go/Такси, Поиск+Алиса, Еда, Лавка, Музыка, Навигатор, Карты, Путешествия, Почта, Маркет, Кинопоиск, Драйв, Про, Едадил, Телемост, Диск, Книги, Auto.ru. Ministry posts of 2025-12-18 name Яндекс taxi and Кинопоиск as already listed; Interfax 2026-02-17 says Яндекс Драйв was already listed. ru.yandex.searchplugin is now «Яндекс Старт» (publisher ABS_LLC_KZ); the main search app is com.yandex.searchapp. Domains from the MTS list."
+ },
+ {
+  "service": "Ozon",
+  "category": "marketplace",
+  "added": "2025-09-05",
+  "source": "https://t.me/mintsifry/2603",
+  "list": "official",
+  "packages": [
+   "ru.ozon.app.android"
+  ],
+  "verified_in": {
+   "ru.ozon.app.android": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [
+   "ozon.ru"
+  ],
+  "notes": ""
+ },
+ {
+  "service": "Wildberries",
+  "category": "marketplace",
+  "added": "2025-09-05",
+  "source": "https://t.me/mintsifry/2603",
+  "list": "official",
+  "packages": [
+   "com.wildberries.ru"
+  ],
+  "verified_in": {
+   "com.wildberries.ru": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [
+   "wildberries.ru"
+  ],
+  "notes": ""
+ },
+ {
+  "service": "Avito",
+  "category": "marketplace / classifieds",
+  "added": "2025-09-05",
+  "source": "https://t.me/mintsifry/2603",
+  "list": "official",
+  "packages": [
+   "com.avito.android"
+  ],
+  "verified_in": {
+   "com.avito.android": "RS"
+  },
+  "unverified": [],
+  "domains": [
+   "avito.ru"
+  ],
+  "notes": ""
+ },
+ {
+  "service": "Дзен",
+  "category": "media / social",
+  "added": "2025-09-05",
+  "source": "https://t.me/mintsifry/2603",
+  "list": "official",
+  "packages": [
+   "ru.zen.android"
+  ],
+  "verified_in": {
+   "ru.zen.android": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [
+   "dzen.ru"
+  ],
+  "notes": ""
+ },
+ {
+  "service": "Rutube",
+  "category": "video",
+  "added": "2025-09-05",
+  "source": "https://t.me/mintsifry/2603",
+  "list": "official",
+  "packages": [
+   "rtb.mobile.android",
+   "ru.rutube.app"
+  ],
+  "verified_in": {
+   "rtb.mobile.android": "GP",
+   "ru.rutube.app": "RS"
+  },
+  "unverified": [],
+  "domains": [
+   "rutube.ru"
+  ],
+  "notes": "Package differs by store: Google Play rtb.mobile.android, RuStore ru.rutube.app. Exclude both."
+ },
+ {
+  "service": "Платёжная система «Мир» (официальный сайт)",
+  "category": "payments",
+  "added": "2025-09-05",
+  "source": "https://t.me/mintsifry/2603",
+  "list": "official",
+  "packages": [],
+  "verified_in": {},
+  "unverified": [],
+  "domains": [],
+  "notes": "The official text covers only the Mir website. The Mir Pay/СБПэй apps are named only by MegaFon (see operator section)."
+ },
+ {
+  "service": "Сайты Правительства и Администрации Президента",
+  "category": "gov",
+  "added": "2025-09-05",
+  "source": "https://t.me/mintsifry/2603",
+  "list": "official",
+  "packages": [],
+  "verified_in": {},
+  "unverified": [],
+  "domains": [
+   "government.ru",
+   "kremlin.ru"
+  ],
+  "notes": "Sites only. Domains from the MTS list."
+ },
+ {
+  "service": "Платформа дистанционного электронного голосования (ДЭГ)",
+  "category": "gov / elections",
+  "added": "2025-09-05",
+  "source": "https://t.me/mintsifry/2603",
+  "list": "official",
+  "packages": [],
+  "verified_in": {},
+  "unverified": [],
+  "domains": [
+   "vybory.gov.ru"
+  ],
+  "notes": "Re-announced on 2026-06-24, after the Ministry's MAX post, ahead of the Sept 2026 Duma elections (see DEG row). Domain from the MTS list."
+ },
+ {
+  "service": "Билайн (личный кабинет и приложение)",
+  "category": "telecom",
+  "added": "2025-09-05",
+  "source": "https://t.me/mintsifry/2603",
+  "list": "official",
+  "packages": [
+   "ru.beeline.services"
+  ],
+  "verified_in": {
+   "ru.beeline.services": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [
+   "beeline.ru"
+  ],
+  "notes": ""
+ },
+ {
+  "service": "МегаФон (личный кабинет и приложение)",
+  "category": "telecom",
+  "added": "2025-09-05",
+  "source": "https://t.me/mintsifry/2603",
+  "list": "official",
+  "packages": [
+   "ru.megafon.mlk"
+  ],
+  "verified_in": {
+   "ru.megafon.mlk": "RS"
+  },
+  "unverified": [],
+  "domains": [
+   "megafon.ru"
+  ],
+  "notes": ""
+ },
+ {
+  "service": "МТС (Мой МТС, личный кабинет)",
+  "category": "telecom",
+  "added": "2025-09-05",
+  "source": "https://t.me/mintsifry/2603",
+  "list": "official",
+  "packages": [
+   "ru.mts.mymts"
+  ],
+  "verified_in": {
+   "ru.mts.mymts": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [
+   "mts.ru",
+   "lk.mts.ru"
+  ],
+  "notes": ""
+ },
+ {
+  "service": "Ростелеком (личный кабинет)",
+  "category": "telecom",
+  "added": "2025-09-05",
+  "source": "https://t.me/mintsifry/2603",
+  "list": "official",
+  "packages": [
+   "com.dartit.RTcabinet"
+  ],
+  "verified_in": {
+   "com.dartit.RTcabinet": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [
+   "rt.ru"
+  ],
+  "notes": ""
+ },
+ {
+  "service": "T2 (личный кабинет и приложение)",
+  "category": "telecom",
+  "added": "2025-09-05",
+  "source": "https://t.me/mintsifry/2603",
+  "list": "official",
+  "packages": [
+   "ru.tele2.mytele2"
+  ],
+  "verified_in": {
+   "ru.tele2.mytele2": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [
+   "t2.ru"
+  ],
+  "notes": ""
+ },
+ {
+  "service": "Wink (Ростелеком) — онлайн-кинотеатр",
+  "category": "video",
+  "added": "2025-12-18",
+  "source": "https://t.me/mintsifry/2744",
+  "list": "official",
+  "packages": [
+   "ru.rt.video.app.mobile"
+  ],
+  "verified_in": {
+   "ru.rt.video.app.mobile": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [
+   "wink.ru"
+  ],
+  "notes": "Not in any round announcement. The ministry post of 2025-12-18 names «Винк» among online cinemas already in the list, so the date is when it was first named, not when it was added."
+ },
+ {
+  "service": "KION (МТС) — онлайн-кинотеатр",
+  "category": "video",
+  "added": "2025-12-18",
+  "source": "https://t.me/mintsifry/2744",
+  "list": "official",
+  "packages": [
+   "ru.mts.mtstv"
+  ],
+  "verified_in": {
+   "ru.mts.mtstv": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [
+   "kion.ru"
+  ],
+  "notes": "Same as Wink: first named as already listed in the 2025-12-18 post. MTS also lists КИОН Музыка/Строки (operator section)."
+ },
+ {
+  "service": "Сайты госорганов: Госдума, федеральные министерства, службы и агентства, ГИС, Генпрокуратура, правительства субъектов РФ",
+  "category": "gov",
+  "added": "2025-11-14",
+  "source": "https://t.me/mintsifry/2713",
+  "list": "official",
+  "packages": [],
+  "verified_in": {},
+  "unverified": [],
+  "domains": [],
+  "notes": "Sites only."
+ },
+ {
+  "service": "Почта России",
+  "category": "post / delivery",
+  "added": "2025-11-14",
+  "source": "https://t.me/mintsifry/2713",
+  "list": "official",
+  "packages": [
+   "com.octopod.russianpost.client.android"
+  ],
+  "verified_in": {
+   "com.octopod.russianpost.client.android": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [
+   "pochta.ru"
+  ],
+  "notes": ""
+ },
+ {
+  "service": "Альфа-Банк",
+  "category": "bank",
+  "added": "2025-11-14",
+  "source": "https://t.me/mintsifry/2713",
+  "list": "official",
+  "packages": [
+   "ru.alfabank.mobile.android"
+  ],
+  "verified_in": {
+   "ru.alfabank.mobile.android": "RS"
+  },
+  "unverified": [],
+  "domains": [
+   "alfabank.ru"
+  ],
+  "notes": "Not on Google Play; RuStore only."
+ },
+ {
+  "service": "Честный знак (система маркировки)",
+  "category": "gov / business",
+  "added": "2025-11-14",
+  "source": "https://t.me/mintsifry/2713",
+  "list": "official",
+  "packages": [
+   "ru.crptech.mark"
+  ],
+  "verified_in": {
+   "ru.crptech.mark": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [
+   "честныйзнак.рф"
+  ],
+  "notes": ""
+ },
+ {
+  "service": "Комсомольская правда",
+  "category": "media",
+  "added": "2025-11-14",
+  "source": "https://t.me/mintsifry/2713",
+  "list": "official",
+  "packages": [
+   "com.kp"
+  ],
+  "verified_in": {
+   "com.kp": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [
+   "kp.ru"
+  ],
+  "notes": ""
+ },
+ {
+  "service": "РИА Новости",
+  "category": "media",
+  "added": "2025-11-14",
+  "source": "https://t.me/mintsifry/2713",
+  "list": "official",
+  "packages": [
+   "ru.ria.ria"
+  ],
+  "verified_in": {
+   "ru.ria.ria": "RS"
+  },
+  "unverified": [],
+  "domains": [
+   "ria.ru"
+  ],
+  "notes": "RuStore only; ria.ru links to this listing."
+ },
+ {
+  "service": "РБК",
+  "category": "media",
+  "added": "2025-11-14",
+  "source": "https://t.me/mintsifry/2713",
+  "list": "official",
+  "packages": [
+   "ru.rbc.news.starter"
+  ],
+  "verified_in": {
+   "ru.rbc.news.starter": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [
+   "rbc.ru"
+  ],
+  "notes": ""
+ },
+ {
+  "service": "Газета.ру",
+  "category": "media",
+  "added": "2025-11-14",
+  "source": "https://t.me/mintsifry/2713",
+  "list": "official",
+  "packages": [],
+  "verified_in": {},
+  "unverified": [],
+  "domains": [
+   "gazeta.ru"
+  ],
+  "notes": "No official app found in either store."
+ },
+ {
+  "service": "Лента.ру",
+  "category": "media",
+  "added": "2025-11-14",
+  "source": "https://t.me/mintsifry/2713",
+  "list": "official",
+  "packages": [],
+  "verified_in": {},
+  "unverified": [],
+  "domains": [
+   "lenta.ru"
+  ],
+  "notes": "No official app found in either store."
+ },
+ {
+  "service": "Rambler",
+  "category": "media / mail",
+  "added": "2025-11-14",
+  "source": "https://t.me/mintsifry/2713",
+  "list": "official",
+  "packages": [
+   "ru.rambler.mail"
+  ],
+  "verified_in": {
+   "ru.rambler.mail": "RS"
+  },
+  "unverified": [],
+  "domains": [
+   "rambler.ru"
+  ],
+  "notes": "Only the Рамблер/почта app was found (RuStore). No Rambler news app found."
+ },
+ {
+  "service": "РЖД",
+  "category": "transport",
+  "added": "2025-11-14",
+  "source": "https://t.me/mintsifry/2713",
+  "list": "official",
+  "packages": [
+   "ru.rzd.pass"
+  ],
+  "verified_in": {
+   "ru.rzd.pass": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [
+   "rzd.ru"
+  ],
+  "notes": ""
+ },
+ {
+  "service": "Туту.ру",
+  "category": "travel",
+  "added": "2025-11-14",
+  "source": "https://t.me/mintsifry/2713",
+  "list": "official",
+  "packages": [
+   "ru.tutu.tutu_emp",
+   "ru.tutu.etrains"
+  ],
+  "verified_in": {
+   "ru.tutu.tutu_emp": "GP+RS",
+   "ru.tutu.etrains": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [
+   "tutu.ru"
+  ],
+  "notes": ""
+ },
+ {
+  "service": "2ГИС",
+  "category": "maps",
+  "added": "2025-11-14",
+  "source": "https://t.me/mintsifry/2713",
+  "list": "official",
+  "packages": [
+   "ru.dublgis.dgismobile"
+  ],
+  "verified_in": {
+   "ru.dublgis.dgismobile": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [
+   "2gis.ru"
+  ],
+  "notes": ""
+ },
+ {
+  "service": "Такси «Максим»",
+  "category": "taxi",
+  "added": "2025-11-14",
+  "source": "https://t.me/mintsifry/2713",
+  "list": "official",
+  "packages": [
+   "com.maxim.internal",
+   "com.taxsee.taxsee"
+  ],
+  "verified_in": {
+   "com.maxim.internal": "GP+RS",
+   "com.taxsee.taxsee": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [
+   "taximaxim.ru"
+  ],
+  "notes": "Two client apps: «maxim ru» (MAXIM.PLATFORM LLC) and the international «maxim» (PT. SITO); both are on RuStore and GP."
+ },
+ {
+  "service": "Gismeteo",
+  "category": "weather",
+  "added": "2025-11-14",
+  "source": "https://t.me/mintsifry/2713",
+  "list": "official",
+  "packages": [
+   "ru.gismeteo.gismeteo"
+  ],
+  "verified_in": {
+   "ru.gismeteo.gismeteo": "GP"
+  },
+  "unverified": [],
+  "domains": [
+   "gismeteo.ru"
+  ],
+  "notes": ""
+ },
+ {
+  "service": "Региональные сервисы (здравоохранение, образование, транспорт и др.) и сайты администраций ряда субъектов",
+  "category": "regional",
+  "added": "2025-12-05",
+  "source": "https://t.me/mintsifry/2733",
+  "list": "official",
+  "packages": [],
+  "verified_in": {},
+  "unverified": [],
+  "domains": [],
+  "notes": "Not itemised by the ministry. Operators publish regional files: MegaFon belii_spisok_po_regionam.pdf, T2 whitelist-regions PDF."
+ },
+ {
+  "service": "Центробанк (онлайн-ресурсы)",
+  "category": "finance / gov",
+  "added": "2025-12-05",
+  "source": "https://t.me/mintsifry/2733",
+  "list": "official",
+  "packages": [],
+  "verified_in": {},
+  "unverified": [],
+  "domains": [
+   "cbr.ru"
+  ],
+  "notes": "Sites only; no consumer app."
+ },
+ {
+  "service": "СберМобайл",
+  "category": "telecom",
+  "added": "2025-12-05",
+  "source": "https://t.me/mintsifry/2733",
+  "list": "official",
+  "packages": [
+   "ru.sber.telecom"
+  ],
+  "verified_in": {
+   "ru.sber.telecom": "RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": ""
+ },
+ {
+  "service": "Т-Мобайл",
+  "category": "telecom",
+  "added": "2025-12-05",
+  "source": "https://t.me/mintsifry/2733",
+  "list": "official",
+  "packages": [
+   "ru.tinkoff.mvno"
+  ],
+  "verified_in": {
+   "ru.tinkoff.mvno": "RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": "RuStore listing «Т-Банк Мобайл»."
+ },
+ {
+  "service": "Эр-Телеком (Дом.ру)",
+  "category": "telecom",
+  "added": "2025-12-05",
+  "source": "https://t.me/mintsifry/2733",
+  "list": "official",
+  "packages": [
+   "com.ertelecom.agent"
+  ],
+  "verified_in": {
+   "com.ertelecom.agent": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": ""
+ },
+ {
+  "service": "Россия — страна возможностей",
+  "category": "gov / youth",
+  "added": "2025-12-05",
+  "source": "https://t.me/mintsifry/2733",
+  "list": "official",
+  "packages": [
+   "ru.rsv.rsv_platforma_flutter"
+  ],
+  "verified_in": {
+   "ru.rsv.rsv_platforma_flutter": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": ""
+ },
+ {
+  "service": "ФГАИС «Молодёжь России»",
+  "category": "gov / youth",
+  "added": "2025-12-05",
+  "source": "https://t.me/mintsifry/2733",
+  "list": "official",
+  "packages": [],
+  "verified_in": {},
+  "unverified": [],
+  "domains": [
+   "myrosmol.ru"
+  ],
+  "notes": "No app found."
+ },
+ {
+  "service": "Твой ход (студенческий проект)",
+  "category": "gov / youth",
+  "added": "2025-12-05",
+  "source": "https://t.me/mintsifry/2733",
+  "list": "official",
+  "packages": [],
+  "verified_in": {},
+  "unverified": [],
+  "domains": [],
+  "notes": "No app found."
+ },
+ {
+  "service": "Известия",
+  "category": "media",
+  "added": "2025-12-05",
+  "source": "https://t.me/mintsifry/2733",
+  "list": "official",
+  "packages": [],
+  "verified_in": {},
+  "unverified": [],
+  "domains": [
+   "iz.ru"
+  ],
+  "notes": "No official app found."
+ },
+ {
+  "service": "ТАСС",
+  "category": "media",
+  "added": "2025-12-05",
+  "source": "https://t.me/mintsifry/2733",
+  "list": "official",
+  "packages": [],
+  "verified_in": {},
+  "unverified": [],
+  "domains": [
+   "tass.ru"
+  ],
+  "notes": "The only TASS apps found are staff apps (ТАСС Ассистент, ТАССОВЕЦ); no consumer news app."
+ },
+ {
+  "service": "Домклик",
+  "category": "real estate",
+  "added": "2025-12-05",
+  "source": "https://t.me/mintsifry/2733",
+  "list": "official",
+  "packages": [
+   "ru.domclick.mortgage"
+  ],
+  "verified_in": {
+   "ru.domclick.mortgage": "RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": ""
+ },
+ {
+  "service": "Цезарь Сателлит",
+  "category": "security / auto",
+  "added": "2025-12-05",
+  "source": "https://t.me/mintsifry/2733",
+  "list": "official",
+  "packages": [
+   "ru.csat.superapp",
+   "ru.csat.key"
+  ],
+  "verified_in": {
+   "ru.csat.superapp": "GP+RS",
+   "ru.csat.key": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [
+   "csat.ru"
+  ],
+  "notes": ""
+ },
+ {
+  "service": "Okko",
+  "category": "video",
+  "added": "2025-12-05",
+  "source": "https://t.me/mintsifry/2733",
+  "list": "official",
+  "packages": [
+   "ru.more.play"
+  ],
+  "verified_in": {
+   "ru.more.play": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": ""
+ },
+ {
+  "service": "«Итоги года с Владимиром Путиным» / Прямая линия",
+  "category": "gov",
+  "added": "2025-12-18",
+  "source": "https://t.me/mintsifry/2744",
+  "list": "official",
+  "packages": [],
+  "verified_in": {},
+  "unverified": [],
+  "domains": [],
+  "notes": "Site only."
+ },
+ {
+  "service": "Совет Федерации",
+  "category": "gov",
+  "added": "2025-12-18",
+  "source": "https://t.me/mintsifry/2744",
+  "list": "official",
+  "packages": [],
+  "verified_in": {},
+  "unverified": [],
+  "domains": [],
+  "notes": "Site only."
+ },
+ {
+  "service": "МВД",
+  "category": "gov",
+  "added": "2025-12-18",
+  "source": "https://t.me/mintsifry/2744",
+  "list": "official",
+  "packages": [],
+  "verified_in": {},
+  "unverified": [
+   "ru.mvd"
+  ],
+  "domains": [],
+  "notes": ""
+ },
+ {
+  "service": "МЧС",
+  "category": "gov",
+  "added": "2025-12-18",
+  "source": "https://t.me/mintsifry/2744",
+  "list": "official",
+  "packages": [
+   "io.citizens.security"
+  ],
+  "verified_in": {
+   "io.citizens.security": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": "GP developer: «МЧС России»."
+ },
+ {
+  "service": "Движение первых",
+  "category": "gov / youth",
+  "added": "2025-12-18",
+  "source": "https://t.me/mintsifry/2744",
+  "list": "official",
+  "packages": [],
+  "verified_in": {},
+  "unverified": [],
+  "domains": [],
+  "notes": "No app found."
+ },
+ {
+  "service": "Аэрофлот",
+  "category": "airline",
+  "added": "2025-12-18",
+  "source": "https://t.me/mintsifry/2744",
+  "list": "official",
+  "packages": [
+   "ru.aeroflot"
+  ],
+  "verified_in": {
+   "ru.aeroflot": "RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": "Not on Google Play; RuStore only."
+ },
+ {
+  "service": "Победа (авиакомпания)",
+  "category": "airline",
+  "added": "2025-12-18",
+  "source": "https://t.me/mintsifry/2744",
+  "list": "official",
+  "packages": [
+   "aero.pobeda.twa"
+  ],
+  "verified_in": {
+   "aero.pobeda.twa": "RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": "RuStore only; the app is a web wrapper (TWA)."
+ },
+ {
+  "service": "Объясняем.рф",
+  "category": "gov",
+  "added": "2025-12-18",
+  "source": "https://t.me/mintsifry/2744",
+  "list": "official",
+  "packages": [],
+  "verified_in": {},
+  "unverified": [],
+  "domains": [
+   "объясняем.рф"
+  ],
+  "notes": "Site only."
+ },
+ {
+  "service": "Россети",
+  "category": "utilities",
+  "added": "2025-12-18",
+  "source": "https://t.me/mintsifry/2744",
+  "list": "official",
+  "packages": [
+   "ru.rosseti.mlk"
+  ],
+  "verified_in": {
+   "ru.rosseti.mlk": "RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": "Main «Россети» app (RuStore). Regional Россети subsidiaries have their own apps, which were not checked."
+ },
+ {
+  "service": "Росатом Сеть зарядных станций",
+  "category": "EV charging",
+  "added": "2025-12-18",
+  "source": "https://t.me/mintsifry/2744",
+  "list": "official",
+  "packages": [
+   "atom.energo"
+  ],
+  "verified_in": {
+   "atom.energo": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": "The «АтомЭнерго» app; its RuStore developer is ООО «Росатом Сеть зарядных станций»."
+ },
+ {
+  "service": "Мотив (оператор)",
+  "category": "telecom",
+  "added": "2025-12-18",
+  "source": "https://t.me/mintsifry/2744",
+  "list": "official",
+  "packages": [
+   "ru.filit.motiv.app"
+  ],
+  "verified_in": {
+   "ru.filit.motiv.app": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": ""
+ },
+ {
+  "service": "Московская биржа",
+  "category": "finance",
+  "added": "2025-12-18",
+  "source": "https://t.me/mintsifry/2744",
+  "list": "official",
+  "packages": [
+   "com.moex.finuslugi"
+  ],
+  "verified_in": {
+   "com.moex.finuslugi": "RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": "Финуслуги is the Moscow Exchange's retail platform. MegaFon lists it separately."
+ },
+ {
+  "service": "HeadHunter",
+  "category": "jobs",
+  "added": "2025-12-18",
+  "source": "https://t.me/mintsifry/2744",
+  "list": "official",
+  "packages": [
+   "ru.hh.android",
+   "ru.hh.employer.android"
+  ],
+  "verified_in": {
+   "ru.hh.android": "GP+RS",
+   "ru.hh.employer.android": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [
+   "hh.ru"
+  ],
+  "notes": ""
+ },
+ {
+  "service": "Ситидрайв",
+  "category": "carsharing",
+  "added": "2025-12-18",
+  "source": "https://t.me/mintsifry/2744",
+  "list": "official",
+  "packages": [
+   "youdrive.today"
+  ],
+  "verified_in": {
+   "youdrive.today": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": ""
+ },
+ {
+  "service": "Вкусно — и точка",
+  "category": "food",
+  "added": "2025-12-18",
+  "source": "https://t.me/mintsifry/2744",
+  "list": "official",
+  "packages": [
+   "com.apegroup.mcdonaldsrussia"
+  ],
+  "verified_in": {
+   "com.apegroup.mcdonaldsrussia": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": ""
+ },
+ {
+  "service": "Деловые линии",
+  "category": "logistics",
+  "added": "2025-12-18",
+  "source": "https://t.me/mintsifry/2744",
+  "list": "official",
+  "packages": [
+   "ru.dellin.cabinet",
+   "ru.dellin.b2c"
+  ],
+  "verified_in": {
+   "ru.dellin.cabinet": "GP+RS",
+   "ru.dellin.b2c": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": ""
+ },
+ {
+  "service": "Радиоплеер (приложение с радиостанциями)",
+  "category": "media / radio",
+  "added": "2025-12-18",
+  "source": "https://t.me/mintsifry/2744",
+  "list": "official",
+  "packages": [
+   "ru.radioplayer"
+  ],
+  "verified_in": {
+   "ru.radioplayer": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": "«Радио. Единый радиоплеер»: the industry player of the Российская академия радио (radioplayer.ru, launched 2019). Developer Micro-IT."
+ },
+ {
+  "service": "Аргументы и Факты",
+  "category": "media",
+  "added": "2025-12-18",
+  "source": "https://t.me/mintsifry/2744",
+  "list": "official",
+  "packages": [
+   "ru.mobifactor.aifnews"
+  ],
+  "verified_in": {
+   "ru.mobifactor.aifnews": "RS"
+  },
+  "unverified": [],
+  "domains": [
+   "aif.ru"
+  ],
+  "notes": "RuStore only; aif.ru links to this ID."
+ },
+ {
+  "service": "Российская газета",
+  "category": "media",
+  "added": "2025-12-18",
+  "source": "https://t.me/mintsifry/2744",
+  "list": "official",
+  "packages": [
+   "com.rg.android.newspaper.main"
+  ],
+  "verified_in": {
+   "com.rg.android.newspaper.main": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [
+   "rg.ru"
+  ],
+  "notes": ""
+ },
+ {
+  "service": "Ведомости",
+  "category": "media",
+  "added": "2025-12-18",
+  "source": "https://t.me/mintsifry/2744",
+  "list": "official",
+  "packages": [
+   "ru.vedomosti.android"
+  ],
+  "verified_in": {
+   "ru.vedomosti.android": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [
+   "vedomosti.ru"
+  ],
+  "notes": ""
+ },
+ {
+  "service": "Московский комсомолец",
+  "category": "media",
+  "added": "2025-12-18",
+  "source": "https://t.me/mintsifry/2744",
+  "list": "official",
+  "packages": [],
+  "verified_in": {},
+  "unverified": [],
+  "domains": [
+   "mk.ru"
+  ],
+  "notes": "No app found."
+ },
+ {
+  "service": "Первый канал",
+  "category": "TV",
+  "added": "2025-12-18",
+  "source": "https://t.me/mintsifry/2744",
+  "list": "official",
+  "packages": [],
+  "verified_in": {},
+  "unverified": [
+   "com.ipspirates.ort"
+  ],
+  "domains": [],
+  "notes": ""
+ },
+ {
+  "service": "НТВ",
+  "category": "TV",
+  "added": "2025-12-18",
+  "source": "https://t.me/mintsifry/2744",
+  "list": "official",
+  "packages": [],
+  "verified_in": {},
+  "unverified": [],
+  "domains": [
+   "ntv.ru"
+  ],
+  "notes": "No official app found. НТВ-ПЛЮС is a separate company."
+ },
+ {
+  "service": "RT",
+  "category": "TV / media",
+  "added": "2025-12-18",
+  "source": "https://t.me/mintsifry/2744",
+  "list": "official",
+  "packages": [],
+  "verified_in": {},
+  "unverified": [],
+  "domains": [
+   "russian.rt.com"
+  ],
+  "notes": "No official app found in either store."
+ },
+ {
+  "service": "ОТР",
+  "category": "TV",
+  "added": "2025-12-18",
+  "source": "https://t.me/mintsifry/2744",
+  "list": "official",
+  "packages": [],
+  "verified_in": {},
+  "unverified": [
+   "ru.otr.online"
+  ],
+  "domains": [],
+  "notes": ""
+ },
+ {
+  "service": "ТВЦ",
+  "category": "TV",
+  "added": "2025-12-18",
+  "source": "https://t.me/mintsifry/2744",
+  "list": "official",
+  "packages": [],
+  "verified_in": {},
+  "unverified": [],
+  "domains": [],
+  "notes": "No app found."
+ },
+ {
+  "service": "ТВ-3",
+  "category": "TV",
+  "added": "2025-12-18",
+  "source": "https://t.me/mintsifry/2744",
+  "list": "official",
+  "packages": [],
+  "verified_in": {},
+  "unverified": [],
+  "domains": [],
+  "notes": "No app found."
+ },
+ {
+  "service": "Мир (телеканал)",
+  "category": "TV",
+  "added": "2025-12-18",
+  "source": "https://t.me/mintsifry/2744",
+  "list": "official",
+  "packages": [],
+  "verified_in": {},
+  "unverified": [
+   "com.mir24"
+  ],
+  "domains": [],
+  "notes": ""
+ },
+ {
+  "service": "ТНТ",
+  "category": "TV",
+  "added": "2025-12-18",
+  "source": "https://t.me/mintsifry/2744",
+  "list": "official",
+  "packages": [],
+  "verified_in": {},
+  "unverified": [],
+  "domains": [],
+  "notes": "No standalone app. TNT content is on PREMIER (row for 2026-04-23)."
+ },
+ {
+  "service": "СТС",
+  "category": "TV",
+  "added": "2025-12-18",
+  "source": "https://t.me/mintsifry/2744",
+  "list": "official",
+  "packages": [
+   "com.ctcmediagroup.ctc"
+  ],
+  "verified_in": {
+   "com.ctcmediagroup.ctc": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": "GP developer: CTC Media."
+ },
+ {
+  "service": "Спас",
+  "category": "TV",
+  "added": "2025-12-18",
+  "source": "https://t.me/mintsifry/2744",
+  "list": "official",
+  "packages": [],
+  "verified_in": {},
+  "unverified": [
+   "com.spastv.ru"
+  ],
+  "domains": [],
+  "notes": ""
+ },
+ {
+  "service": "Пятый канал",
+  "category": "TV",
+  "added": "2025-12-18",
+  "source": "https://t.me/mintsifry/2744",
+  "list": "official",
+  "packages": [],
+  "verified_in": {},
+  "unverified": [],
+  "domains": [],
+  "notes": "No app found."
+ },
+ {
+  "service": "Рен ТВ",
+  "category": "TV",
+  "added": "2025-12-18",
+  "source": "https://t.me/mintsifry/2744",
+  "list": "official",
+  "packages": [],
+  "verified_in": {},
+  "unverified": [],
+  "domains": [],
+  "notes": "No app found."
+ },
+ {
+  "service": "Пятница",
+  "category": "TV",
+  "added": "2025-12-18",
+  "source": "https://t.me/mintsifry/2744",
+  "list": "official",
+  "packages": [],
+  "verified_in": {},
+  "unverified": [],
+  "domains": [],
+  "notes": "No app found."
+ },
+ {
+  "service": "Домашний",
+  "category": "TV",
+  "added": "2025-12-18",
+  "source": "https://t.me/mintsifry/2744",
+  "list": "official",
+  "packages": [
+   "com.maximumsoft.domashniy"
+  ],
+  "verified_in": {
+   "com.maximumsoft.domashniy": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": "GP developer: CTC Media."
+ },
+ {
+  "service": "Муз ТВ",
+  "category": "TV",
+  "added": "2025-12-18",
+  "source": "https://t.me/mintsifry/2744",
+  "list": "official",
+  "packages": [],
+  "verified_in": {},
+  "unverified": [
+   "com.muz_tv.app"
+  ],
+  "domains": [],
+  "notes": ""
+ },
+ {
+  "service": "Иви",
+  "category": "video",
+  "added": "2025-12-18",
+  "source": "https://t.me/mintsifry/2744",
+  "list": "official",
+  "packages": [
+   "ru.ivi.client"
+  ],
+  "verified_in": {
+   "ru.ivi.client": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": ""
+ },
+ {
+  "service": "ВкусВилл",
+  "category": "grocery",
+  "added": "2025-12-18",
+  "source": "https://t.me/mintsifry/2744",
+  "list": "official",
+  "packages": [
+   "ru.vkusvill"
+  ],
+  "verified_in": {
+   "ru.vkusvill": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": ""
+ },
+ {
+  "service": "Ашан",
+  "category": "grocery",
+  "added": "2025-12-18",
+  "source": "https://t.me/mintsifry/2744",
+  "list": "official",
+  "packages": [
+   "ru.myauchan.droid"
+  ],
+  "verified_in": {
+   "ru.myauchan.droid": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": ""
+ },
+ {
+  "service": "Спар",
+  "category": "grocery",
+  "added": "2025-12-18",
+  "source": "https://t.me/mintsifry/2744",
+  "list": "official",
+  "packages": [
+   "ru.myspar"
+  ],
+  "verified_in": {
+   "ru.myspar": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": "«Мой SPAR» (developer SPAR Middle Volga); regional SPAR franchises have other apps."
+ },
+ {
+  "service": "Metro",
+  "category": "grocery",
+  "added": "2025-12-18",
+  "source": "https://t.me/mintsifry/2744",
+  "list": "official",
+  "packages": [
+   "www.metro.com"
+  ],
+  "verified_in": {
+   "www.metro.com": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": "GP developer: METRO Cash & Carry Russia."
+ },
+ {
+  "service": "Петрович",
+  "category": "retail (DIY)",
+  "added": "2025-12-18",
+  "source": "https://t.me/mintsifry/2744",
+  "list": "official",
+  "packages": [
+   "ru.handh.petrovich"
+  ],
+  "verified_in": {
+   "ru.handh.petrovich": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": ""
+ },
+ {
+  "service": "ВТБ",
+  "category": "bank",
+  "added": "2026-02-04",
+  "source": "https://t.me/mintsifry/2768",
+  "list": "official",
+  "packages": [
+   "ru.vtb24.mobilebanking.android"
+  ],
+  "verified_in": {
+   "ru.vtb24.mobilebanking.android": "RS"
+  },
+  "unverified": [],
+  "domains": [
+   "vtb.ru"
+  ],
+  "notes": "Not on Google Play; RuStore only."
+ },
+ {
+  "service": "ПСБ",
+  "category": "bank",
+  "added": "2026-02-04",
+  "source": "https://t.me/mintsifry/2768",
+  "list": "official",
+  "packages": [
+   "logo.com.mbanking"
+  ],
+  "verified_in": {
+   "logo.com.mbanking": "RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": "Not on Google Play; RuStore only."
+ },
+ {
+  "service": "СДЭК",
+  "category": "delivery",
+  "added": "2026-02-04",
+  "source": "https://t.me/mintsifry/2768",
+  "list": "official",
+  "packages": [
+   "com.logistic.sdek"
+  ],
+  "verified_in": {
+   "com.logistic.sdek": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": ""
+ },
+ {
+  "service": "Купер",
+  "category": "delivery",
+  "added": "2026-02-04",
+  "source": "https://t.me/mintsifry/2768",
+  "list": "official",
+  "packages": [
+   "ru.instamart"
+  ],
+  "verified_in": {
+   "ru.instamart": "RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": "RuStore only."
+ },
+ {
+  "service": "Самокат",
+  "category": "delivery",
+  "added": "2026-02-04",
+  "source": "https://t.me/mintsifry/2768",
+  "list": "official",
+  "packages": [
+   "ru.sbcs.store"
+  ],
+  "verified_in": {
+   "ru.sbcs.store": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": ""
+ },
+ {
+  "service": "ВГТРК (медиахолдинг)",
+  "category": "TV / radio",
+  "added": "2026-02-04",
+  "source": "https://t.me/mintsifry/2768",
+  "list": "official",
+  "packages": [
+   "com.vgtrk.smotrim"
+  ],
+  "verified_in": {
+   "com.vgtrk.smotrim": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": "The «СМОТРИМ» app."
+ },
+ {
+  "service": "Телеканал «Звезда»",
+  "category": "TV",
+  "added": "2026-02-04",
+  "source": "https://t.me/mintsifry/2768",
+  "list": "official",
+  "packages": [],
+  "verified_in": {},
+  "unverified": [
+   "ru.infolio.zvezdatv"
+  ],
+  "domains": [],
+  "notes": ""
+ },
+ {
+  "service": "Вместе-РФ",
+  "category": "TV",
+  "added": "2026-02-04",
+  "source": "https://t.me/mintsifry/2768",
+  "list": "official",
+  "packages": [],
+  "verified_in": {},
+  "unverified": [],
+  "domains": [],
+  "notes": "No app found."
+ },
+ {
+  "service": "Матч ТВ",
+  "category": "TV / sport",
+  "added": "2026-02-04",
+  "source": "https://t.me/mintsifry/2768",
+  "list": "official",
+  "packages": [
+   "com.match.club"
+  ],
+  "verified_in": {
+   "com.match.club": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": "The «Матч здесь!» app (developer ГПМ Цифровые инновации)."
+ },
+ {
+  "service": "Коммерсантъ",
+  "category": "media",
+  "added": "2026-02-04",
+  "source": "https://t.me/mintsifry/2768",
+  "list": "official",
+  "packages": [],
+  "verified_in": {},
+  "unverified": [
+   "com.nsadv.kommersant"
+  ],
+  "domains": [
+   "kommersant.ru"
+  ],
+  "notes": ""
+ },
+ {
+  "service": "Парламентская газета",
+  "category": "media",
+  "added": "2026-02-04",
+  "source": "https://t.me/mintsifry/2768",
+  "list": "official",
+  "packages": [],
+  "verified_in": {},
+  "unverified": [],
+  "domains": [],
+  "notes": "No app found."
+ },
+ {
+  "service": "Витрина ТВ",
+  "category": "TV distribution",
+  "added": "2026-02-04",
+  "source": "https://t.me/mintsifry/2768",
+  "list": "official",
+  "packages": [
+   "tv.vitrina.client"
+  ],
+  "verified_in": {
+   "tv.vitrina.client": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": ""
+ },
+ {
+  "service": "ФНС России (ряд сервисов для налогоплательщиков)",
+  "category": "gov / tax",
+  "added": "2026-02-04",
+  "source": "https://t.me/mintsifry/2768",
+  "list": "official",
+  "packages": [
+   "ru.fns.lkfl",
+   "com.gnivts.selfemployed"
+  ],
+  "verified_in": {
+   "ru.fns.lkfl": "GP+RS",
+   "com.gnivts.selfemployed": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [
+   "nalog.gov.ru"
+  ],
+  "notes": "Налоги ФЛ and Мой налог (both published by ФНС России). The ministry did not say which FNS services."
+ },
+ {
+  "service": "ГИС ЖКХ",
+  "category": "gov / utilities",
+  "added": "2026-02-04",
+  "source": "https://t.me/mintsifry/2768",
+  "list": "official",
+  "packages": [
+   "ru.sigma.gisgkh"
+  ],
+  "verified_in": {
+   "ru.sigma.gisgkh": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [
+   "dom.gosuslugi.ru"
+  ],
+  "notes": "The «Госуслуги Дом» app."
+ },
+ {
+  "service": "Гранд Сервис Экспресс",
+  "category": "rail",
+  "added": "2026-02-04",
+  "source": "https://t.me/mintsifry/2768",
+  "list": "official",
+  "packages": [
+   "com.ticket_train"
+  ],
+  "verified_in": {
+   "com.ticket_train": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": "The carrier's own Telegram channel names «GrandTrain 2.0»."
+ },
+ {
+  "service": "Тензор",
+  "category": "business / EDO",
+  "added": "2026-02-04",
+  "source": "https://t.me/mintsifry/2768",
+  "list": "official",
+  "packages": [
+   "ru.tensor.sbis.droid.saby"
+  ],
+  "verified_in": {
+   "ru.tensor.sbis.droid.saby": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": "Saby (ex-СБИС); Тензор publishes several other Saby apps."
+ },
+ {
+  "service": "СКБ Контур",
+  "category": "business / EDO",
+  "added": "2026-02-04",
+  "source": "https://t.me/mintsifry/2768",
+  "list": "official",
+  "packages": [
+   "com.kontur.diadoc2",
+   "com.kontur_elba",
+   "ru.kontur.talk"
+  ],
+  "verified_in": {
+   "com.kontur.diadoc2": "GP+RS",
+   "com.kontur_elba": "GP+RS",
+   "ru.kontur.talk": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": "Main apps only; Контур has more."
+ },
+ {
+  "service": "Эвотор",
+  "category": "business / POS",
+  "added": "2026-02-04",
+  "source": "https://t.me/mintsifry/2768",
+  "list": "official",
+  "packages": [
+   "ru.evotor.dashboard"
+  ],
+  "verified_in": {
+   "ru.evotor.dashboard": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": ""
+ },
+ {
+  "service": "Приложение «Инспектор» (дистанционные проверки)",
+  "category": "gov / business",
+  "added": "2026-02-04",
+  "source": "https://t.me/mintsifry/2768",
+  "list": "official",
+  "packages": [
+   "team.rtds.checkcontrol"
+  ],
+  "verified_in": {
+   "team.rtds.checkcontrol": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": "«МП. Инспектор», GP developer Минцифры России."
+ },
+ {
+  "service": "Росагролизинг",
+  "category": "business",
+  "added": "2026-02-04",
+  "source": "https://t.me/mintsifry/2768",
+  "list": "official",
+  "packages": [
+   "ru.rosagroleasing.mobile"
+  ],
+  "verified_in": {
+   "ru.rosagroleasing.mobile": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": ""
+ },
+ {
+  "service": "Детский мир",
+  "category": "retail",
+  "added": "2026-02-04",
+  "source": "https://t.me/mintsifry/2768",
+  "list": "official",
+  "packages": [
+   "ru.detmir.dmbonus"
+  ],
+  "verified_in": {
+   "ru.detmir.dmbonus": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": ""
+ },
+ {
+  "service": "Бургер Кинг",
+  "category": "food",
+  "added": "2026-02-04",
+  "source": "https://t.me/mintsifry/2768",
+  "list": "official",
+  "packages": [
+   "ru.burgerking"
+  ],
+  "verified_in": {
+   "ru.burgerking": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": ""
+ },
+ {
+  "service": "Мегамаркет",
+  "category": "marketplace",
+  "added": "2026-02-04",
+  "source": "https://t.me/mintsifry/2768",
+  "list": "official",
+  "packages": [
+   "ru.megamarket.marketplace"
+  ],
+  "verified_in": {
+   "ru.megamarket.marketplace": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": ""
+ },
+ {
+  "service": "Региональные сервисы и сайты правительств субъектов (волна 04.02)",
+  "category": "regional",
+  "added": "2026-02-04",
+  "source": "https://t.me/mintsifry/2768",
+  "list": "official",
+  "packages": [],
+  "verified_in": {},
+  "unverified": [],
+  "domains": [],
+  "notes": "Not itemised."
+ },
+ {
+  "service": "Делимобиль",
+  "category": "carsharing",
+  "added": "2026-02-17",
+  "source": "https://www.interfax.ru/digital/1073257",
+  "list": "company/agency announcement",
+  "packages": [
+   "com.carshering"
+  ],
+  "verified_in": {
+   "com.carshering": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": "The companies announced it on 2026-02-17; the ministry listed it in its 2026-04-23 release."
+ },
+ {
+  "service": "BelkaCar",
+  "category": "carsharing",
+  "added": "2026-02-17",
+  "source": "https://www.interfax.ru/digital/1073257",
+  "list": "company/agency announcement",
+  "packages": [
+   "ru.belkacar.belkacar"
+  ],
+  "verified_in": {
+   "ru.belkacar.belkacar": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": "The companies announced it on 2026-02-17; the ministry listed it in its 2026-04-23 release."
+ },
+ {
+  "service": "М-Лайн. Дистанционный контроль сахарного диабета",
+  "category": "health / CGM",
+  "added": "2026-04-01",
+  "source": "https://digital.gov.ru/news/v-belyj-spisok-vklyucheny-servisy-distanczionnogo-kontrolya-urovnya-sahara-v-krovi",
+  "list": "official",
+  "packages": [
+   "com.m_line"
+  ],
+  "verified_in": {
+   "com.m_line": "RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": "RuStore only."
+ },
+ {
+  "service": "Сателлит Online (ЭЛТА)",
+  "category": "health / glucose",
+  "added": "2026-04-01",
+  "source": "https://digital.gov.ru/news/v-belyj-spisok-vklyucheny-servisy-distanczionnogo-kontrolya-urovnya-sahara-v-krovi",
+  "list": "official",
+  "packages": [
+   "com.elta.android"
+  ],
+  "verified_in": {
+   "com.elta.android": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": ""
+ },
+ {
+  "service": "IoMT.Istok (платформа удалённого контроля)",
+  "category": "health",
+  "added": "2026-04-01",
+  "source": "https://digital.gov.ru/news/v-belyj-spisok-vklyucheny-servisy-distanczionnogo-kontrolya-urovnya-sahara-v-krovi",
+  "list": "official",
+  "packages": [],
+  "verified_in": {},
+  "unverified": [],
+  "domains": [],
+  "notes": "No public app found."
+ },
+ {
+  "service": "Inme (контроль артериального давления)",
+  "category": "health",
+  "added": "2026-04-01",
+  "source": "https://digital.gov.ru/news/v-belyj-spisok-vklyucheny-servisy-distanczionnogo-kontrolya-urovnya-sahara-v-krovi",
+  "list": "official",
+  "packages": [],
+  "verified_in": {},
+  "unverified": [],
+  "domains": [],
+  "notes": "No app found."
+ },
+ {
+  "service": "ДиаНянь",
+  "category": "health / CGM",
+  "added": "2026-04-01",
+  "source": "https://digital.gov.ru/news/v-belyj-spisok-vklyucheny-servisy-distanczionnogo-kontrolya-urovnya-sahara-v-krovi",
+  "list": "official",
+  "packages": [
+   "ru.rss.dianyan"
+  ],
+  "verified_in": {
+   "ru.rss.dianyan": "GP"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": ""
+ },
+ {
+  "service": "Yuwell Anytime / Anytime",
+  "category": "health / CGM",
+  "added": "2026-04-01",
+  "source": "https://digital.gov.ru/news/v-belyj-spisok-vklyucheny-servisy-distanczionnogo-kontrolya-urovnya-sahara-v-krovi",
+  "list": "official",
+  "packages": [
+   "com.anytime.rus2",
+   "com.anytime.global"
+  ],
+  "verified_in": {
+   "com.anytime.rus2": "GP+RS",
+   "com.anytime.global": "GP"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": "RU and global builds."
+ },
+ {
+  "service": "Follow Anytime / Anytime Follow",
+  "category": "health / CGM",
+  "added": "2026-04-01",
+  "source": "https://digital.gov.ru/news/v-belyj-spisok-vklyucheny-servisy-distanczionnogo-kontrolya-urovnya-sahara-v-krovi",
+  "list": "official",
+  "packages": [
+   "com.anytimefollow.rus",
+   "com.anytimefollow.global"
+  ],
+  "verified_in": {
+   "com.anytimefollow.rus": "RS",
+   "com.anytimefollow.global": "GP"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": "RU build is RuStore only; global build is GP."
+ },
+ {
+  "service": "POCTech CGM",
+  "category": "health / CGM",
+  "added": "2026-04-01",
+  "source": "https://digital.gov.ru/news/v-belyj-spisok-vklyucheny-servisy-distanczionnogo-kontrolya-urovnya-sahara-v-krovi",
+  "list": "official",
+  "packages": [
+   "com.poctechcorp.pocct2",
+   "com.poctechcorp.pocct"
+  ],
+  "verified_in": {
+   "com.poctechcorp.pocct2": "GP",
+   "com.poctechcorp.pocct": "RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": "GP and RuStore use different IDs."
+ },
+ {
+  "service": "iCan Health",
+  "category": "health / CGM",
+  "added": "2026-04-01",
+  "source": "https://digital.gov.ru/news/v-belyj-spisok-vklyucheny-servisy-distanczionnogo-kontrolya-urovnya-sahara-v-krovi",
+  "list": "official",
+  "packages": [
+   "com.sinocare.ican.health.ru",
+   "com.sinocare.ican.health.ce"
+  ],
+  "verified_in": {
+   "com.sinocare.ican.health.ru": "GP+RS",
+   "com.sinocare.ican.health.ce": "GP"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": ""
+ },
+ {
+  "service": "iCan Reach",
+  "category": "health / CGM",
+  "added": "2026-04-01",
+  "source": "https://digital.gov.ru/news/v-belyj-spisok-vklyucheny-servisy-distanczionnogo-kontrolya-urovnya-sahara-v-krovi",
+  "list": "official",
+  "packages": [
+   "com.sinocare.cgm.follow.ru",
+   "com.sinocare.cgm.follow.ce"
+  ],
+  "verified_in": {
+   "com.sinocare.cgm.follow.ru": "GP",
+   "com.sinocare.cgm.follow.ce": "GP"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": ""
+ },
+ {
+  "service": "Syai Link",
+  "category": "health / CGM",
+  "added": "2026-04-01",
+  "source": "https://digital.gov.ru/news/v-belyj-spisok-vklyucheny-servisy-distanczionnogo-kontrolya-urovnya-sahara-v-krovi",
+  "list": "official",
+  "packages": [
+   "com.syai.home.ru",
+   "com.syai.home"
+  ],
+  "verified_in": {
+   "com.syai.home.ru": "GP",
+   "com.syai.home": "GP"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": ""
+ },
+ {
+  "service": "FreeStyle LibreLink",
+  "category": "health / CGM",
+  "added": "2026-04-01",
+  "source": "https://digital.gov.ru/news/v-belyj-spisok-vklyucheny-servisy-distanczionnogo-kontrolya-urovnya-sahara-v-krovi",
+  "list": "official",
+  "packages": [
+   "com.freestylelibre.app.ru"
+  ],
+  "verified_in": {
+   "com.freestylelibre.app.ru": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": ""
+ },
+ {
+  "service": "FreeStyle Libre 2",
+  "category": "health / CGM",
+  "added": "2026-04-01",
+  "source": "https://digital.gov.ru/news/v-belyj-spisok-vklyucheny-servisy-distanczionnogo-kontrolya-urovnya-sahara-v-krovi",
+  "list": "official",
+  "packages": [
+   "com.freestylelibre2.app.ru"
+  ],
+  "verified_in": {
+   "com.freestylelibre2.app.ru": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": ""
+ },
+ {
+  "service": "Glutec",
+  "category": "health / CGM",
+  "added": "2026-04-01",
+  "source": "https://digital.gov.ru/news/v-belyj-spisok-vklyucheny-servisy-distanczionnogo-kontrolya-urovnya-sahara-v-krovi",
+  "list": "official",
+  "packages": [
+   "com.ruapp.glutec"
+  ],
+  "verified_in": {
+   "com.ruapp.glutec": "GP"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": ""
+ },
+ {
+  "service": "Lumiflex, Lumiflex Linx, Lumipod",
+  "category": "health / CGM",
+  "added": "2026-04-01",
+  "source": "https://digital.gov.ru/news/v-belyj-spisok-vklyucheny-servisy-distanczionnogo-kontrolya-urovnya-sahara-v-krovi",
+  "list": "official",
+  "packages": [
+   "com.microtechmd.cgms.lumi.mmol",
+   "com.microtech.aidexx.lumi.mmoll",
+   "com.microtechmd.pda.ru"
+  ],
+  "verified_in": {
+   "com.microtechmd.cgms.lumi.mmol": "GP",
+   "com.microtech.aidexx.lumi.mmoll": "GP+RS",
+   "com.microtechmd.pda.ru": "GP"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": ""
+ },
+ {
+  "service": "Hematonix, Hematonix Max",
+  "category": "health / CGM",
+  "added": "2026-04-01",
+  "source": "https://digital.gov.ru/news/v-belyj-spisok-vklyucheny-servisy-distanczionnogo-kontrolya-urovnya-sahara-v-krovi",
+  "list": "official",
+  "packages": [],
+  "verified_in": {},
+  "unverified": [],
+  "domains": [],
+  "notes": "No app found in either store."
+ },
+ {
+  "service": "MQ CGM",
+  "category": "health / CGM",
+  "added": "2026-04-01",
+  "source": "https://digital.gov.ru/news/v-belyj-spisok-vklyucheny-servisy-distanczionnogo-kontrolya-urovnya-sahara-v-krovi",
+  "list": "official",
+  "packages": [
+   "com.mq.app.mqmonitor"
+  ],
+  "verified_in": {
+   "com.mq.app.mqmonitor": "GP"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": "Only the global build was found."
+ },
+ {
+  "service": "Medtrum EasyPatch / EasyTouch / EasyFollow / EasySense",
+  "category": "health / CGM",
+  "added": "2026-04-01",
+  "source": "https://digital.gov.ru/news/v-belyj-spisok-vklyucheny-servisy-distanczionnogo-kontrolya-urovnya-sahara-v-krovi",
+  "list": "official",
+  "packages": [
+   "com.medtrum.easypatchforandroidmmol",
+   "com.medtrum.easytouchforandroidmmol",
+   "com.medtrum.easyfollowforandroidmmol",
+   "com.medtrum.easysenseforandroidmmol",
+   "com.medtrum.easytouchforandroidmg",
+   "com.medtrum.easyfollowforandroidmg",
+   "com.medtrum.easysenseforandroidmg"
+  ],
+  "verified_in": {
+   "com.medtrum.easypatchforandroidmmol": "GP",
+   "com.medtrum.easytouchforandroidmmol": "GP",
+   "com.medtrum.easyfollowforandroidmmol": "GP+RS",
+   "com.medtrum.easysenseforandroidmmol": "GP+RS",
+   "com.medtrum.easytouchforandroidmg": "GP",
+   "com.medtrum.easyfollowforandroidmg": "GP",
+   "com.medtrum.easysenseforandroidmg": "GP"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": "mmol/L builds are the ones used in Russia; mg/dL builds also exist."
+ },
+ {
+  "service": "Газпромбанк",
+  "category": "bank",
+  "added": "2026-04-03",
+  "source": "https://expert.ru/news/mintsifry-soobshchilo-o-vklyuchenii-gazprombanka-i-mts-banka-v-belye-spiski",
+  "list": "official (press service via media)",
+  "packages": [
+   "ru.gazprombank.android.mobilebank.app"
+  ],
+  "verified_in": {
+   "ru.gazprombank.android.mobilebank.app": "RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": "Известия cited the ministry's press service on 2026-04-03; the bank also appears in the 2026-04-23 release (Bankinform dates it 2026-04-24). Not on Google Play; RuStore only."
+ },
+ {
+  "service": "МТС Банк",
+  "category": "bank",
+  "added": "2026-04-03",
+  "source": "https://expert.ru/news/mintsifry-soobshchilo-o-vklyuchenii-gazprombanka-i-mts-banka-v-belye-spiski",
+  "list": "official (press service via media)",
+  "packages": [
+   "ru.lewis.dbo"
+  ],
+  "verified_in": {
+   "ru.lewis.dbo": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [
+   "mtsbank.ru"
+  ],
+  "notes": "Известия cited the ministry's press service on 2026-04-03; MTS Bank is not in any ministry post itself. The bank's app is now «МТС Деньги»."
+ },
+ {
+  "service": "ЛизаАлерт",
+  "category": "volunteer / rescue",
+  "added": "2026-04-23",
+  "source": "https://digital.gov.ru/news/servisov-dostupnyh-pri-ogranicheniyah-mobilnogo-interneta-stalo-bolshe",
+  "list": "official",
+  "packages": [],
+  "verified_in": {},
+  "unverified": [
+   "ru.kireev.mir.volunteerlizaalert",
+   "ru.kireev.mir.registrarlizaalert"
+  ],
+  "domains": [
+   "lizaalert.org"
+  ],
+  "notes": ""
+ },
+ {
+  "service": "Добро.рф",
+  "category": "volunteer",
+  "added": "2026-04-23",
+  "source": "https://digital.gov.ru/news/servisov-dostupnyh-pri-ogranicheniyah-mobilnogo-interneta-stalo-bolshe",
+  "list": "official",
+  "packages": [
+   "ru.dobro"
+  ],
+  "verified_in": {
+   "ru.dobro": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": "The official site links to this ID."
+ },
+ {
+  "service": "Общероссийский народный фронт",
+  "category": "public org",
+  "added": "2026-04-23",
+  "source": "https://digital.gov.ru/news/servisov-dostupnyh-pri-ogranicheniyah-mobilnogo-interneta-stalo-bolshe",
+  "list": "official",
+  "packages": [
+   "ru.onf.dobro",
+   "ru.onf.rdr"
+  ],
+  "verified_in": {
+   "ru.onf.dobro": "RS",
+   "ru.onf.rdr": "RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": "RuStore only: «Народный Фронт», «Радар.НФ»."
+ },
+ {
+  "service": "Российское общество «Знание»",
+  "category": "education",
+  "added": "2026-04-23",
+  "source": "https://digital.gov.ru/news/servisov-dostupnyh-pri-ogranicheniyah-mobilnogo-interneta-stalo-bolshe",
+  "list": "official",
+  "packages": [
+   "znanie.akademiya"
+  ],
+  "verified_in": {
+   "znanie.akademiya": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": "«Знание.Академия» (developer ZnanieRussia)."
+ },
+ {
+  "service": "Медси",
+  "category": "health / clinics",
+  "added": "2026-04-23",
+  "source": "https://digital.gov.ru/news/servisov-dostupnyh-pri-ogranicheniyah-mobilnogo-interneta-stalo-bolshe",
+  "list": "official",
+  "packages": [
+   "ru.mts.smartmed"
+  ],
+  "verified_in": {
+   "ru.mts.smartmed": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": "The SmartMed app (GP developer: МЕДСИ)."
+ },
+ {
+  "service": "Мать и дитя",
+  "category": "health / clinics",
+  "added": "2026-04-23",
+  "source": "https://digital.gov.ru/news/servisov-dostupnyh-pri-ogranicheniyah-mobilnogo-interneta-stalo-bolshe",
+  "list": "official",
+  "packages": [
+   "ru.dmo.motherandchild"
+  ],
+  "verified_in": {
+   "ru.dmo.motherandchild": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": ""
+ },
+ {
+  "service": "Рувики",
+  "category": "reference",
+  "added": "2026-04-23",
+  "source": "https://digital.gov.ru/news/servisov-dostupnyh-pri-ogranicheniyah-mobilnogo-interneta-stalo-bolshe",
+  "list": "official",
+  "packages": [],
+  "verified_in": {},
+  "unverified": [],
+  "domains": [],
+  "notes": "No app found."
+ },
+ {
+  "service": "Роскачество",
+  "category": "gov / consumer",
+  "added": "2026-04-23",
+  "source": "https://digital.gov.ru/news/servisov-dostupnyh-pri-ogranicheniyah-mobilnogo-interneta-stalo-bolshe",
+  "list": "official",
+  "packages": [],
+  "verified_in": {},
+  "unverified": [
+   "theappshop.roskachestvo"
+  ],
+  "domains": [],
+  "notes": ""
+ },
+ {
+  "service": "АО «ГЛОНАСС»",
+  "category": "gov / telematics",
+  "added": "2026-04-23",
+  "source": "https://digital.gov.ru/news/servisov-dostupnyh-pri-ogranicheniyah-mobilnogo-interneta-stalo-bolshe",
+  "list": "official",
+  "packages": [],
+  "verified_in": {},
+  "unverified": [],
+  "domains": [],
+  "notes": "No consumer app identified."
+ },
+ {
+  "service": "Лента",
+  "category": "grocery",
+  "added": "2026-04-23",
+  "source": "https://digital.gov.ru/news/servisov-dostupnyh-pri-ogranicheniyah-mobilnogo-interneta-stalo-bolshe",
+  "list": "official",
+  "packages": [
+   "com.icemobile.lenta.prod",
+   "ru.lenta.lentochka"
+  ],
+  "verified_in": {
+   "com.icemobile.lenta.prod": "RS",
+   "ru.lenta.lentochka": "RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": "RuStore only."
+ },
+ {
+  "service": "О'КЕЙ",
+  "category": "grocery",
+  "added": "2026-04-23",
+  "source": "https://digital.gov.ru/news/servisov-dostupnyh-pri-ogranicheniyah-mobilnogo-interneta-stalo-bolshe",
+  "list": "official",
+  "packages": [
+   "ru.reksoft.okey"
+  ],
+  "verified_in": {
+   "ru.reksoft.okey": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": ""
+ },
+ {
+  "service": "Достависта",
+  "category": "delivery",
+  "added": "2026-04-23",
+  "source": "https://digital.gov.ru/news/servisov-dostupnyh-pri-ogranicheniyah-mobilnogo-interneta-stalo-bolshe",
+  "list": "official",
+  "packages": [
+   "com.sebbia.delivery.client",
+   "com.sebbia.delivery"
+  ],
+  "verified_in": {
+   "com.sebbia.delivery.client": "GP+RS",
+   "com.sebbia.delivery": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": "Client app and courier app."
+ },
+ {
+  "service": "Додо Пицца",
+  "category": "food",
+  "added": "2026-04-23",
+  "source": "https://digital.gov.ru/news/servisov-dostupnyh-pri-ogranicheniyah-mobilnogo-interneta-stalo-bolshe",
+  "list": "official",
+  "packages": [
+   "ru.dodopizza.app"
+  ],
+  "verified_in": {
+   "ru.dodopizza.app": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": ""
+ },
+ {
+  "service": "Premier",
+  "category": "video",
+  "added": "2026-04-23",
+  "source": "https://digital.gov.ru/news/servisov-dostupnyh-pri-ogranicheniyah-mobilnogo-interneta-stalo-bolshe",
+  "list": "official",
+  "packages": [
+   "gpm.tnt_premier"
+  ],
+  "verified_in": {
+   "gpm.tnt_premier": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": ""
+ },
+ {
+  "service": "ВТБ-Мобайл",
+  "category": "telecom",
+  "added": "2026-04-23",
+  "source": "https://digital.gov.ru/news/servisov-dostupnyh-pri-ogranicheniyah-mobilnogo-interneta-stalo-bolshe",
+  "list": "official",
+  "packages": [],
+  "verified_in": {},
+  "unverified": [],
+  "domains": [],
+  "notes": "No separate app found."
+ },
+ {
+  "service": "Next mobile",
+  "category": "telecom",
+  "added": "2026-04-23",
+  "source": "https://digital.gov.ru/news/servisov-dostupnyh-pri-ogranicheniyah-mobilnogo-interneta-stalo-bolshe",
+  "list": "official",
+  "packages": [
+   "ru.simtelecom.next.client.android"
+  ],
+  "verified_in": {
+   "ru.simtelecom.next.client.android": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": ""
+ },
+ {
+  "service": "Телеканал 360°",
+  "category": "TV",
+  "added": "2026-04-23",
+  "source": "https://digital.gov.ru/news/servisov-dostupnyh-pri-ogranicheniyah-mobilnogo-interneta-stalo-bolshe",
+  "list": "official",
+  "packages": [],
+  "verified_in": {},
+  "unverified": [],
+  "domains": [],
+  "notes": "No app found."
+ },
+ {
+  "service": "Дума ТВ",
+  "category": "TV",
+  "added": "2026-04-23",
+  "source": "https://digital.gov.ru/news/servisov-dostupnyh-pri-ogranicheniyah-mobilnogo-interneta-stalo-bolshe",
+  "list": "official",
+  "packages": [],
+  "verified_in": {},
+  "unverified": [],
+  "domains": [],
+  "notes": "No app found."
+ },
+ {
+  "service": "Соловьёв Live",
+  "category": "TV",
+  "added": "2026-04-23",
+  "source": "https://digital.gov.ru/news/servisov-dostupnyh-pri-ogranicheniyah-mobilnogo-interneta-stalo-bolshe",
+  "list": "official",
+  "packages": [],
+  "verified_in": {},
+  "unverified": [],
+  "domains": [],
+  "notes": "No app found."
+ },
+ {
+  "service": "Sport24",
+  "category": "media / sport",
+  "added": "2026-04-23",
+  "source": "https://digital.gov.ru/news/servisov-dostupnyh-pri-ogranicheniyah-mobilnogo-interneta-stalo-bolshe",
+  "list": "official",
+  "packages": [
+   "ru.sport24"
+  ],
+  "verified_in": {
+   "ru.sport24": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": ""
+ },
+ {
+  "service": "Росатом, Ростех, Роснефть (компании)",
+  "category": "state corporations",
+  "added": "2026-04-23",
+  "source": "https://digital.gov.ru/news/servisov-dostupnyh-pri-ogranicheniyah-mobilnogo-interneta-stalo-bolshe",
+  "list": "official",
+  "packages": [
+   "ru.pichesky.rosneft"
+  ],
+  "verified_in": {
+   "ru.pichesky.rosneft": "RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": "Mostly corporate sites. «АЗС Роснефть» (RuStore, 5M+) is the only consumer app found; it is unclear whether it is covered. Норникель is named by CNews, Ведомости and kod.ru but not by Interfax or АиФ (sources conflict)."
+ },
+ {
+  "service": "1С, Труконф, Цифровые решения регионов (ИТ-компании)",
+  "category": "IT / business",
+  "added": "2026-04-23",
+  "source": "https://digital.gov.ru/news/servisov-dostupnyh-pri-ogranicheniyah-mobilnogo-interneta-stalo-bolshe",
+  "list": "official",
+  "packages": [
+   "com.trueconf.videochat"
+  ],
+  "verified_in": {
+   "com.trueconf.videochat": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": "TrueConf's site links to this ID. 1С has many corporate apps and none was selected; ЦРР has none found."
+ },
+ {
+  "service": "HRlink",
+  "category": "business / HR",
+  "added": "2026-04-23",
+  "source": "https://digital.gov.ru/news/servisov-dostupnyh-pri-ogranicheniyah-mobilnogo-interneta-stalo-bolshe",
+  "list": "official",
+  "packages": [
+   "com.hrlink.app"
+  ],
+  "verified_in": {
+   "com.hrlink.app": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": "The official site links to this ID."
+ },
+ {
+  "service": "Федеральное казначейство",
+  "category": "gov",
+  "added": "2026-04-23",
+  "source": "https://digital.gov.ru/news/servisov-dostupnyh-pri-ogranicheniyah-mobilnogo-interneta-stalo-bolshe",
+  "list": "official",
+  "packages": [],
+  "verified_in": {},
+  "unverified": [],
+  "domains": [],
+  "notes": "Site only."
+ },
+ {
+  "service": "ГИС электронных перевозочных документов",
+  "category": "gov / logistics",
+  "added": "2026-04-23",
+  "source": "https://digital.gov.ru/news/servisov-dostupnyh-pri-ogranicheniyah-mobilnogo-interneta-stalo-bolshe",
+  "list": "official",
+  "packages": [],
+  "verified_in": {},
+  "unverified": [],
+  "domains": [],
+  "notes": "Site only."
+ },
+ {
+  "service": "Континентальная хоккейная лига",
+  "category": "sport",
+  "added": "2026-04-23",
+  "source": "https://digital.gov.ru/news/servisov-dostupnyh-pri-ogranicheniyah-mobilnogo-interneta-stalo-bolshe",
+  "list": "official",
+  "packages": [
+   "ru.zennex.khl"
+  ],
+  "verified_in": {
+   "ru.zennex.khl": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [
+   "khl.ru"
+  ],
+  "notes": ""
+ },
+ {
+  "service": "Ресурсы ДЭГ (повторно, к выборам 18–20.09.2026)",
+  "category": "gov / elections",
+  "added": "2026-06-24",
+  "source": "https://www.interfax.ru/russia/1098136",
+  "list": "official",
+  "packages": [],
+  "verified_in": {},
+  "unverified": [],
+  "domains": [
+   "vybory.gov.ru"
+  ],
+  "notes": "Ministry MAX post on 2026-06-24 (via Interfax). The ДЭГ platform was already in the first list."
+ },
+ {
+  "service": "ОТП Банк",
+  "category": "bank",
+  "added": "2026-08-06",
+  "source": "https://www.cnews.ru/news/line/2026-08-06_servisy_otp_banka_voshli",
+  "list": "company/agency announcement",
+  "packages": [
+   "ru.otpbank.mobile"
+  ],
+  "verified_in": {
+   "ru.otpbank.mobile": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": "Announced by the bank only; no ministry post found."
+ },
+ {
+  "service": "ГИС Минсельхоза (ЕЦП АПК, ФГИС УСМТ, ФГИС «Зерно», АИС «Субсидии АПК», ФГИС «Семеноводство» и др.)",
+  "category": "gov / agriculture",
+  "added": "2026-08-14",
+  "source": "https://ria.ru/20260814/rossiya-2110933407.html",
+  "list": "company/agency announcement",
+  "packages": [],
+  "verified_in": {},
+  "unverified": [],
+  "domains": [],
+  "notes": "Announced by Минсельхоз in its MAX channel. Web systems; no app identified."
+ },
+ {
+  "service": "Петербургская сбытовая компания",
+  "category": "utilities (regional)",
+  "added": "2026-11-18",
+  "source": "https://mr-7.ru/articles/2026/11/18/resursy-peterburgskoi-sbytovoi-kompanii-voshli-v-belyi-spisok-mintsifry-news",
+  "list": "company/agency announcement",
+  "packages": [
+   "ru.pesc.ikus",
+   "ru.pesc.lk"
+  ],
+  "verified_in": {
+   "ru.pesc.ikus": "GP+RS",
+   "ru.pesc.lk": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": "Announced by the company only."
+ },
+ {
+  "service": "Т-Банк",
+  "category": "bank",
+  "added": null,
+  "source": "https://moskva.mts.ru/personal/belyj-spisok-servisov",
+  "list": "operator lists only: МТС, Билайн (live); Т2 per finuslugi 16.10.2026",
+  "packages": [
+   "com.idamob.tinkoff.android"
+  ],
+  "verified_in": {
+   "com.idamob.tinkoff.android": "RS"
+  },
+  "unverified": [],
+  "domains": [
+   "tbank.ru"
+  ],
+  "notes": "Not in any ministry post. RBC (2026-02-02) reported the FSB blocks banks without SORM. RuStore only."
+ },
+ {
+  "service": "Яндекс Пэй / Яндекс Банк",
+  "category": "bank",
+  "added": null,
+  "source": "https://moskva.mts.ru/personal/belyj-spisok-servisov",
+  "list": "operator lists only: МТС, Билайн",
+  "packages": [
+   "com.yandex.bank"
+  ],
+  "verified_in": {
+   "com.yandex.bank": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [
+   "pay.yandex.ru"
+  ],
+  "notes": ""
+ },
+ {
+  "service": "Россельхозбанк",
+  "category": "bank",
+  "added": null,
+  "source": "https://moskva.beeline.ru/whitelist-unlock/",
+  "list": "operator lists only: Билайн",
+  "packages": [
+   "ru.rshb.dbo"
+  ],
+  "verified_in": {
+   "ru.rshb.dbo": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": ""
+ },
+ {
+  "service": "Mir Pay, СБПэй (НСПК)",
+  "category": "payments",
+  "added": null,
+  "source": "https://web.archive.org/web/20261025001335/https://moscow.megafon.ru/offline_services/",
+  "list": "operator lists only: МегаФон («Mir Pay», «СБП»); МТС lists НСПК (nspk.ru)",
+  "packages": [
+   "ru.nspk.mirpay",
+   "ru.nspk.sbpay"
+  ],
+  "verified_in": {
+   "ru.nspk.mirpay": "RS",
+   "ru.nspk.sbpay": "RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": "The official first list names only the Mir website. Both apps are RuStore only."
+ },
+ {
+  "service": "X5: Пятёрочка, Перекрёсток, Чижик, Впрок, Слата, Food.ru, Много лосося",
+  "category": "grocery",
+  "added": null,
+  "source": "https://web.archive.org/web/20261025001335/https://moscow.megafon.ru/offline_services/",
+  "list": "operator lists only: МегаФон, МТС, Билайн, Т2 (all four)",
+  "packages": [
+   "ru.pyaterochka.app.browser",
+   "ru.perekrestok.app",
+   "club.chizhik",
+   "ru.x5.perekrestok.darkstore",
+   "ru.x5.wl.slata",
+   "ru.x5.foodru.rs",
+   "com.thapl.ml"
+  ],
+  "verified_in": {
+   "ru.pyaterochka.app.browser": "GP+RS",
+   "ru.perekrestok.app": "GP+RS",
+   "club.chizhik": "GP+RS",
+   "ru.x5.perekrestok.darkstore": "GP+RS",
+   "ru.x5.wl.slata": "GP+RS",
+   "ru.x5.foodru.rs": "RS",
+   "com.thapl.ml": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [
+   "5ka.ru",
+   "perekrestok.ru",
+   "chizhik.club",
+   "slata.ru",
+   "food.ru"
+  ],
+  "notes": "Disputed. No ministry post names X5. kod.ru, Klerk and gogov say X5 services are on the official list (gogov dates it 2025-09-05); krd.gorod.space and others say only operators list them. The ministry's 2025-11-14 post says «супермаркеты» were in the first stage but names none. Food.ru is RuStore only."
+ },
+ {
+  "service": "Магнит",
+  "category": "grocery",
+  "added": null,
+  "source": "https://moskva.mts.ru/personal/belyj-spisok-servisov",
+  "list": "operator lists only: МегаФон, МТС, Билайн, Т2",
+  "packages": [
+   "ru.tander.magnit"
+  ],
+  "verified_in": {
+   "ru.tander.magnit": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [
+   "magnit.ru"
+  ],
+  "notes": "RBC and Новая газета (2025-09-05) reported magnit.ru in the first list; the ministry's own post does not name it (sources conflict)."
+ },
+ {
+  "service": "Дикси",
+  "category": "grocery",
+  "added": null,
+  "source": "https://moskva.beeline.ru/whitelist-unlock/",
+  "list": "operator lists only: МегаФон, Билайн, Т2",
+  "packages": [
+   "com.ru.dixy"
+  ],
+  "verified_in": {
+   "com.ru.dixy": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": ""
+ },
+ {
+  "service": "Азбука вкуса",
+  "category": "grocery",
+  "added": null,
+  "source": "https://moskva.mts.ru/personal/belyj-spisok-servisov",
+  "list": "operator lists only: МегаФон, МТС, Билайн, Т2",
+  "packages": [
+   "ru.av.vkusomania"
+  ],
+  "verified_in": {
+   "ru.av.vkusomania": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [
+   "av.ru"
+  ],
+  "notes": ""
+ },
+ {
+  "service": "RuStore (магазин приложений VK)",
+  "category": "app store",
+  "added": null,
+  "source": "https://moskva.mts.ru/personal/belyj-spisok-servisov",
+  "list": "operator lists only: МегаФон (as a VK service), МТС, Билайн",
+  "packages": [],
+  "verified_in": {},
+  "unverified": [
+   "ru.vk.store"
+  ],
+  "domains": [
+   "rustore.ru"
+  ],
+  "notes": ""
+ },
+ {
+  "service": "S7 Airlines",
+  "category": "airline",
+  "added": null,
+  "source": "https://moskva.beeline.ru/whitelist-unlock/",
+  "list": "operator lists only: МегаФон, Билайн; МТС article of 2026-06-01 (not the current МТС page)",
+  "packages": [
+   "ru.s7.android"
+  ],
+  "verified_in": {
+   "ru.s7.android": "RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": "RuStore only."
+ },
+ {
+  "service": "StarLine",
+  "category": "auto security",
+  "added": null,
+  "source": "https://moskva.mts.ru/personal/belyj-spisok-servisov",
+  "list": "operator lists only: МегаФон, МТС, Билайн",
+  "packages": [
+   "ru.starline",
+   "ru.starlinex.app"
+  ],
+  "verified_in": {
+   "ru.starline": "GP+RS",
+   "ru.starlinex.app": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [
+   "starline.ru",
+   "monitoring.plus"
+  ],
+  "notes": ""
+ },
+ {
+  "service": "Циан",
+  "category": "real estate",
+  "added": null,
+  "source": "https://moskva.mts.ru/personal/belyj-spisok-servisov",
+  "list": "operator lists only: МТС",
+  "packages": [
+   "ru.cian.main"
+  ],
+  "verified_in": {
+   "ru.cian.main": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [
+   "cian.ru"
+  ],
+  "notes": ""
+ },
+ {
+  "service": "Отелло",
+  "category": "travel",
+  "added": null,
+  "source": "https://moskva.mts.ru/personal/belyj-spisok-servisov",
+  "list": "operator lists only: МТС",
+  "packages": [
+   "otello.dgis.ru"
+  ],
+  "verified_in": {
+   "otello.dgis.ru": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [
+   "otello.ru"
+  ],
+  "notes": ""
+ },
+ {
+  "service": "Юрент",
+  "category": "scooters",
+  "added": null,
+  "source": "https://moskva.mts.ru/personal/belyj-spisok-servisov",
+  "list": "operator lists only: МТС",
+  "packages": [
+   "ru.urentbike.app"
+  ],
+  "verified_in": {
+   "ru.urentbike.app": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": ""
+ },
+ {
+  "service": "МТС Линк, КИОН Музыка, КИОН Строки",
+  "category": "telecom ecosystem",
+  "added": null,
+  "source": "https://moskva.mts.ru/personal/belyj-spisok-servisov",
+  "list": "operator lists only: МТС",
+  "packages": [
+   "ru.webinar.mobile",
+   "ru.mts.music.android",
+   "ru.mts.books.droid"
+  ],
+  "verified_in": {
+   "ru.webinar.mobile": "GP+RS",
+   "ru.mts.music.android": "GP+RS",
+   "ru.mts.books.droid": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [
+   "mts-link.ru",
+   "music.mts.ru",
+   "stroki.mts.ru"
+  ],
+  "notes": ""
+ },
+ {
+  "service": "Дневник.ру",
+  "category": "education",
+  "added": null,
+  "source": "https://moskva.mts.ru/personal/belyj-spisok-servisov",
+  "list": "operator lists only: МТС, Билайн",
+  "packages": [
+   "ru.dnevnik.app"
+  ],
+  "verified_in": {
+   "ru.dnevnik.app": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [
+   "dnevnik.ru"
+  ],
+  "notes": ""
+ },
+ {
+  "service": "eXpress (lite)",
+  "category": "messenger (corporate)",
+  "added": null,
+  "source": "https://moskva.beeline.ru/whitelist-unlock/",
+  "list": "operator lists only: Билайн",
+  "packages": [
+   "ru.unlimitedtech.express"
+  ],
+  "verified_in": {
+   "ru.unlimitedtech.express": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": ""
+ },
+ {
+  "service": "Облако билайн",
+  "category": "telecom ecosystem",
+  "added": null,
+  "source": "https://moskva.beeline.ru/whitelist-unlock/",
+  "list": "operator lists only: Билайн",
+  "packages": [
+   "ru.beeline.cloud"
+  ],
+  "verified_in": {
+   "ru.beeline.cloud": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": ""
+ },
+ {
+  "service": "Моя Виктория",
+  "category": "grocery (regional)",
+  "added": null,
+  "source": "https://moskva.beeline.ru/whitelist-unlock/",
+  "list": "operator lists only: Билайн",
+  "packages": [
+   "ru.manzanagroup.victoria"
+  ],
+  "verified_in": {
+   "ru.manzanagroup.victoria": "RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": "RuStore only."
+ },
+ {
+  "service": "Yappy",
+  "category": "video",
+  "added": null,
+  "source": "https://web.archive.org/web/20260323031842/https://msk.t2.ru/promo/whitelist",
+  "list": "operator lists only: Т2 (Mar 2026)",
+  "packages": [
+   "ru.ritmmedia.yappy"
+  ],
+  "verified_in": {
+   "ru.ritmmedia.yappy": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": ""
+ },
+ {
+  "service": "Сравни.ру",
+  "category": "finance marketplace",
+  "added": null,
+  "source": "https://web.archive.org/web/20260323031842/https://msk.t2.ru/promo/whitelist",
+  "list": "operator lists only: Т2 (Mar 2026)",
+  "packages": [
+   "ru.sravni.android.bankproduct"
+  ],
+  "verified_in": {
+   "ru.sravni.android.bankproduct": "GP+RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": ""
+ },
+ {
+  "service": "СберБанк Онлайн",
+  "category": "bank",
+  "added": null,
+  "source": "https://www.vbr.ru/novosti/tehnologii/2026/06/01/sberbank-vosel-v-belii-spisok-bankov/",
+  "list": "news only: none of the four operator pages",
+  "packages": [
+   "ru.sberbankmobile"
+  ],
+  "verified_in": {
+   "ru.sberbankmobile": "RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": "Выберу.ру (June 2026) says it worked during restrictions in its tests. It is in no ministry post and on no operator page. RuStore only."
+ },
+ {
+  "service": "Ozon Банк, WB Банк",
+  "category": "bank",
+  "added": null,
+  "source": "https://www.vbr.ru/novosti/tehnologii/2026/06/01/sberbank-vosel-v-belii-spisok-bankov/",
+  "list": "news only: none of the four operator pages",
+  "packages": [
+   "ru.ozon.fintech.finance",
+   "ru.wildberries.bank"
+  ],
+  "verified_in": {
+   "ru.ozon.fintech.finance": "RS",
+   "ru.wildberries.bank": "RS"
+  },
+  "unverified": [],
+  "domains": [],
+  "notes": "Выберу.ру says they work because they belong to listed marketplaces. Not confirmed elsewhere. RuStore only."
+ }
+]
