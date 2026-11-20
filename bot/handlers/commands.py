@@ -123,6 +123,12 @@ class CommandHandler(BaseHandler):
             from bot.handlers.payments import PaymentHandler
             PaymentHandler(self.bot, self.db, self.config)._show_plan_menu(str(chat_id))
             return
+        # t.me/<bot>?start=app: the app's «Нужна подписка» window
+        # (docs/NEKO6_PLAN.md D3). A key holder gets the one-tap import
+        # (/open/<token>, AGENTS.md section 38); anyone else the plain
+        # /start below, the way a new user asks for a demo.
+        if len(words) > 1 and words[1].lower() == 'app' and self._send_app_open(chat_id, user):
+            return
 
         notifier = NotificationService(self.bot, self.db, self.config)
         
@@ -163,7 +169,39 @@ class CommandHandler(BaseHandler):
                 )
 
         logger.info(f"Handled /start for user {chat_id}")
-    
+
+    _APP_OPEN_TEXTS = {
+        'ru': ("📲 Ваша подписка готова для NekoVPN.\n\n"
+               "Нажмите кнопку ниже, затем «Открыть в NekoVPN» на странице: "
+               "приложение добавит подписку само."),
+        'en': ("📲 Your subscription is ready for NekoVPN.\n\n"
+               "Tap the button below, then «Open in NekoVPN» on the page: "
+               "the app adds the subscription itself."),
+    }
+
+    def _send_app_open(self, chat_id: str, user) -> bool:
+        """``/start app`` for a key holder (demo / paid / support_topic with
+        a uuid): one message whose button is the key card's «📲 Открыть в
+        NekoVPN», on every platform, since the link comes from the app
+        itself. False, with nothing sent, for anyone else or while the bot
+        knows no public address."""
+        from bot.services import neko_client
+        if (getattr(user, 'status', '') or '') not in neko_client.KEY_STATUSES:
+            return False
+        url = neko_client.open_page_url(self.config, user)    # None without a uuid
+        if not url:
+            return False
+        lang = 'en' if getattr(user, 'lang', None) == 'en' else 'ru'
+        self.bot.send_message(
+            chat_id=chat_id,
+            text=self._APP_OPEN_TEXTS[lang],
+            reply_markup={'inline_keyboard': [[
+                {'text': neko_client.open_button_label(lang), 'url': url},
+            ]]},
+        )
+        logger.info(f"Handled /start app for user {chat_id}")
+        return True
+
     def handle_help(self, update: dict, chat_id: str) -> None:
         """Handle /help command.
         
