@@ -1,7 +1,7 @@
 # AGENTS.md — VPN Bot
 
 > Agent-focused guidance. For project overview, see `docs/PROJECT.md`.
-> Operational insights §1–§63: index at the end of this file, text in `docs/insights/`.
+> Operational insights §1–§64: index at the end of this file, text in `docs/insights/`.
 
 ---
 
@@ -289,3 +289,4 @@ A new insight goes into `docs/insights/NN-<slug>.md` under the next free number,
 - §61. A new connection to exit every minute: the reach check (2026-11-19) — [docs/insights/61-a-new-connection-to-exit-every.md](docs/insights/61-a-new-connection-to-exit-every.md)
 - §62. The server-first front: a banner first, for the NekoVPN app (2026-11-19, IMPROVEMENT_PLAN G4) — [docs/insights/62-the-server-first-front-a-banner.md](docs/insights/62-the-server-first-front-a-banner.md)
 - §63. Entry's address for clients, apart from the node's own: `ENTRY_PUBLIC_HOST`, `HOP_TLS_IP` (2026-11-19) — [docs/insights/63-entry-s-address-for-clients-apart.md](docs/insights/63-entry-s-address-for-clients-apart.md)
+- §64. The exit → entry tunnel: users and control apart, open-file limits, the watchdog (2026-11-20) — [docs/insights/64-the-exit-entry-tunnel-users-and-control-apart.md](docs/insights/64-the-exit-entry-tunnel-users-and-control-apart.md)

@@ -21,7 +21,9 @@ improvisation. It reads the THREE signals that actually distinguish
      bot /health, and the panel audit (``verify_panel_client_fields.py``);
   B) the entry host: shadow-tls / haproxy / the probe sidecars up
      (probe-proxy, probe-proxy-mihomo), the UDP DNAT rules that carry
-     Hysteria to exit;
+     Hysteria to exit, and the reverse SSH tunnels from exit that end here:
+     each session's open files against its limit, each forwarded port's
+     accept queue (``entry_tunnels()``);
   C) the exit host (ONE ssh round-trip): hysteria daemons, xray RUNTIME
      users per inbound (``xray api inbounduser``) vs config.json, recent
      accepted connections per inbound, hop REDIRECT rules, hysteria
@@ -119,6 +121,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
@@ -171,6 +174,15 @@ SIDECAR_FOR = {'xhr': MIHOMO_SIDECAR, probe_rules.SSH_TAG: MIHOMO_SIDECAR,
 # The relay on entry in front of ssh-exit (scripts/setup_ssh_entry_relay.sh):
 # expected where the bot's .env sets SSH_ENTRY_PORT.
 SSH_RELAY = 'ssh-relay'
+# The reverse SSH tunnels that end on entry: exit dials in and forwards its
+# ports with -R since 2026-11-19, when entry lost every way abroad
+# (docs/insights/64-the-exit-entry-tunnel-users-and-control-apart.md). Every
+# forwarded connection is an open file of entry's sshd session; at the
+# session's limit it accepts nothing on any of its ports.
+TUNNEL_PROCS = ('sshd', 'sshd-session')
+TUNNEL_FD_SHARE = 0.5          # a session past half its open-files limit: page
+TUNNEL_QUEUE_GAP_S = 2.0       # the accept queues are read twice, this far apart
+TUNNEL_KEYS = ('entry_tunnel:fd', 'entry_tunnel:queue')
 
 # One definition with the pager, the monitor and /protocols (probe_rules,
 # IMPROVEMENT_PLAN F, B5). Until 2026-11 this script called a window
@@ -712,6 +724,10 @@ def collect_layer_b() -> dict:
     else:
         errors.append(f'iptables: {se.strip()[:120] or rc}')
     out['ssh_relay'] = collect_ssh_relay()
+    try:
+        out['tunnels'] = collect_entry_tunnels()
+    except Exception:                         # noqa: BLE001 - not looked, never "fine"
+        out['tunnels'] = None
     if errors:
         out['ok'] = False
         out['error'] = '; '.join(errors)
@@ -734,6 +750,68 @@ def collect_ssh_relay() -> dict:
     else:
         state = None
     return {'port': port, 'state': state}
+
+
+_SS_PROC = re.compile(r'\("([^"]+)",pid=(\d+),fd=\d+\)')
+
+
+def parse_tunnel_listeners(ss_text) -> Dict[int, Dict[int, int]]:
+    """``ss -Hltnp`` → ``{pid: {port: accept queue}}`` for the loopback
+    listeners an sshd process holds: the ports a reverse tunnel forwards
+    (``-R 127.0.0.1:<port>:…``). On a LISTEN line Recv-Q is the number of
+    connections waiting to be accepted. Pure."""
+    out: Dict[int, Dict[int, int]] = {}
+    for line in (ss_text or '').splitlines():
+        parts = line.split()
+        if len(parts) < 6 or parts[0] != 'LISTEN' or not parts[1].isdigit():
+            continue
+        host, _, port = parts[3].rpartition(':')
+        if not port.isdigit() or not (host.startswith('127.') or host == '[::1]'):
+            continue
+        for name, pid in _SS_PROC.findall(' '.join(parts[5:])):
+            if name in TUNNEL_PROCS:
+                out.setdefault(int(pid), {})[int(port)] = int(parts[1])
+    return out
+
+
+def parse_nofile_soft(limits_text) -> Optional[int]:
+    """The soft «Max open files» of ``/proc/<pid>/limits``; None for
+    unlimited or a text without the line. Pure."""
+    for line in (limits_text or '').splitlines():
+        if line.startswith('Max open files'):
+            fields = line[len('Max open files'):].split()
+            return int(fields[0]) if fields and fields[0].isdigit() else None
+    return None
+
+
+def collect_entry_tunnels(sleep=time.sleep, proc: str = '/proc') -> Optional[List[dict]]:
+    """The reverse tunnels that end on entry: every sshd process holding a
+    loopback listener, with its open files, its soft limit and each port's
+    accept queue, read twice TUNNEL_QUEUE_GAP_S apart. ``[]``: no tunnel on
+    this host. None: ss could not be asked (the keys stay as they were). A
+    session that ended between the reads is left out: its successor is new."""
+    samples = []
+    for i in range(2):
+        if i:
+            sleep(TUNNEL_QUEUE_GAP_S)
+        rc, so, _se = _run(['ss', '-Hltnp'], 10)
+        if rc != 0:
+            return None
+        samples.append(parse_tunnel_listeners(so))
+    first, second = samples
+    out = []
+    for pid in sorted(set(first) & set(second)):
+        try:
+            fds = len(os.listdir(f'{proc}/{pid}/fd'))
+            with open(f'{proc}/{pid}/limits') as fh:
+                limit = parse_nofile_soft(fh.read())
+        except OSError:
+            continue
+        ports = sorted(set(first[pid]) & set(second[pid]))
+        out.append({'pid': pid, 'fds': fds, 'limit': limit,
+                    'listeners': [{'port': port, 'queue': [first[pid][port], second[pid][port]]}
+                                  for port in ports]})
+    return out
 
 
 def collect_layer_c(sni: str) -> dict:
@@ -1539,6 +1617,59 @@ def entry_relay(b: dict) -> Tuple[List[dict], List[str]]:
                      f"/opt/vpn-bot/scripts/setup_ssh_entry_relay.sh"}], []
 
 
+TUNNEL_FD_NEXT = ("ss -Htn state established | awk '{n = split($3, a, \":\"); print a[n]}' "
+                  "| sort | uniq -c | sort -rn | head -5  # какой порт держит соединения "
+                  "(docs/insights/64)")
+TUNNEL_QUEUE_NEXT = ("ss -Hltnp | awk '$2 > 0'  # чья очередь; затем ls /proc/<pid>/fd | wc -l "
+                     "и grep 'open files' /proc/<pid>/limits (docs/insights/64)")
+
+
+def entry_tunnels(b: dict) -> Tuple[List[dict], List[str]]:
+    """(findings, unjudged keys) for the reverse SSH tunnels that end on
+    entry (``collect_entry_tunnels``).
+
+    ``entry_tunnel:fd``: a session holds TUNNEL_FD_SHARE or more of its
+    open-files limit. At the limit it accepts nothing on any forwarded port:
+    on 2026-11-19/20, 1008 of 1024 were hy2 sessions through wstunnel that
+    never closed, and every protocol and the bot's Telegram went with them.
+    ``entry_tunnel:queue``: connections wait to be accepted on a forwarded
+    port in both reads, so the session is not taking them.
+
+    Both critical: the pager sends only critical to Telegram, and a full
+    tunnel takes every user at once. No tunnel on this host: nothing to say.
+    Not looked (ss failed, or a collector without the fact): kept as is."""
+    tunnels = b.get('tunnels')
+    if not isinstance(tunnels, list):
+        return [], list(TUNNEL_KEYS)
+    out: List[dict] = []
+    full = [t for t in tunnels
+            if isinstance(t.get('fds'), int) and isinstance(t.get('limit'), int)
+            and t['limit'] > 0 and t['fds'] >= t['limit'] * TUNNEL_FD_SHARE]
+    if full:
+        worst = max(full, key=lambda t: t['fds'] / t['limit'])
+        ports = ', '.join(f":{lst.get('port')}" for lst in worst.get('listeners') or []) or '—'
+        then = ('предел, новые соединения не принимаются ни на одном порту'
+                if worst['fds'] >= worst['limit']
+                else 'на пределе он перестанет принимать соединения на всех портах')
+        out.append({'key': 'entry_tunnel:fd', 'layer': 'b', 'severity': 'critical',
+                    'title': (f"туннель exit → entry занял {worst['fds']} из {worst['limit']} "
+                              f"файлов ({worst['fds'] * 100 // worst['limit']}%, порты {ports}): {then}"),
+                    'next': TUNNEL_FD_NEXT})
+    stuck = []
+    for t in tunnels:
+        for lst in t.get('listeners') or []:
+            queue = lst.get('queue')
+            if (isinstance(queue, list) and len(queue) == 2
+                    and all(isinstance(n, int) and n > 0 for n in queue)):
+                stuck.append(f":{lst.get('port')} ({max(queue)})")
+    if stuck:
+        out.append({'key': 'entry_tunnel:queue', 'layer': 'b', 'severity': 'critical',
+                    'title': ('туннель exit → entry не принимает соединения, ждут в очереди: '
+                              + ', '.join(stuck)),
+                    'next': TUNNEL_QUEUE_NEXT})
+    return out, []
+
+
 def _cascade_off(layers: dict):
     """The protocols switched off in the cascade, or None without layer A."""
     a = layers.get('a') or {}
@@ -1551,7 +1682,7 @@ def unjudged_for(layers: dict) -> List[str]:
     c = layers.get('c') or {}
     out: List[str] = []
     if b.get('ok'):
-        out += entry_relay(b)[1]
+        out += entry_relay(b)[1] + entry_tunnels(b)[1]
     if c.get('ok'):
         out += exit_guard(c)[1] + exit_servers(c, _cascade_off(layers))[1]
     return out
@@ -1622,6 +1753,7 @@ def findings_for(layers: dict) -> List[dict]:
                             'title': f'{tag}: нет UDP DNAT {", ".join(missing)} на entry',
                             'next': "iptables -t nat -S PREROUTING | grep -E '8400|8402|dport 443'"})
         out.extend(entry_relay(b)[0])
+        out.extend(entry_tunnels(b)[0])
         stls = (b.get('services') or {}).get('shadow-tls')
         if stls and stls != 'active':
             out.append({'key': 'unit:shadow-tls', 'severity': 'critical', 'layer': 'b',

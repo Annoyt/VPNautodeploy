@@ -2056,7 +2056,7 @@ def build_default_checks(config, bot) -> List[Callable[[], Optional[Alert]]]:
         key = str((f or {}).get('key') or '')
         if key == 'panel_audit':
             return 'a'
-        if key.startswith(('entry_dnat:', 'entry_relay:')) or key == 'unit:shadow-tls':
+        if key.startswith(('entry_dnat:', 'entry_relay:', 'entry_tunnel:')) or key == 'unit:shadow-tls':
             return 'b'
         return 'c'
 
