@@ -80,6 +80,9 @@
     function connectWebSocket() {
         if (state.ws) return;
         const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+        // The one request that still carries the credentials in its URL:
+        // a browser gives a WebSocket no headers. The server's access log
+        // redacts them (bot/utils/access_log.py).
         const parts = [];
         if (state.initData) parts.push(`initData=${encodeURIComponent(state.initData)}`);
         if (state.adminToken) parts.push(`admin_token=${encodeURIComponent(state.adminToken)}`);
@@ -350,13 +353,29 @@
     }
 
     // ==================== API Helpers ====================
-    function apiUrl(path) {
-        const sep = path.includes('?') ? '&' : '?';
+    // The credentials go in the Authorization header, never in the URL:
+    // until 2026-11-20 every call carried them in its query, and the bot's
+    // access log wrote each one into `docker logs` and bot.log. One header
+    // for both, because the Mini App may hold both (after a bot-token
+    // change its initData no longer passes, the new admin token does).
+    // The WebSocket is the exception (connectWebSocket).
+    function authHeader() {
         const parts = [];
         if (state.initData) parts.push(`initData=${encodeURIComponent(state.initData)}`);
         if (state.adminToken) parts.push(`admin_token=${encodeURIComponent(state.adminToken)}`);
-        if (!parts.length) parts.push(`initData=`);
-        return `${API_BASE}${path}${sep}${parts.join('&')}`;
+        return parts.length ? `NekoAdmin ${parts.join('&')}` : '';
+    }
+
+    // fetch() options with the Authorization header added to their own.
+    function withAuth(options) {
+        const opts = Object.assign({}, options);
+        const auth = authHeader();
+        if (auth) {
+            const headers = new Headers(opts.headers || {});
+            headers.set('Authorization', auth);
+            opts.headers = headers;
+        }
+        return opts;
     }
 
     // `options` go to fetch() as given; without them the request is a GET.
@@ -366,7 +385,7 @@
     // the plans and reminders saves stored nothing while the page said
     // «✅ сохранено», and the manual reminder sends and the alert ack got 405.
     async function apiFetch(path, options) {
-        const res = await fetch(apiUrl(path), options);
+        const res = await fetch(`${API_BASE}${path}`, withAuth(options));
         if (!res.ok) {
             const err = await res.json().catch(() => ({}));
             throw new Error(err.error || `HTTP ${res.status}`);
@@ -1548,11 +1567,11 @@
             const challenge = await apiPost('/api/admin/bot_token/challenge', {});
             const envelope = await sealBotToken(challenge, token);
             setBotTokenResult('проверяю токен в Telegram…');
-            const res = await fetch(apiUrl('/api/admin/bot_token/apply'), {
+            const res = await fetch(`${API_BASE}/api/admin/bot_token/apply`, withAuth({
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify(envelope),
-            });
+            }));
             const data = await res.json().catch(() => ({}));
             if (!res.ok || !data.ok) {
                 setBotTokenResult('⚠️ ' + (data.message || data.error || `HTTP ${res.status}`), 'err');

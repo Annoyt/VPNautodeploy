@@ -71,7 +71,8 @@ egresses. Keys issued OK but user can't connect ⇒ suspect entry ingress/routin
 - Bot compose command (always both files):
   `docker compose -f /opt/vpn-bot/docker-compose.yml -f /opt/vpn-bot/docker-compose.entry.yml <cmd>`
 - Bot DB (SQLite): `/var/lib/vpn-bot/bot.db` — or exec inside: `… exec -T vpn-bot python3 -c "…"` with `DB_PATH=/var/lib/vpn-bot/bot.db`.
-- Bot health / admin REST: `http://127.0.0.1:8080/health`, `…/api/admin/…`.
+- Bot health / admin REST: `http://127.0.0.1:8080/health`, `…/api/admin/…`. The admin token goes in a
+  header, `-H "Authorization: NekoAdmin admin_token=$TOKEN"`, never in the URL: the bot's access log keeps URLs.
 - Bot runs in **API-only mode** — it talks to x-ui on exit over the private link; there is no x-ui panel on entry.
 - Per-protocol liveness lives in `outbound_health` (bot.db): 10 probe rows per protocol every 15 min through the
   real tunnels; **7/10 ok is normal**; a row proves life if `latency_ms IS NOT NULL OR status='ok'`. The admin sees

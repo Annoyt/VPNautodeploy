@@ -104,10 +104,12 @@ docker compose ps                            # vpn-bot + 3x-ui, both healthy
 
 ## Dashboard auth (two paths)
 
-- **PM with bot** → `web_app` inline button → Telegram injects `Telegram.WebApp.initData` → server validates HMAC against `BOT_TOKEN`.
-- **Forum group** → `url` button (Telegram disallows `web_app` in groups) → URL carries `?admin_token=<HMAC>`. Token is HMAC-SHA256 over `BOT_TOKEN` + admin_id + 24h expiry, minted fresh on every `/admin`. Works in any external browser.
+- **PM with bot** → `web_app` inline button → Telegram injects `Telegram.WebApp.initData` → server validates HMAC against `BOT_TOKEN` and that its `auth_date` is at most 24 h old (reopen the Mini App after a day).
+- **Forum group** → `url` button (Telegram disallows `web_app` in groups) → URL carries `?admin_token=<HMAC>`. Token is HMAC-SHA256 over `BOT_TOKEN` + admin_id + 1h expiry, minted fresh on every `/admin`. Works in any external browser.
 
-Code: [bot/utils/admin_token.py](bot/utils/admin_token.py) + `_validate_admin` in [bot/core/web_server.py](bot/core/web_server.py).
+The page sends what it holds (initData, the admin token or both) in one header on every API call, never in the URL (the access log keeps URLs, AGENTS.md §65): `Authorization: NekoAdmin initData=<enc>&admin_token=<enc>`. The URL form still works for the WebSocket (a browser gives it no headers) and for pages loaded before 2026-11-20; the access log redacts it.
+
+Code: [bot/utils/admin_token.py](bot/utils/admin_token.py) + `_dashboard_credentials` / `_validate_admin` in [bot/core/web_server.py](bot/core/web_server.py), the redacting access log in [bot/utils/access_log.py](bot/utils/access_log.py).
 
 ## Kimi-CLI integration
 

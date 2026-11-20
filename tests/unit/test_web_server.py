@@ -79,6 +79,7 @@ class TestWebAppServer:
         """Test /api/me rejects request without initData."""
         request = Mock()
         request.query = {}
+        request.headers = {}   # a real request always has them
         
         response = await server.handle_me(request)
         
@@ -91,6 +92,7 @@ class TestWebAppServer:
         """Test /api/me rejects invalid initData."""
         request = Mock()
         request.query = {'initData': 'invalid_data_no_hash'}
+        request.headers = {}   # a real request always has them
         
         response = await server.handle_me(request)
         
@@ -106,6 +108,7 @@ class TestWebAppServer:
         
         request = Mock()
         request.query = {'initData': init_data}
+        request.headers = {}   # a real request always has them
         
         # Patch _validate_init_data to return admin user
         with patch.object(server, '_validate_init_data', return_value={'id': 12345, 'username': 'admin'}):
@@ -122,6 +125,7 @@ class TestWebAppServer:
         
         request = Mock()
         request.query = {'initData': 'test'}
+        request.headers = {}   # a real request always has them
         
         with patch.object(server, '_validate_init_data', return_value={'id': 12345}):
             response = await server.handle_me(request)
@@ -139,6 +143,7 @@ class TestWebAppServer:
         
         request = Mock()
         request.query = {'initData': 'test'}
+        request.headers = {}   # a real request always has them
         
         with patch.object(server, '_validate_init_data', return_value={'id': 12345}):
             response = await server.handle_me(request)
@@ -162,6 +167,7 @@ class TestWebAppServer:
         
         request = Mock()
         request.query = {'initData': 'test'}
+        request.headers = {}   # a real request always has them
         
         with patch.object(server, '_validate_init_data', return_value={'id': 12345}):
             response = await server.handle_me(request)
@@ -174,11 +180,26 @@ class TestWebAppServer:
         assert data['consumed_bytes'] == 3072  # 1024 + 2048
         
     @pytest.mark.asyncio
+    async def test_me_endpoint_reads_initdata_from_the_header(self, server):
+        """The dashboard's Authorization header (2026-11-20) carries
+        initData for /api/me too, and wins over the URL."""
+        request = Mock()
+        request.query = {'initData': 'from-the-url'}
+        request.headers = {'Authorization': 'NekoAdmin initData=from%20the%20header'}
+
+        with patch.object(server, '_validate_init_data', return_value=None) as check:
+            response = await server.handle_me(request)
+
+        assert response.status == 401
+        check.assert_called_once_with('from the header')
+
+    @pytest.mark.asyncio
     async def test_admin_users_endpoint_unauthorized(self, server):
         """Test /api/admin/users rejects non-admin."""
         request = Mock()
         request.remote = '127.0.0.1'
         request.query = {'initData': 'test'}
+        request.headers = {}   # a real request always has them
 
         with patch.object(server, '_validate_init_data', return_value={'id': 12345}):
             response = await server.handle_admin_users(request)
@@ -215,6 +236,7 @@ class TestWebAppServer:
         
         request = Mock()
         request.query = {'initData': 'test'}
+        request.headers = {}   # a real request always has them
         
         with patch.object(server, '_validate_init_data', return_value={'id': 99999}):
             response = await server.handle_admin_users(request)
@@ -376,6 +398,39 @@ class TestValidateInitData:
         """Test initData with invalid hash returns None."""
         result = server._validate_init_data("user=test&hash=invalid_hash")
         assert result is None
+
+    # ---- auth_date: at most a day old (2026-11-20, AGENTS.md §65) ----
+
+    DAY = 24 * 3600
+
+    def test_fresh_initdata_gives_the_user(self, server, signed_init_data):
+        user = server._validate_init_data(signed_init_data('test_token', 42))
+        assert user == {'id': 42, 'first_name': 'Admin'}
+
+    @pytest.mark.parametrize('age_s,passes', [
+        (DAY - 60, True),       # opened yesterday, a minute short of a day
+        (DAY + 60, False),
+        (30 * DAY, False),      # what an initData from an old log line is
+        (-600, True),           # ahead of this clock: this clock is behind
+    ])
+    def test_it_lives_a_day(self, server, signed_init_data, age_s, passes):
+        import time
+        init = signed_init_data('test_token', 42, auth_date=int(time.time()) - age_s)
+        assert (server._validate_init_data(init) is not None) is passes
+
+    @pytest.mark.parametrize('auth_date', [None, '', 'soon', '1.7e9'],
+                             ids=['absent', 'empty', 'word', 'float'])
+    def test_signed_without_a_whole_auth_date_is_refused_quietly(
+            self, server, signed_init_data, caplog, auth_date):
+        init = signed_init_data('test_token', 42, auth_date=auth_date)
+        with caplog.at_level('ERROR', logger='bot.core.web_server'):
+            assert server._validate_init_data(init) is None
+        assert not caplog.records
+
+    def test_a_non_ascii_hash_is_refused_quietly(self, server, caplog):
+        with caplog.at_level('ERROR', logger='bot.core.web_server'):
+            assert server._validate_init_data('user=%7B%7D&auth_date=1&hash=%D1%82') is None
+        assert not caplog.records
 
 
 class TestHy2AuthQuotaGate:

@@ -56,7 +56,9 @@ from bot.config import Settings
 from bot.utils.admin_token import make_admin_token
 print(make_admin_token(Settings().BOT_TOKEN, '<super-admin-id>'))
 ")
-curl -s -X POST "http://127.0.0.1:8080/api/admin/users/<id>/action?admin_token=$TOKEN" \
+# the token goes in the header, never in the URL: the bot's access log keeps URLs (§65)
+curl -s -X POST "http://127.0.0.1:8080/api/admin/users/<id>/action" \
+    -H "Authorization: NekoAdmin admin_token=$TOKEN" \
     -H 'Content-Type: application/json' -d '{"action":"grant_100gb"}'
 ```
 
