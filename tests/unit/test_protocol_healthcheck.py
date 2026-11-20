@@ -306,9 +306,9 @@ class TestHy2:
     def test_entry_nat_rule_gone(self):
         nat = [ln for ln in ENTRY_NAT if '--dport 443 ' not in ln]
         report = hc.assess(layers(a=self._dark(), b=layer_b(nat=nat)), now=NOW)
-        t = next(t for t in titles(report) if 'entry NAT rule gone' in t)
+        t = next(t for t in titles(report) if 'entry UDP path broken' in t)
         assert '443→:8400' in t
-        assert 'НЕТ 443→:8400' in '\n'.join(report['protocols']['hy2']['evidence'])
+        assert 'нет правила 443→:8400' in '\n'.join(report['protocols']['hy2']['evidence'])
 
     def test_daemon_down(self):
         report = hc.assess(layers(a=self._dark(), c=layer_c(hysteria='inactive')), now=NOW)
@@ -361,7 +361,7 @@ class TestHy2TurboProbed:
         ev = '\n'.join(h['evidence'])
         assert ev.startswith('пробы: ok 21/30')                    # probe verdict FIRST
         assert 'exit: hysteria-turbo active' in ev                  # layer C SECOND
-        assert 'entry DNAT: все правила на месте' in ev
+        assert 'entry NAT: все правила на месте' in ev
         assert 'no probe coverage' not in ev
         assert report['suspects'] == []
         assert report['exit_code'] == 0
@@ -399,7 +399,7 @@ class TestHy2TurboProbed:
         a = hy2t_probed_a(hy2t_rows=dark_rows(), hy2t_last_alive=NOW.isoformat())
         report = hc.assess(layers(a=a, b=layer_b(nat=nat)), now=NOW)
         assert report['protocols']['hy2t']['state'] == 'DOWN'
-        assert any('entry NAT rule gone' in t and '8402' in t for t in titles(report))
+        assert any('entry UDP path broken' in t and '8402' in t for t in titles(report))
 
     def test_rows_alive_but_daemon_inactive_is_still_down(self):
         """Probe coverage adds a signal, it must not remove one: before the
@@ -451,7 +451,7 @@ class TestHy2TurboProbed:
                                   b={'ok': False, 'error': 'iptables: permission denied'}), now=NOW)
         h = report['protocols']['hy2t']
         assert h['state'] == 'OK'
-        assert 'entry DNAT не проверен' in '\n'.join(h['evidence'])
+        assert 'entry NAT не проверен' in '\n'.join(h['evidence'])
         assert any('слой B' in t for t in titles(report))
         assert report['exit_code'] == 0
 
@@ -515,9 +515,72 @@ class TestHy2TurboProbed:
         assert report['verdict'].endswith('; hy2t active, без проб)')
 
 
+class TestHy2ThroughTheRelay:
+    """Since 2026-11-19 entry REDIRECTs hy2's ports to the wstunnel relay
+    (:19400, hy2t :19402) instead of a DNAT to exit (docs/insights/64).
+    Lines as read on entry on 2026-11-20."""
+
+    NAT = [
+        '-P PREROUTING ACCEPT',
+        '-A PREROUTING -p udp -m udp --dport 8400 -m comment --comment hy2-forward -j REDIRECT --to-ports 19400',
+        '-A PREROUTING -p udp -m udp --dport 443 -m comment --comment hy2-udp443 -j REDIRECT --to-ports 19400',
+        '-A PREROUTING -p udp -m udp --dport 20000:40000 -m comment --comment hy2-hop -j REDIRECT --to-ports 19400',
+        '-A PREROUTING -p udp -m udp --dport 8402 -m comment --comment hy2t-forward -j REDIRECT --to-ports 19402',
+        '-A PREROUTING -p udp -m udp --dport 40001:50000 -m comment --comment hy2t-hop -j REDIRECT --to-ports 19402',
+    ]
+    RELAYS = {'19400': '8400', '19402': '8402'}
+
+    def _b(self, relays):
+        b = layer_b(nat=self.NAT)
+        b['udp_relays'] = relays
+        return b
+
+    def _dark(self):
+        probes = {t: {'rows': rows(), 'last_alive': NOW.isoformat()} for t in hc.PROBED}
+        probes['hy2'] = {'rows': dark_rows(), 'last_alive': (NOW - timedelta(minutes=50)).isoformat()}
+        return layer_a(probes=probes)
+
+    def test_the_relay_is_a_healthy_path(self):
+        report = hc.assess(layers(b=self._b(self.RELAYS)), now=NOW)
+        assert report['protocols']['hy2t']['state'] == 'OK'          # layer C + entry NAT
+        for tag in ('hy2', 'hy2t'):
+            assert 'entry NAT: все правила на месте' in '\n'.join(report['protocols'][tag]['evidence'])
+        assert report['suspects'] == [] and report['findings'] == []
+        assert report['exit_code'] == 0
+
+    def test_hy2_dark_with_the_relay_down_names_it(self):
+        report = hc.assess(layers(a=self._dark(), b=self._b({'19402': '8402'})), now=NOW)
+        top = report['suspects'][0]
+        assert top['title'] == ('entry UDP path broken — REDIRECT 443, 8400, 20000:40000 → :19400, '
+                                'но на :19400 никто не слушает')
+        assert 'nekovpn-hy2wst' in top['next']
+        assert ('entry NAT: REDIRECT 443, 8400, 20000:40000 → :19400, но на :19400 никто не слушает'
+                in report['protocols']['hy2']['evidence'])
+        assert [f['key'] for f in report['findings']] == ['entry_dnat:hy2']
+
+    def test_hy2t_without_its_relay_is_down(self):
+        report = hc.assess(layers(b=self._b({'19400': '8400'})), now=NOW)
+        assert report['protocols']['hy2t']['state'] == 'DOWN'
+        assert any('entry UDP path broken' in t and ':19402' in t for t in titles(report))
+
+    def test_relays_not_read_is_unknown_never_ok(self):
+        report = hc.assess(layers(b=self._b(None)), now=NOW)
+        h = report['protocols']['hy2t']
+        assert h['state'] == 'UNKNOWN'
+        assert any('ss на entry не показал' in e for e in h['evidence'])
+        assert ('entry NAT: не проверен — ss не показал, кто слушает за REDIRECT'
+                in report['protocols']['hy2']['evidence'])
+        assert report['findings'] == []
+        assert {'entry_dnat:hy2', 'entry_dnat:hy2t'} <= set(report['unjudged'])
+
+    def test_a_dead_hysteria_turbo_still_wins(self):
+        report = hc.assess(layers(b=self._b(None), c=layer_c(turbo='inactive')), now=NOW)
+        assert report['protocols']['hy2t']['state'] == 'DOWN'
+
+
 class TestHy2Turbo:
     """No probe ROWS for hy2t (HY2T_PORT unset, or the sidecar has no
-    :18085 inbound yet) → the verdict is layer C (+ entry DNAT) only."""
+    :18085 inbound yet) → the verdict is layer C (+ entry NAT) only."""
 
     def test_inactive_daemon_is_down_even_when_probes_are_fine(self):
         report = hc.assess(layers(c=layer_c(turbo='inactive')), now=NOW)
@@ -531,7 +594,7 @@ class TestHy2Turbo:
         nat = [ln for ln in ENTRY_NAT if '--dport 8402 ' not in ln]
         report = hc.assess(layers(b=layer_b(nat=nat)), now=NOW)
         assert report['protocols']['hy2t']['state'] == 'DOWN'
-        assert any('entry NAT rule gone' in t and '8402' in t for t in titles(report))
+        assert any('entry UDP path broken' in t and '8402' in t for t in titles(report))
 
     def test_missing_hop_only_is_degraded(self):
         nat = [ln for ln in EXIT_NAT if '40001:50000' not in ln]
@@ -661,12 +724,12 @@ class TestFailedLayers:
         assert set(report['protocols']) == set(hc.PROTOCOLS)
 
     def test_b_failed_does_not_invent_missing_nat_rules(self):
-        """iptables that did not answer must not become 'NAT rule gone'."""
+        """iptables that did not answer must not become 'UDP path broken'."""
         probes = {t: {'rows': rows(), 'last_alive': NOW.isoformat()} for t in hc.PROBED}
         probes['hy2'] = {'rows': dark_rows(), 'last_alive': NOW.isoformat()}
         report = hc.assess(layers(a=layer_a(probes=probes),
                                   b={'ok': False, 'error': 'iptables: permission denied'}), now=NOW)
-        assert not any('NAT rule gone' in t for t in titles(report))
+        assert not any('UDP path broken' in t for t in titles(report))
         assert report['layers']['b'].startswith('FAILED')
 
 
@@ -809,8 +872,8 @@ class TestLayerBFailed:
     def test_hy2t_is_unknown_and_exit_is_two(self):
         report = hc.assess(layers(b={'ok': False, 'error': 'iptables: permission denied'}), now=NOW)
         assert report['protocols']['hy2t']['state'] == 'UNKNOWN'
-        assert 'entry DNAT не проверен' in '\n'.join(report['protocols']['hy2t']['evidence'])
-        assert 'entry DNAT не проверен' in '\n'.join(report['protocols']['hy2']['evidence'])
+        assert 'entry NAT не проверен' in '\n'.join(report['protocols']['hy2t']['evidence'])
+        assert 'entry NAT не проверен' in '\n'.join(report['protocols']['hy2']['evidence'])
         assert report['exit_code'] == 2
         assert report['layers']['b'].startswith('FAILED')
         assert any('слой B' in t for t in titles(report))

@@ -20,8 +20,10 @@ improvisation. It reads the THREE signals that actually distinguish
   A) the bot's own probe rows (``outbound_health``), recent alerts,
      bot /health, and the panel audit (``verify_panel_client_fields.py``);
   B) the entry host: shadow-tls / haproxy / the probe sidecars up
-     (probe-proxy, probe-proxy-mihomo), the UDP DNAT rules that carry
-     Hysteria to exit, and the reverse SSH tunnels from exit that end here:
+     (probe-proxy, probe-proxy-mihomo), the UDP rules that carry Hysteria
+     to exit (a DNAT straight to exit, or since 2026-11-19 a REDIRECT to the
+     wstunnel relay that carries it through the tunnel: ``entry_udp_gaps()``),
+     and the reverse SSH tunnels from exit that end here:
      each session's open files against its limit, each forwarded port's
      accept queue (``entry_tunnels()``);
   C) the exit host (ONE ssh round-trip): hysteria daemons, xray RUNTIME
@@ -58,9 +60,9 @@ script runs on the host without the bot's config, so "is hy2t probed
 here?" is read off the rows: layer A lists a tag only when outbound_health
 has rows for it in the window. Rows present → hy2t is judged like hy2
 (probe verdict first, layer C evidence second, hysteria suspects). No
-rows → the pre-2026-09-05 path: layer C (+ entry DNAT) is the only
+rows → the pre-2026-09-05 path: layer C (+ entry NAT) is the only
 source and the evidence says "no probe coverage". Either way a definite
-layer-C failure (daemon not active, entry DNAT :8402 gone) is DOWN —
+layer-C failure (daemon not active, entry NAT :8402 gone) is DOWN —
 probe coverage adds a signal, it never removes one.
 
 THE DE RESERVE AND THE SSH EMERGENCY PATH
@@ -208,7 +210,9 @@ CERT_LIMIT_BYTES = 8000
 INBOUND_FOR = {'reality': 'inbound-443', 'ws': 'inbound-2053', 'stls': 'inbound-8444'}
 PROTOCOL_OF_INBOUND = {v: k for k, v in INBOUND_FOR.items()}
 
-# Entry-side UDP DNAT expectations: (dport, exit port). All must exist.
+# Entry-side UDP expectations: (dport, exit port). All must exist. Two forms
+# carry a port (``entry_udp_gaps``): a DNAT straight to that exit port, or a
+# REDIRECT to a local port where a relay listens and forwards to it.
 ENTRY_DNAT_FOR = {
     'hy2':  [('443', '8400'), ('8400', '8400'), ('20000:40000', '8400')],
     'hy2t': [('8402', '8402'), ('40001:50000', '8402')],
@@ -219,6 +223,11 @@ EXIT_HOP_FOR = {
     'hy2t': [('40001:50000', '8402')],
 }
 HYSTERIA_UNIT = {'hy2': 'hysteria', 'hy2t': 'hysteria-turbo'}
+# The relay that entry's REDIRECT hands hy2 to since 2026-11-19: wstunnel's
+# client (container nekovpn-hy2wst) carries the datagrams through the reverse
+# tunnel to hysteria on exit (docs/insights/64). Its ``-L udp://`` forwards
+# say which exit port each local port goes to.
+UDP_RELAY_PROCS = ('wstunnel',)
 
 BOT_CONTAINER = 'vpn-bot'
 BOT_DB = '/var/lib/vpn-bot/bot.db'
@@ -708,7 +717,8 @@ def collect_layer_a() -> dict:
 
 
 def collect_layer_b() -> dict:
-    """Entry host: front daemons, sidecar container, UDP DNAT rules."""
+    """Entry host: front daemons, sidecar containers, the UDP rules to exit
+    and the relays behind them, the ssh relay, the reverse tunnels."""
     out = {'ok': True, 'error': None, 'services': {}, 'containers': {},
            'nat_prerouting': []}
     errors = []
@@ -723,6 +733,11 @@ def collect_layer_b() -> dict:
         out['nat_prerouting'] = so.splitlines()
     else:
         errors.append(f'iptables: {se.strip()[:120] or rc}')
+    try:
+        out['udp_relays'] = collect_udp_relays(
+            {port for _dport, port in parse_redirect_rules(out['nat_prerouting'])})
+    except Exception:                         # noqa: BLE001 - not looked, never "fine"
+        out['udp_relays'] = None
     out['ssh_relay'] = collect_ssh_relay()
     try:
         out['tunnels'] = collect_entry_tunnels()
@@ -811,6 +826,85 @@ def collect_entry_tunnels(sleep=time.sleep, proc: str = '/proc') -> Optional[Lis
         out.append({'pid': pid, 'fds': fds, 'limit': limit,
                     'listeners': [{'port': port, 'queue': [first[pid][port], second[pid][port]]}
                                   for port in ports]})
+    return out
+
+
+def parse_udp_listeners(ss_text) -> Dict[str, List[Tuple[str, int]]]:
+    """``ss -Hulnp`` → ``{port: [(process, pid), …]}`` for the UDP sockets a
+    REDIRECT can deliver to. REDIRECT rewrites the destination to the address
+    of the interface the packet came in on, so a socket bound to loopback
+    only never gets it. A socket ss shows without its process has ``[]``.
+    Pure."""
+    out: Dict[str, List[Tuple[str, int]]] = {}
+    for line in (ss_text or '').splitlines():
+        parts = line.split()
+        if len(parts) < 5 or parts[0] != 'UNCONN' or not parts[1].isdigit():
+            continue
+        host, _, port = parts[3].rpartition(':')
+        if not port.isdigit() or host.startswith(('127.', '[::1]')):
+            continue
+        procs = out.setdefault(port, [])
+        procs.extend((name, int(pid)) for name, pid in _SS_PROC.findall(' '.join(parts[5:])))
+    return out
+
+
+_WSTUNNEL_UDP = re.compile(
+    r'udp://(?:(?:\[[^\]]*\]|[^:/?\[\]]+):)?(\d+):(?:\[[^\]]*\]|[^:/?\[\]]+):(\d+)(?:[?/].*)?')
+
+
+def parse_wstunnel_udp(argv) -> Dict[str, str]:
+    """wstunnel's argv → ``{local port: remote port}`` of its UDP forwards:
+    ``-L udp://[BIND:]PORT:HOST:PORT[?timeout_sec=N]`` (also ``-L=…``,
+    ``-Ludp://…``, ``--local-to-remote``). The remote end is dialled by
+    wstunnel's server: on exit, through the tunnel. Pure."""
+    args = [str(a) for a in argv or ()]
+    specs = []
+    for i, arg in enumerate(args):
+        if arg in ('-L', '--local-to-remote'):
+            specs.append(args[i + 1] if i + 1 < len(args) else '')
+        elif arg.startswith('--local-to-remote='):
+            specs.append(arg.split('=', 1)[1])
+        elif arg.startswith('-L') and not arg.startswith('--'):
+            specs.append(arg[2:].lstrip('='))
+    out: Dict[str, str] = {}
+    for spec in specs:
+        m = _WSTUNNEL_UDP.fullmatch(spec)
+        if m:
+            out[m.group(1)] = m.group(2)
+    return out
+
+
+def collect_udp_relays(ports, proc: str = '/proc') -> Optional[Dict[str, Optional[str]]]:
+    """Who takes the UDP that entry's REDIRECT rules send to ``ports``:
+    ``{port: exit port}`` where a relay (UDP_RELAY_PROCS) listens and its
+    argv says where that port goes; ``{port: None}`` for a listener that does
+    not say (another program, an argv that could not be read). A port nobody
+    listens on is left out. None: ss could not be asked. Only the forwards
+    are taken from the argv, nothing else of it is kept."""
+    ports = sorted({str(p) for p in ports or ()})
+    if not ports:
+        return {}
+    rc, so, _se = _run(['ss', '-Hulnp'], 10)
+    if rc != 0:
+        return None
+    listeners = parse_udp_listeners(so)
+    out: Dict[str, Optional[str]] = {}
+    for port in ports:
+        if port not in listeners:
+            continue
+        target = None
+        for name, pid in listeners[port]:
+            if name not in UDP_RELAY_PROCS:
+                continue
+            try:
+                with open(f'{proc}/{pid}/cmdline', 'rb') as fh:
+                    argv = fh.read().decode('utf-8', 'replace').split('\0')
+            except OSError:
+                continue
+            target = parse_wstunnel_udp(argv).get(port)
+            if target:
+                break
+        out[port] = target
     return out
 
 
@@ -971,19 +1065,86 @@ def _audit_flags(audit: dict) -> dict:
     }
 
 
-def _hy2_suspects(tag: str, b: dict, c: dict, entry_dnat: set, exit_hop: set) -> List[dict]:
+def entry_udp_gaps(tag: str, b: dict) -> Optional[List[dict]]:
+    """Where entry's NAT does not carry ``tag``'s UDP ports (ENTRY_DNAT_FOR)
+    on to hysteria on exit. ``[]``: every port is carried. None: not judged,
+    the ports go to REDIRECT rules but who listens behind them is unknown (ss
+    failed). Two forms carry a port (docs/insights/64):
+
+    * a DNAT straight to exit's port, the form until 2026-11-19;
+    * a REDIRECT to a local port where a relay listens and forwards to that
+      exit port (``udp_relays``): wstunnel through the reverse tunnel since
+      2026-11-19. A listener that does not say where it forwards is taken as
+      carrying the port.
+
+    A gap is ``{'dport', 'port', 'why'}``: why ``none``, no rule for the port
+    at all; ``deaf``, a REDIRECT to ``via`` where nobody listens; ``elsewhere``,
+    the relay on ``via`` forwards to exit's ``to``. Pure."""
+    rules = b.get('nat_prerouting')
+    dnat = parse_dnat_rules(rules)
+    redirect = parse_redirect_rules(rules)
+    relays = b.get('udp_relays')
+    gaps: List[dict] = []
+    unknown = False
+    for dport, port in ENTRY_DNAT_FOR[tag]:
+        if (dport, port) in dnat:
+            continue
+        vias = sorted(local for d, local in redirect if d == dport)
+        if not vias:
+            gaps.append({'dport': dport, 'port': port, 'why': 'none'})
+        elif not isinstance(relays, dict):
+            unknown = True
+        elif not any(via in relays and relays[via] in (None, port) for via in vias):
+            via = vias[0]
+            if via in relays:
+                gaps.append({'dport': dport, 'port': port, 'why': 'elsewhere',
+                             'via': via, 'to': relays[via]})
+            else:
+                gaps.append({'dport': dport, 'port': port, 'why': 'deaf', 'via': via})
+    return None if unknown and not gaps else gaps
+
+
+def udp_gap_text(gaps: List[dict]) -> str:
+    """``entry_udp_gaps`` in words, one phrase per REDIRECT target."""
+    parts = []
+    none = [f"{g['dport']}→:{g['port']}" for g in gaps if g['why'] == 'none']
+    if none:
+        parts.append(('нет правила ' if len(none) == 1 else 'нет правил ') + ', '.join(none))
+    groups: Dict[tuple, List[str]] = {}
+    for g in gaps:
+        if g['why'] != 'none':
+            groups.setdefault((g['why'], g['via'], g.get('to'), g['port']), []).append(g['dport'])
+    for (why, via, to, port), dports in groups.items():
+        head = f"REDIRECT {', '.join(dports)} → :{via}"
+        if why == 'deaf':
+            parts.append(f'{head}, но на :{via} никто не слушает')
+        else:
+            parts.append(f'{head}, а ретранслятор на :{via} ведёт на exit :{to}, не на :{port}')
+    return '; '.join(parts)
+
+
+def udp_gap_next(gaps: List[dict]) -> str:
+    """What to look at on entry for these gaps."""
+    cmd = "iptables -t nat -S PREROUTING | grep -E '8400|8402|dport 443'"
+    vias = sorted({g['via'] for g in gaps if g.get('via')})
+    if vias:
+        cmd += (f"; ss -Hulnp | grep -E ':({'|'.join(vias)}) '; "
+                "docker ps -a --filter name=nekovpn-hy2wst")
+    return cmd + '  # docs/insights/64 (через туннель), 59 (DNAT через DE)'
+
+
+def _hy2_suspects(tag: str, b: dict, c: dict, exit_hop: set) -> List[dict]:
     """Shared Hysteria diagnosis for hy2 and hy2t (both probe-driven when
     rows exist; hy2t falls back to layer C only when it has none)."""
     out = []
     unit = HYSTERIA_UNIT[tag]
     svc = (c.get('services') or {}).get(unit)
     if b.get('ok'):          # only judge NAT when iptables actually answered
-        missing = [f'{d}→:{p}' for d, p in ENTRY_DNAT_FOR[tag] if (d, p) not in entry_dnat]
-        if missing:
+        gaps = entry_udp_gaps(tag, b)
+        if gaps:
             out.append({'rank': 10, 'protocol': tag,
-                        'title': f'entry NAT rule gone — нет UDP DNAT {", ".join(missing)} на entry',
-                        'next': "iptables -t nat -S PREROUTING | grep -E '8400|8402|dport 443'  "
-                                "# восстановить по docs/PROJECT.md (hy2 DNAT), затем повторить чек"})
+                        'title': f'entry UDP path broken — {udp_gap_text(gaps)}',
+                        'next': udp_gap_next(gaps)})
     if c.get('ok') and svc and svc != 'active':
         out.append({'rank': 5, 'protocol': tag,
                     'title': f'daemon down — {unit} на exit: {svc}',
@@ -1683,6 +1844,9 @@ def unjudged_for(layers: dict) -> List[str]:
     out: List[str] = []
     if b.get('ok'):
         out += entry_relay(b)[1] + entry_tunnels(b)[1]
+        off = _cascade_off(layers) or frozenset()
+        out += [f'entry_dnat:{tag}' for tag in ENTRY_DNAT_FOR
+                if tag not in off and entry_udp_gaps(tag, b) is None]
     if c.get('ok'):
         out += exit_guard(c)[1] + exit_servers(c, _cascade_off(layers))[1]
     return out
@@ -1744,14 +1908,13 @@ def findings_for(layers: dict) -> List[dict]:
         out.extend(exit_guard(c)[0])
         out.extend(exit_servers(c, _cascade_off(layers))[0])
     if b.get('ok'):
-        dnat = parse_dnat_rules(b.get('nat_prerouting'))
-        for tag, rules in ENTRY_DNAT_FOR.items():
-            missing = [f'{d}→:{p}' for d, p in rules if (d, p) not in dnat]
-            if missing and tag not in off:
+        for tag in ENTRY_DNAT_FOR:
+            gaps = entry_udp_gaps(tag, b)
+            if gaps and tag not in off:
                 out.append({'key': f'entry_dnat:{tag}', 'layer': 'b',
                             'severity': 'critical' if tag == 'hy2' else 'warn',
-                            'title': f'{tag}: нет UDP DNAT {", ".join(missing)} на entry',
-                            'next': "iptables -t nat -S PREROUTING | grep -E '8400|8402|dport 443'"})
+                            'title': f'{tag}: UDP с entry не доходит до exit — {udp_gap_text(gaps)}',
+                            'next': udp_gap_next(gaps)})
         out.extend(entry_relay(b)[0])
         out.extend(entry_tunnels(b)[0])
         stls = (b.get('services') or {}).get('shadow-tls')
@@ -1779,7 +1942,8 @@ def assess(layers: dict, now: Optional[datetime] = None) -> dict:
     probed = probed_tags(probes)          # PROBED (+ hy2t when it has rows)
     hy2t_probed = 'hy2t' in probed
     audit = _audit_flags(a.get('audit') or {})
-    entry_dnat = parse_dnat_rules(b.get('nat_prerouting'))
+    # None per tag: entry's UDP path not judged (layer B failed, or ss did not show the relays)
+    entry_gaps = {tag: entry_udp_gaps(tag, b) if b_ok else None for tag in ENTRY_DNAT_FOR}
     exit_hop = parse_redirect_rules(c.get('nat_prerouting'))
     exit_nat_known = c_ok and bool(c.get('nat_prerouting'))   # a real dump always has '-P PREROUTING …'
     runtime = c.get('runtime') or {}
@@ -1877,10 +2041,10 @@ def assess(layers: dict, now: Optional[datetime] = None) -> dict:
                 f'client connected за 1ч: {"?" if conns is None else conns} '
                 '(долгие QUIC-сессии → 0 не значит падение)')
 
-    # --- hy2t: layer C (+ entry DNAT) --------------------------------------------
+    # --- hy2t: layer C (+ entry NAT) ---------------------------------------------
     # Without probe rows it is the ONLY source (pre-18085 behaviour). With
     # rows the probe verdict (set in the loop above) leads and layer C is a
-    # FLOOR: a dead hysteria-turbo / missing DNAT :8402 was DOWN before the
+    # FLOOR: a dead hysteria-turbo / missing NAT :8402 was DOWN before the
     # probe existed and stays DOWN — a live probe row proves the tunnel the
     # probe took, not that the daemon users are pointed at is up. Layer C
     # can only worsen the probe verdict, never lift it: UNKNOWN probes plus
@@ -1893,12 +2057,13 @@ def assess(layers: dict, now: Optional[datetime] = None) -> dict:
                                    'см. scripts/gen_probe_config.py)')
     if c_ok:
         svc = (c.get('services') or {}).get('hysteria-turbo')
-        # Without layer B the entry DNAT is unverified; without the exit NAT
+        # Without layer B the entry NAT is unverified; without the exit NAT
         # dump the hop rules are. Definite failures still win, but "OK"
         # needs every fact on the table — an unverified path is UNKNOWN.
-        main_dnat_missing = b_ok and ('8402', '8402') not in entry_dnat
+        gap_ports = {g['dport'] for g in entry_gaps['hy2t'] or []}
+        main_dnat_missing = '8402' in gap_ports
         hop_missing = (exit_nat_known and not all(x in exit_hop for x in EXIT_HOP_FOR['hy2t'])) or (
-            b_ok and ('40001:50000', '8402') not in entry_dnat)
+            '40001:50000' in gap_ports)
         c_note = None
         if svc != 'active' or main_dnat_missing:
             c_state = 'DOWN'
@@ -1906,7 +2071,11 @@ def assess(layers: dict, now: Optional[datetime] = None) -> dict:
             c_state = 'DEGRADED'
         elif not b_ok:
             c_state = 'UNKNOWN'
-            c_note = (f'entry DNAT не проверен (слой B: {b.get("error") or "нет данных"}) — '
+            c_note = (f'entry NAT не проверен (слой B: {b.get("error") or "нет данных"}) — '
+                      'демон активен, но путь с entry не подтверждён')
+        elif entry_gaps['hy2t'] is None:
+            c_state = 'UNKNOWN'
+            c_note = ('entry NAT не проверен (ss на entry не показал, кто слушает за REDIRECT) — '
                       'демон активен, но путь с entry не подтверждён')
         elif not exit_nat_known:
             c_state = 'UNKNOWN'
@@ -1930,16 +2099,17 @@ def assess(layers: dict, now: Optional[datetime] = None) -> dict:
     # --- entry-side evidence ---------------------------------------------------
     if not b_ok:
         for tag in ('hy2', 'hy2t'):
-            protocols[tag]['evidence'].append(f'entry DNAT не проверен: слой B недоступен ({b.get("error") or "нет данных"})')
+            protocols[tag]['evidence'].append(f'entry NAT не проверен: слой B недоступен ({b.get("error") or "нет данных"})')
     if b.get('ok'):
         svc_b = b.get('services') or {}
         cont = b.get('containers') or {}
         protocols['stls']['evidence'].append(f'entry: shadow-tls {svc_b.get("shadow-tls", "?")}')
         protocols['reality']['evidence'].append(f'entry: haproxy {svc_b.get("haproxy", "?")}')
         for tag in ('hy2', 'hy2t'):
-            missing = [f'{d}→:{p}' for d, p in ENTRY_DNAT_FOR[tag] if (d, p) not in entry_dnat]
+            gaps = entry_gaps[tag]
             protocols[tag]['evidence'].append(
-                'entry DNAT: ' + ('все правила на месте' if not missing else 'НЕТ ' + ', '.join(missing)))
+                'entry NAT: ' + ('не проверен — ss не показал, кто слушает за REDIRECT' if gaps is None
+                                 else udp_gap_text(gaps) if gaps else 'все правила на месте'))
         for tag in probed:
             sidecar = SIDECAR_FOR.get(tag, 'probe-proxy')
             if sidecar in cont and cont.get(sidecar) != 'running':
@@ -2069,7 +2239,7 @@ def assess(layers: dict, now: Optional[datetime] = None) -> dict:
 
         for tag in ('hy2', 'hy2t'):
             if states.get(tag) in ('DOWN', 'DEGRADED'):
-                found = _hy2_suspects(tag, b, c, entry_dnat, exit_hop)
+                found = _hy2_suspects(tag, b, c, exit_hop)
                 if not found and states.get(tag) == 'DOWN':
                     unit = HYSTERIA_UNIT[tag]
                     found = [{'rank': 40, 'protocol': tag,
@@ -2125,7 +2295,7 @@ def assess(layers: dict, now: Optional[datetime] = None) -> dict:
     if not b_ok:
         suspects.append({'rank': 50, 'protocol': '*',
                          'title': f'слой B (entry: systemd/docker/iptables) недоступен: {b.get("error") or "?"} — '
-                                  'entry DNAT для hy2/hy2t не проверен',
+                                  'entry NAT для hy2/hy2t не проверен',
                          'next': 'iptables -t nat -S PREROUTING | head; systemctl is-active shadow-tls haproxy'})
     if not c_ok:
         suspects.append({'rank': 50, 'protocol': '*',
