@@ -1995,6 +1995,17 @@ class NotificationService:
             replace_existing=True,
             next_run_time=_dt.now(_tz.utc) + _td(minutes=15),
         )
+        # Daily: drop the NekoVPN app's network diagnostics older than 14
+        # days (bot/services/netstat.py, docs/NEKO6_PLAN.md D2). First run
+        # 15 min after start for the same reason: those rows must not
+        # outlive their 14 days because the bot was deployed every day.
+        self.scheduler.add_job(
+            self._cleanup_netstat_sync,
+            IntervalTrigger(hours=24),
+            id='netstat_cleanup',
+            replace_existing=True,
+            next_run_time=_dt.now(_tz.utc) + _td(minutes=15),
+        )
         # Every 15 minutes: health check all outbounds against popular domains.
         self.scheduler.add_job(
             self._health_check_sync,
@@ -2449,6 +2460,17 @@ class NotificationService:
     DPI_REPORTS_RETENTION_DAYS = 365
 
     HY2_AUTH_LOG_RETENTION_DAYS = 7
+
+    def _cleanup_netstat_sync(self, now: Optional[float] = None) -> int:
+        """Daily: drop netstat_events rows older than 14 days
+        (bot/services/netstat.py). Never raises; ``now`` (unix seconds) is a
+        test seam, the scheduler passes nothing."""
+        try:
+            from bot.services import netstat
+            return netstat.cleanup(self.db, now=now)
+        except Exception as e:
+            logger.exception(f"netstat cleanup failed: {e}")
+            return 0
 
     def _cleanup_hy2_auth_log_sync(self):
         """Daily: drop hy2_auth_log rows older than 7 days.
