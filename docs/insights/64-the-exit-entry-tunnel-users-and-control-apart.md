@@ -19,8 +19,18 @@ Since 2026-11-19 entry cannot open a connection abroad (§62, §63). Exit dials 
   - `healthcheck:entry_tunnel:queue`: connections wait to be accepted on a forwarded port in both reads, 2 s apart.
   - Both are critical, because the bot sends only critical alerts to Telegram (`ALERT_TG_MIN_SEVERITY`). A host without such sessions has nothing to report. When `ss` fails, both keys are kept as they were. The bot judges the keys by entry's layer (`_finding_layer` in `bot/services/alert_manager.py`).
   - **What to do.** The alert's command shows which port holds the connections. If it is :19460 (wstunnel), `docker restart nekovpn-hy2wst` frees them at once; hy2 users reconnect within seconds. If one listener queues while its session's file count is low, the session hangs: restart its unit on exit.
+- **hy2's ports on entry and the healthcheck's `entry_dnat:<tag>` (since 2026-11-20).**
+  - Entry's `PREROUTING` REDIRECTs hy2's UDP (8400, 443, 20000:40000) to :19400 and hy2t's (8402, 40001:50000) to :19402. `nekovpn-hy2wst` listens there, and its `-L udp://0.0.0.0:19400:127.0.0.1:8400` carries the datagrams through the tunnel to hysteria on exit.
+  - The check (layer B) used to know only the old form, a DNAT straight to exit. It paged `healthcheck:entry_dnat:hy2` critical on every run from 2026-11-19 while hy2 worked.
+  - Now it accepts both forms. For a REDIRECT it reads who listens on the target port (`ss -Hulnp`). For wstunnel it also reads where the `-L udp://` forward of that port goes (`/proc/<pid>/cmdline`; only the forwards are kept). A listener that is not wstunnel counts as carrying the port.
+  - It pages in three cases:
+    - a port has no rule at all;
+    - nobody listens behind a REDIRECT: the container is down, `docker start nekovpn-hy2wst`;
+    - the relay forwards to another exit port.
+  - When `ss` cannot be read, the key is kept as it was.
 - **When the tunnel is rebuilt by hand:**
   - set a finite `timeout_sec` on every UDP forward of wstunnel;
+  - keep each REDIRECT target equal to the local port of a wstunnel `-L udp://` forward to the right exit port (19400 → 8400, 19402 → 8402); the healthcheck checks the pairing;
   - give root's sessions on entry a `nofile` of at least 65536;
   - keep the bot's ports in their own connection;
   - after a change, run `systemctl show -p ExecStart` on exit and `ss -Hltnp | grep 127.0.0.1:19` on entry. Each process should hold only its own ports.
@@ -30,3 +40,10 @@ Since 2026-11-19 entry cannot open a connection abroad (§62, §63). Exit dials 
   - both findings and their edges;
   - the wiring into the report and `unjudged`;
   - the bot side: the alert reaches Telegram, and it is kept while entry could not look.
+
+  `tests/integration/test_entry_udp_relay.py` covers the UDP path:
+  - the readers of `ss -Hulnp` and of wstunnel's argv;
+  - the collector;
+  - both forms and every gap;
+  - `unjudged`;
+  - the bot side: the open false alarm closes, and it is kept while `ss` could not be read.
