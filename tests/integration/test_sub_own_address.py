@@ -366,9 +366,11 @@ class TestTransitHostsOnTheOtherPaths:
         rows = _rows(db, "SELECT country, asn, as_org, inbound_tag, conn_count, "
                          "handshake_fail_count, probe_ips_json FROM dpi_metrics "
                          "ORDER BY country")
+        # An accepted connection's address is a user's, never a "probe"
+        # (AGENTS.md §66): the real client's bucket keeps its count only.
         assert rows == [
             ('*TUNNEL*', None, 'entry-forward', 'ss2022', 5, 3, None),
-            (REAL_NET[0], REAL_NET[1], 'org', 'ss2022', 2, 0, json.dumps([[REAL, 2]])),
+            (REAL_NET[0], REAL_NET[1], 'org', 'ss2022', 2, 0, None),
         ]
         assert DE not in geo and REAL in geo
 

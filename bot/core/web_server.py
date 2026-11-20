@@ -995,8 +995,9 @@ class WebAppServer:
                         "snapshot_at, country, asn, as_org, inbound_tag, "
                         "conn_count, avg_session_sec, short_session_count, "
                         "rst_count, handshake_fail_count, "
-                        "probe_ips_json, reason_buckets_json) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        "probe_ips_json, reason_buckets_json, "
+                        "hsfail_users, user_ips_json) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         rows,
                     )
             except Exception as e:
@@ -1294,8 +1295,23 @@ class WebAppServer:
         except Exception as e:
             logger.warning(f"dpi_exit_report: protocol usage upsert failed: {e}")
 
+    # A reject entry's ``origin`` (AGENTS.md §66): the exit reporter's verdict
+    # on its address. 'user' = it also logged in as one of our users, so the
+    # failure is that user's client on a bad path; 'unknown' = no login seen.
+    # An entry without one (a reporter from before §66) is not told apart.
+    DPI_ORIGIN_USER = 'user'
+    DPI_ORIGINS = ('user', 'unknown')
+
     def _dpi_exit_rows(self, payload: dict) -> list:
-        """Geo-bucket the exit report into dpi_metrics row tuples."""
+        """Geo-bucket the exit report into dpi_metrics row tuples.
+
+        ``probe_ips_json`` gets the addresses of the failures that are not a
+        user's: an accepted connection's address is a user's by definition
+        and never goes there (until §66 it did, and the dashboard listed
+        users as "probes"); a reject from a user's address goes to
+        ``user_ips_json`` and ``hsfail_users``. One of our own addresses
+        (the tunnel bucket) is shared by every user and every scanner, so
+        its failures are never counted as a user's."""
         from datetime import datetime
         ts = datetime.utcnow().isoformat()
         try:
@@ -1334,8 +1350,12 @@ class WebAppServer:
 
         def bucket(key):
             return buckets.setdefault(
-                key, {'conns': 0, 'fails': 0, 'ips': {}, 'reasons': {}}
+                key, {'conns': 0, 'fails': 0, 'ips': {}, 'reasons': {},
+                      'fails_users': 0, 'user_ips': {}, 'not_told': False}
             )
+
+        def add(counts: dict, ip: str, n: int) -> None:
+            counts[ip] = counts.get(ip, 0) + n
 
         for entry in (payload.get('access') or []):
             raw_tag = entry.get('tag') or ''
@@ -1348,10 +1368,7 @@ class WebAppServer:
                 seen += n
                 if ip == reach_mark:
                     continue
-                b = bucket((*geo_key(ip), tag))
-                b['conns'] += n
-                if ip and not self._is_own_address(ip):
-                    b['ips'][ip] = b['ips'].get(ip, 0) + n
+                bucket((*geo_key(ip), tag))['conns'] += n
             # Connections beyond the reporter's per-bucket top-IP cap
             # still count — they just lose their geo.
             extra = max(0, int(entry.get('conns') or 0) - seen)
@@ -1364,6 +1381,9 @@ class WebAppServer:
             if not tag:
                 continue
             reason = (rej.get('reason') or '')[:120]
+            origin = rej.get('origin')
+            told = origin in self.DPI_ORIGINS
+            from_user = origin == self.DPI_ORIGIN_USER
             seen = 0
             for ip, n in (rej.get('ips') or {}).items():
                 n = int(n or 0)
@@ -1372,20 +1392,31 @@ class WebAppServer:
                     continue
                 b = bucket((*geo_key(ip), tag))
                 b['fails'] += n
+                b['not_told'] = b['not_told'] or not told
                 if ip and not self._is_own_address(ip):
-                    b['ips'][ip] = b['ips'].get(ip, 0) + n
+                    if from_user:
+                        b['fails_users'] += n
+                        add(b['user_ips'], ip, n)
+                    else:
+                        add(b['ips'], ip, n)
                 if reason:
                     b['reasons'][reason] = b['reasons'].get(reason, 0) + n
             extra = max(0, int(rej.get('count') or 0) - seen)
             if extra:
                 b = bucket((None, None, '', tag))
                 b['fails'] += extra
+                b['not_told'] = b['not_told'] or not told
+                if from_user:
+                    b['fails_users'] += extra
                 if reason:
                     b['reasons'][reason] = b['reasons'].get(reason, 0) + extra
 
+        def top(counts: dict):
+            best = sorted(counts.items(), key=lambda kv: -kv[1])[:10]
+            return json.dumps(best) if best else None
+
         rows = []
         for (cc, asn, org, tag), b in buckets.items():
-            top_ips = sorted(b['ips'].items(), key=lambda kv: -kv[1])[:10]
             rows.append((
                 ts, cc, asn, org, tag,
                 int(b['conns']),
@@ -1393,8 +1424,10 @@ class WebAppServer:
                 0,     # short_session_count: same
                 0,     # rst_count: host row covers it
                 int(b['fails']),
-                json.dumps(top_ips) if top_ips else None,
+                top(b['ips']),
                 json.dumps(b['reasons']) if b['reasons'] else None,
+                None if b['not_told'] else int(b['fails_users']),
+                top(b['user_ips']),
             ))
         return rows
 
@@ -3790,6 +3823,9 @@ class WebAppServer:
                       "conn_count": 2104, "short_session_count": 120,
                       "short_ratio": 0.057, "avg_session_sec": 18.4,
                       "last_seen": "2026-06-04T18:32:00",
+                      "handshake_fail_count": 40, "hsfail_users": 31,
+                      "hsfail_unknown": 9, "hsfail_not_told": 0,
+                      "probe_ips": [["198.51.100.7", 9]],
                     },
                     ...
                   ]
@@ -3828,7 +3864,9 @@ class WebAppServer:
                 params.append(asn)
 
             with self.db._connect() as conn:
-                # Aggregate per (country, asn) over the window
+                # Aggregate per (country, asn) over the window. The last two:
+                # the failures from our users' own addresses, and those the
+                # exit reporter did not tell apart (§66).
                 rows = conn.execute(
                     f"SELECT country, asn, MAX(as_org) as_org, "
                     f"SUM(conn_count) conn_count, "
@@ -3836,7 +3874,10 @@ class WebAppServer:
                     f"SUM(handshake_fail_count) hs_fail_count, "
                     f"SUM(rst_count) rst_count, "
                     f"AVG(avg_session_sec) avg_session_sec, "
-                    f"MAX(snapshot_at) last_seen "
+                    f"MAX(snapshot_at) last_seen, "
+                    f"SUM(COALESCE(hsfail_users, 0)) hs_users, "
+                    f"SUM(CASE WHEN hsfail_users IS NULL "
+                    f"    THEN handshake_fail_count ELSE 0 END) hs_not_told "
                     f"FROM dpi_metrics WHERE {sql_where} "
                     f"GROUP BY country, asn",
                     params,
@@ -3919,17 +3960,20 @@ class WebAppServer:
                 r[0], r[1], r[2], r[3] or 0, r[4] or 0,
                 r[5] or 0, r[6] or 0, r[7], r[8],
             )
+            hs_users, hs_not_told = int(r[9] or 0), int(r[10] or 0)
             cc_key = cc or '??'
             entry = by_country.setdefault(cc_key, {
                 'country': cc_key,
                 'conn_count': 0,
                 'short_session_count': 0,
                 'handshake_fail_count': 0,
+                'hsfail_users': 0,
                 'operators': [],
             })
             entry['conn_count'] += int(cnt)
             entry['short_session_count'] += int(short)
             entry['handshake_fail_count'] += int(hs_fail)
+            entry['hsfail_users'] += hs_users
 
             bl = baseline.get((cc, asn_)) or {}
             cur_hs_rate = (hs_fail or 0) / cur_hours
@@ -3943,6 +3987,11 @@ class WebAppServer:
                 'conn_count': int(cnt),
                 'short_session_count': int(short),
                 'handshake_fail_count': int(hs_fail),
+                # §66: hsfail = users' + unknown + not told apart. Only the
+                # last two can be probing; probe_ips are the unknown ones.
+                'hsfail_users': hs_users,
+                'hsfail_unknown': max(0, int(hs_fail) - hs_users - hs_not_told),
+                'hsfail_not_told': hs_not_told,
                 'rst_count': int(rst),
                 'short_ratio': (int(short) / int(cnt)) if cnt else 0.0,
                 'avg_session_sec': round(avg, 1) if avg is not None else None,

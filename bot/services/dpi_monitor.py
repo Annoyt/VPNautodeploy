@@ -75,6 +75,11 @@ Guards
     usual, and a WARNING is logged on every run it stays broken. "No
     data" is never read as "signal quiet" — that reading would restore
     a demotion an hour after the collector broke;
+  * our own exit → entry tunnel jammed (a ``healthcheck:entry_tunnel:*``
+    alert open, or closed within R3's window; AGENTS.md §64, §66) → R3
+    is UNKNOWN the same way: users' clients fail their Reality handshakes
+    retrying through the jam, and those failures are our path's, not the
+    operator's. An unreadable ``alert_state`` freezes R3 too;
   * app_settings unreadable (sqlite error on the state keys) → the run
     is skipped with a WARNING. ``Database.get_setting`` returns the
     default on an error, which the monitor would otherwise take for
@@ -103,11 +108,13 @@ import json
 import logging
 import sqlite3
 from dataclasses import asdict, dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 # LOCKDOWN detector (IMPROVEMENT_PLAN B1) rides this tick — see _run_lockdown.
 from bot.services import lockdown as _lockdown
+# Our own tunnel's jams freeze R3 (TUNNEL_JAM_COLLECTORS, AGENTS.md §66).
+from bot.services import tunnel_jam as _tunnel_jam
 
 logger = logging.getLogger(__name__)
 
@@ -272,6 +279,18 @@ REALITY_INBOUND_TAG = 'reality'
 # their hsfail is mostly background probing — never a per-ASN decision.
 # Mirrors web_server.DPI_TUNNEL_BUCKET_CC; any '*…*' marker is skipped.
 DPI_MARKER_PREFIX = '*'
+# R3 counts every failure, our users' own included (dpi_metrics.hsfail_users
+# is part of the total, AGENTS.md §66): "can this network's users use
+# Reality?" is answered by their failures — 2026-09-01, 879 of them and no
+# connection. Not while OUR tunnel is jammed (§64): on 2026-11-19/20 the
+# users' clients failed ~1,850 handshakes retrying through it (MegaFon
+# alone 1,455), and R3 could move Reality to the end per network for our
+# path's fault — onto stls and hy2, which that jam had killed outright. So the collectors
+# below give no verdict while a `healthcheck:entry_tunnel:*` alert is open
+# or closed within R3's window (bot/services/tunnel_jam.py): frozen like a
+# failed collector. Every other rule runs.
+TUNNEL_JAM_COLLECTORS = ('reality_asn',)
+TUNNEL_JAM_WINDOW_H = REALITY_WINDOW_H
 
 # ---- R4: hy2 reconnect storms per user → ASN --------------------------------
 # Calibration (prod): normal 4-8 allow/day/user; heavy-but-healthy peaks
@@ -769,6 +788,7 @@ class DPIMonitor:
                         f"dpi_monitor: collector {name} failed: {e} — rule(s) "
                         f"{', '.join(sorted(rules))} UNKNOWN this run, their "
                         f"demotions/streaks frozen until the collector works again")
+            unknown |= self._freeze_for_tunnel_jam(conn, now, signals)
         finally:
             self._telemetry_memo = None
             try:
@@ -781,6 +801,33 @@ class DPIMonitor:
             signals['asn_head'] = self._collect_asn_heads(signals['reports_asn'])
         signals['unknown'] = sorted(unknown)
         return signals
+
+    def _freeze_for_tunnel_jam(self, conn, now: datetime, signals: dict) -> set:
+        """While our own exit → entry tunnel is jammed (TUNNEL_JAM_COLLECTORS
+        above), the rules those collectors feed have no verdict: their signal
+        is emptied, so nothing it read starts or extends a streak, and their
+        ids are returned for ``signals['unknown']``, which freezes what they
+        hold. An unreadable ``alert_state`` proves no clear path: frozen as
+        well, with a WARNING. Returns an empty set when the path was clear."""
+        rules = set().union(*(COLLECTOR_RULES[name] for name in TUNNEL_JAM_COLLECTORS))
+        names = ', '.join(sorted(rules))
+        epoch = (now.replace(tzinfo=timezone.utc) if now.tzinfo is None else now).timestamp()
+        try:
+            jams = _tunnel_jam.jams(conn, epoch - TUNNEL_JAM_WINDOW_H * 3600)
+        except Exception as e:
+            logger.warning(f"dpi_monitor: alert_state unreadable ({e}) — a tunnel jam "
+                           f"cannot be ruled out, rule(s) {names} UNKNOWN this run")
+            jams = None
+        if jams == []:
+            return set()
+        if jams:
+            keys = ', '.join(sorted({key for key, *_rest in jams}))
+            logger.info(f"dpi_monitor: exit → entry tunnel jammed ({keys}) — rule(s) "
+                        f"{names} frozen: users' handshake failures are our path's, "
+                        f"not the operator's")
+        for name in TUNNEL_JAM_COLLECTORS:
+            signals[name] = empty_signals()[name]
+        return rules
 
     @staticmethod
     def _known_protocols() -> set:

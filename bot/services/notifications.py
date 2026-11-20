@@ -2284,10 +2284,13 @@ class NotificationService:
             cutoff_24 = (datetime.utcnow() - timedelta(hours=24)).isoformat()
             cutoff_48 = (datetime.utcnow() - timedelta(hours=48)).isoformat()
             with self.db._connect() as conn:
+                # r[7]: the failures from our users' own addresses (§66),
+                # part of r[5] — a client on a bad path, not a prober.
                 today = conn.execute(
                     "SELECT country, asn, MAX(as_org), "
                     "SUM(conn_count), SUM(short_session_count), "
-                    "SUM(handshake_fail_count), SUM(rst_count) "
+                    "SUM(handshake_fail_count), SUM(rst_count), "
+                    "SUM(COALESCE(hsfail_users, 0)) "
                     "FROM dpi_metrics WHERE snapshot_at >= ? "
                     "GROUP BY country, asn",
                     (cutoff_24,),
@@ -2308,6 +2311,7 @@ class NotificationService:
         total_conn = sum((r[3] or 0) for r in today)
         total_short = sum((r[4] or 0) for r in today)
         total_hsfail = sum((r[5] or 0) for r in today)
+        total_hsfail_users = sum((r[7] or 0) for r in today)
         worst = sorted(
             (r for r in today if r[0] != '*GLOBAL*' and (r[3] or 0) >= 50),
             key=lambda r: -((r[4] or 0) / max(r[3] or 1, 1)),
@@ -2316,10 +2320,13 @@ class NotificationService:
             f"{r[0]}/{r[1]}={int(100 * (r[4] or 0) / max(r[3] or 1, 1))}% short"
             for r in worst
         ) or "никаких аномалий"
+        # The users' part of hsfail is their clients on a bad path, not
+        # probing (§66); said only when there is one.
+        users_part = f" (у наших юзеров: {total_hsfail_users})" if total_hsfail_users else ""
         summary = (
             f"📊 <b>DPI сводка за 24ч</b>\n\n"
             f"<code>conn: {total_conn} · short: {total_short} · "
-            f"hsfail: {total_hsfail}</code>\n\n"
+            f"hsfail: {total_hsfail}{users_part}</code>\n\n"
             f"Топ-3 проблемных: {worst_str}"
         )
 
@@ -2333,6 +2340,7 @@ class NotificationService:
                     'country': r[0], 'asn': r[1], 'as_org': r[2],
                     'conn_count': r[3] or 0, 'short_session_count': r[4] or 0,
                     'handshake_fail_count': r[5] or 0, 'rst_count': r[6] or 0,
+                    'hsfail_users': r[7] or 0,
                 }
                 for r in today
             ],
@@ -2348,6 +2356,7 @@ class NotificationService:
                 'conn': total_conn,
                 'short': total_short,
                 'hsfail': total_hsfail,
+                'hsfail_users': total_hsfail_users,
             },
         }
         report_db_id = None
@@ -2394,6 +2403,8 @@ class NotificationService:
                     'country': r[0], 'asn': r[1], 'as_org': r[2],
                     'conn': r[3] or 0, 'short': r[4] or 0,
                     'hsfail': r[5] or 0, 'rst': r[6] or 0,
+                    # part of hsfail: users' clients on a bad path (§66)
+                    'hsfail_users': r[7] or 0,
                 }
                 for r in today
             ]

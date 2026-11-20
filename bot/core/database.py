@@ -805,6 +805,16 @@ class Database:
 
         Index is on (snapshot_at) for time-window queries and on
         (country, asn, snapshot_at) for the heatmap drill-down.
+
+        Handshake failures from users' addresses (AGENTS.md §66): the exit
+        reporter tells a REALITY reject from an address that also logged in
+        as one of our users apart from the rest. ``hsfail_users`` is the
+        part of ``handshake_fail_count`` from such addresses (NULL: the row
+        was not told apart — an older reporter, the hy2 rollup, rows from
+        before the column), ``user_ips_json`` their top addresses
+        ``[[ip, fails], ...]``. ``probe_ips_json`` holds the failures'
+        other addresses only, never a user's: ``handshake_fail_count`` −
+        ``hsfail_users`` is what the probing alert counts.
         """
         try:
             with self._connect() as conn:
@@ -836,6 +846,8 @@ class Database:
                 for ddl in (
                     "ALTER TABLE dpi_metrics ADD COLUMN probe_ips_json TEXT",
                     "ALTER TABLE dpi_metrics ADD COLUMN reason_buckets_json TEXT",
+                    "ALTER TABLE dpi_metrics ADD COLUMN hsfail_users INTEGER",
+                    "ALTER TABLE dpi_metrics ADD COLUMN user_ips_json TEXT",
                 ):
                     try:
                         conn.execute(ddl)
