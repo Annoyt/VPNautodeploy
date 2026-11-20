@@ -1,7 +1,7 @@
 # AGENTS.md — VPN Bot
 
 > Agent-focused guidance. For project overview, see `docs/PROJECT.md`.
-> Operational insights §1–§64: index at the end of this file, text in `docs/insights/`.
+> Operational insights §1–§65: index at the end of this file, text in `docs/insights/`.
 
 ---
 
@@ -172,6 +172,8 @@ Files with this mark: `test_database.py`, `test_security.py`, `test_state_machin
 | `skills/` (a new Hermes skill) | `HERMES_SKILLS` in `scripts/service_backup.py` (a test keeps them equal) |
 | `scripts/server_first_front.py`, `systemd/server-first-front.service`, `scripts/install_server_first_front.sh` | `tests/unit/test_server_first_front.py`, `tests/unit/test_install_server_first_front_sh.py`; re-run the installer on entry after the script changes |
 | `SubscriptionService.SERVER_FIRST_MARKER` / the `-sf` twins | the client repo's `nekoServerFirstMarker` (core/neko_server_first.go, the same string), `tests/integration/test_server_first_profile.py` |
+| A route with a token in its path or a credential in its query | `_TOKEN_AFTER` / `SECRET_PARAMS` in `bot/utils/access_log.py` (the access log redacts them, §65), `tests/unit/test_access_log.py`, `tests/integration/test_access_log_redaction.py` |
+| `authHeader` in `bot/webapp/app.js` (the dashboard's `Authorization: NekoAdmin` header) | `_dashboard_credentials` in `bot/core/web_server.py`, `TestCredentialsStayOutOfUrls` in `tests/e2e/test_dashboard_playwright.py`, the curl lines in `skills/billing-ops`, `skills/incident-response` and `hermes/AGENTS.md` |
 
 ---
 
@@ -290,3 +292,4 @@ A new insight goes into `docs/insights/NN-<slug>.md` under the next free number,
 - §62. The server-first front: a banner first, for the NekoVPN app (2026-11-19, IMPROVEMENT_PLAN G4) — [docs/insights/62-the-server-first-front-a-banner.md](docs/insights/62-the-server-first-front-a-banner.md)
 - §63. Entry's address for clients, apart from the node's own: `ENTRY_PUBLIC_HOST`, `HOP_TLS_IP` (2026-11-19) — [docs/insights/63-entry-s-address-for-clients-apart.md](docs/insights/63-entry-s-address-for-clients-apart.md)
 - §64. The exit → entry tunnel: users and control apart, open-file limits, the watchdog (2026-11-20) — [docs/insights/64-the-exit-entry-tunnel-users-and-control-apart.md](docs/insights/64-the-exit-entry-tunnel-users-and-control-apart.md)
+- §65. Credentials out of the access log: the dashboard's Authorization header (2026-11-20) — [docs/insights/65-credentials-out-of-the-access-log.md](docs/insights/65-credentials-out-of-the-access-log.md)

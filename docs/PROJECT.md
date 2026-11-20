@@ -147,7 +147,9 @@ PM-fallback при выключенном форуме.
 `/admin`, TTL 1ч): список юзеров (онлайн-бейджи, гео, шаринг-детект), карточка
 юзера (квота/лимит/дата/⭐ paid), действия approve/reject/ban/unban/revoke/
 reset/grant_paid/grant_100gb (все — через модалку подтверждения), рассылка,
-health, DPI-сигналы, алерты.
+health, DPI-сигналы, алерты. Токен и initData страница шлёт в API заголовком
+`Authorization: NekoAdmin …`, не в адресе; лог доступа бота их вымарывает
+(AGENTS.md §65).
 
 **AI-агент `/ai`**: Nous Hermes на entry :4097, модель
 `minimax/minimax-m3:free` через OpenRouter (+fallback), 7 наших skills

@@ -51,7 +51,7 @@ def page_factory(e2e_stack):
             raise
         pytest.skip(f'chromium unavailable: {e}')
 
-    def _new_page(users_tab=True, url=None):
+    def _new_page(users_tab=True, url=None, init_script=None, on_request=None):
         page = browser.new_page()
         page.route(
             '**/*',
@@ -59,6 +59,11 @@ def page_factory(e2e_stack):
             if any(h in route.request.url for h in BLOCKED)
             else route.continue_(),
         )
+        if init_script:         # runs before the page's own scripts
+            page.add_init_script(init_script)
+        if on_request:          # every request the page makes, from the first
+            # a lambda: playwright tags the handler, and a builtin (list.append) takes no tag
+            page.on('request', lambda request: on_request(request))
         page.goto(url or e2e_stack.dashboard_url())
         if users_tab:
             # Users tab; cards render after the API fetch.
@@ -969,4 +974,65 @@ class TestEmailUsers:
         sub = page.locator(f'.subs-row[onclick*="{cid}"]')
         sub.wait_for()
         assert sub.locator('.subs-user').inner_text() == f'✉️ {EMAIL_USER_MAIL}'
+        page.close()
+
+
+# ------------------------------------------- credentials out of the URL ----
+
+def _bot_requests(requests, base):
+    return [r for r in requests if r.url.startswith(base)]
+
+
+def _api_calls(requests, base):
+    """The page's REST calls: all of /api/ but the WebSocket, which a
+    browser cannot give a header (it keeps the URL, the access log
+    redacts it)."""
+    return [r for r in _bot_requests(requests, base)
+            if urlparse(r.url).path.startswith('/api/')
+            and urlparse(r.url).path != '/api/admin/ws']
+
+
+class TestCredentialsStayOutOfUrls:
+    """Until 2026-11-20 every call the page made carried admin_token and
+    initData in its URL, and its own address (/?admin_token=…) went out
+    as the Referer; the bot's access log wrote both. Now the credentials
+    ride in the Authorization header and the Referer is the origin."""
+
+    @pytest.fixture(autouse=True)
+    def _fresh_admin_budget(self):
+        from bot.utils import rate_limit
+        rate_limit._admin_rate_limiter.reset('127.0.0.1')
+
+    def test_the_admin_token_rides_in_the_header(self, page_factory, e2e_stack):
+        e2e_stack.seed_user('paid')
+        seen = []
+        page = page_factory(on_request=seen.append)    # /?admin_token=…, the Users tab
+        calls = _api_calls(seen, e2e_stack.base_url)
+        assert calls, 'the page made no API call'
+        for r in calls:
+            assert 'admin_token' not in r.url and 'initData' not in r.url, r.url
+            assert r.all_headers().get('authorization') == f'NekoAdmin admin_token={e2e_stack.token}'
+        for r in _bot_requests(seen, e2e_stack.base_url):
+            referer = r.all_headers().get('referer', '')
+            assert 'admin_token' not in referer and e2e_stack.token not in referer, (r.url, referer)
+        page.close()
+
+    def test_the_mini_apps_initdata_rides_in_the_header(
+            self, page_factory, e2e_stack, signed_init_data):
+        from .conftest import E2E_ADMIN_ID, E2E_BOT_TOKEN
+        e2e_stack.seed_user('paid')
+        init = signed_init_data(E2E_BOT_TOKEN, E2E_ADMIN_ID)
+        # Telegram's script is blocked in this suite; this is what it leaves
+        stub = 'window.Telegram = {WebApp: {initData: %s, ready() {}, expand() {}}};' % (
+            json.dumps(init))
+        seen = []
+        # no token in the address: the user cards render only if initData,
+        # sent in the header alone, opened the dashboard
+        page = page_factory(url=f'{e2e_stack.base_url}/', init_script=stub, on_request=seen.append)
+        calls = _api_calls(seen, e2e_stack.base_url)
+        assert calls, 'the page made no API call'
+        for r in calls:
+            assert 'initData' not in r.url, r.url
+            scheme, _, creds = r.all_headers().get('authorization', '').partition(' ')
+            assert scheme == 'NekoAdmin' and parse_qs(creds) == {'initData': [init]}
         page.close()

@@ -79,6 +79,7 @@ class TestWebAppServer:
         """Test /api/me rejects request without initData."""
         request = Mock()
         request.query = {}
+        request.headers = {}   # a real request always has them
         
         response = await server.handle_me(request)
         
@@ -91,6 +92,7 @@ class TestWebAppServer:
         """Test /api/me rejects invalid initData."""
         request = Mock()
         request.query = {'initData': 'invalid_data_no_hash'}
+        request.headers = {}   # a real request always has them
         
         response = await server.handle_me(request)
         
@@ -106,6 +108,7 @@ class TestWebAppServer:
         
         request = Mock()
         request.query = {'initData': init_data}
+        request.headers = {}   # a real request always has them
         
         # Patch _validate_init_data to return admin user
         with patch.object(server, '_validate_init_data', return_value={'id': 12345, 'username': 'admin'}):
@@ -122,6 +125,7 @@ class TestWebAppServer:
         
         request = Mock()
         request.query = {'initData': 'test'}
+        request.headers = {}   # a real request always has them
         
         with patch.object(server, '_validate_init_data', return_value={'id': 12345}):
             response = await server.handle_me(request)
@@ -139,6 +143,7 @@ class TestWebAppServer:
         
         request = Mock()
         request.query = {'initData': 'test'}
+        request.headers = {}   # a real request always has them
         
         with patch.object(server, '_validate_init_data', return_value={'id': 12345}):
             response = await server.handle_me(request)
@@ -162,6 +167,7 @@ class TestWebAppServer:
         
         request = Mock()
         request.query = {'initData': 'test'}
+        request.headers = {}   # a real request always has them
         
         with patch.object(server, '_validate_init_data', return_value={'id': 12345}):
             response = await server.handle_me(request)
@@ -174,11 +180,26 @@ class TestWebAppServer:
         assert data['consumed_bytes'] == 3072  # 1024 + 2048
         
     @pytest.mark.asyncio
+    async def test_me_endpoint_reads_initdata_from_the_header(self, server):
+        """The dashboard's Authorization header (2026-11-20) carries
+        initData for /api/me too, and wins over the URL."""
+        request = Mock()
+        request.query = {'initData': 'from-the-url'}
+        request.headers = {'Authorization': 'NekoAdmin initData=from%20the%20header'}
+
+        with patch.object(server, '_validate_init_data', return_value=None) as check:
+            response = await server.handle_me(request)
+
+        assert response.status == 401
+        check.assert_called_once_with('from the header')
+
+    @pytest.mark.asyncio
     async def test_admin_users_endpoint_unauthorized(self, server):
         """Test /api/admin/users rejects non-admin."""
         request = Mock()
         request.remote = '127.0.0.1'
         request.query = {'initData': 'test'}
+        request.headers = {}   # a real request always has them
 
         with patch.object(server, '_validate_init_data', return_value={'id': 12345}):
             response = await server.handle_admin_users(request)
@@ -215,6 +236,7 @@ class TestWebAppServer:
         
         request = Mock()
         request.query = {'initData': 'test'}
+        request.headers = {}   # a real request always has them
         
         with patch.object(server, '_validate_init_data', return_value={'id': 99999}):
             response = await server.handle_admin_users(request)

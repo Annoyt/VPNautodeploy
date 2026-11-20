@@ -231,3 +231,29 @@ def mock_telegram_bot():
     bot.create_forum_topic = Mock(return_value=999)
     
     return bot
+
+
+@pytest.fixture
+def signed_init_data():
+    """``sign(bot_token, user_id)``: Telegram Mini App initData for that
+    user, signed the way Telegram signs it (core.telegram.org/bots/webapps,
+    "Validating data received via the Mini App") — the raw query string
+    the page finds in ``Telegram.WebApp.initData``."""
+    import hashlib
+    import hmac
+    import time
+    from urllib.parse import urlencode
+
+    def sign(bot_token: str, user_id) -> str:
+        fields = {
+            'query_id': 'AAHtestquery',
+            'user': json.dumps({'id': int(user_id), 'first_name': 'Admin'},
+                               separators=(',', ':')),
+            'auth_date': str(int(time.time())),
+        }
+        check = '\n'.join(f'{k}={v}' for k, v in sorted(fields.items()))
+        secret = hmac.new(b'WebAppData', bot_token.encode(), hashlib.sha256).digest()
+        fields['hash'] = hmac.new(secret, check.encode(), hashlib.sha256).hexdigest()
+        return urlencode(fields)
+
+    return sign
