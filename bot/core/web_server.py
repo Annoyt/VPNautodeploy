@@ -64,6 +64,10 @@ _PROBE_TOKEN_RE = re.compile(r'[0-9a-f]{32}')
 # The dashboard's Authorization scheme (2026-11-20), compared lowercased:
 # ``Authorization: NekoAdmin initData=<enc>&admin_token=<enc>``.
 DASHBOARD_AUTH_SCHEME = 'nekoadmin'
+# How long Mini App initData is good for after Telegram signed it (its
+# auth_date, the moment the Mini App was opened). Before 2026-11-20 it had
+# no limit at all (AGENTS.md §65).
+INIT_DATA_MAX_AGE_S = 24 * 3600
 
 # Address space no user's network is ever seen from: loopback, RFC 1918
 # (docker bridges are 172.16/12, its default pools also 10/8 and
@@ -325,7 +329,15 @@ class WebAppServer:
     # ==================== Auth ====================
 
     def _validate_init_data(self, init_data: str) -> Optional[dict]:
-        """Validate Telegram Mini App initData."""
+        """Validate Telegram Mini App initData: Telegram's signature, and
+        an ``auth_date`` at most INIT_DATA_MAX_AGE_S old.
+
+        Until 2026-11-20 the signature was all that counted, so an initData
+        that reached a log (the dashboard sent it in every URL, §65) opened
+        the dashboard until the bot token changed. A date ahead of this
+        clock passes: only Telegram can sign one, so it means this clock
+        is behind, and refusing it would lock the admin out for nothing.
+        """
         if not init_data:
             return None
             
@@ -348,10 +360,17 @@ class WebAppServer:
                 data_check_string.encode(), 
                 hashlib.sha256
             ).hexdigest()
-            
-            if calc_hash == hash_str:
-                return json.loads(parsed.get('user', '{}'))
-            return None
+
+            # As bytes: compare_digest raises on a str with non-ASCII in it
+            if not hmac.compare_digest(calc_hash.encode(), hash_str.encode()):
+                return None
+            try:
+                auth_date = int(parsed.get('auth_date', ''))
+            except ValueError:
+                return None
+            if time.time() - auth_date > INIT_DATA_MAX_AGE_S:
+                return None
+            return json.loads(parsed.get('user', '{}'))
         except Exception as e:
             logger.error(f"initData validation error: {e}")
             return None

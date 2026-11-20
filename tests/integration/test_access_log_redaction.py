@@ -15,6 +15,7 @@ is read once the runner has shut down, so every line is in.
 
 import logging
 import socket
+import time
 from contextlib import asynccontextmanager
 from unittest.mock import Mock
 from urllib.parse import quote
@@ -129,6 +130,17 @@ class TestTheHeader:
             assert await status(s, ADMIN_API, headers=nekoadmin(initData=admin)) == 200
             assert await status(s, ADMIN_API, headers=nekoadmin(initData=stranger)) == 401
         assert_not_logged(access_log(), admin, stranger)
+
+    @pytest.mark.asyncio
+    async def test_initdata_opens_it_for_a_day(self, srv, signed_init_data):
+        # a logged initData used to open the dashboard until the bot token
+        # changed; since 2026-11-20 it is dead a day after Telegram signed it
+        now = int(time.time())
+        async with serve(srv) as s:
+            for age_s, expected in ((3600, 200), (25 * 3600, 401)):
+                init = signed_init_data(BOT_TOKEN, ADMIN, auth_date=now - age_s)
+                assert await status(s, ADMIN_API, headers=nekoadmin(initData=init)) == expected
+                assert await status(s, ADMIN_API, params={'initData': init}) == expected
 
     @pytest.mark.asyncio
     async def test_after_a_bot_token_change_the_admin_token_still_opens_it(

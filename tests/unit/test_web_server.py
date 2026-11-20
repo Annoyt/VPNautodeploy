@@ -399,6 +399,39 @@ class TestValidateInitData:
         result = server._validate_init_data("user=test&hash=invalid_hash")
         assert result is None
 
+    # ---- auth_date: at most a day old (2026-11-20, AGENTS.md §65) ----
+
+    DAY = 24 * 3600
+
+    def test_fresh_initdata_gives_the_user(self, server, signed_init_data):
+        user = server._validate_init_data(signed_init_data('test_token', 42))
+        assert user == {'id': 42, 'first_name': 'Admin'}
+
+    @pytest.mark.parametrize('age_s,passes', [
+        (DAY - 60, True),       # opened yesterday, a minute short of a day
+        (DAY + 60, False),
+        (30 * DAY, False),      # what an initData from an old log line is
+        (-600, True),           # ahead of this clock: this clock is behind
+    ])
+    def test_it_lives_a_day(self, server, signed_init_data, age_s, passes):
+        import time
+        init = signed_init_data('test_token', 42, auth_date=int(time.time()) - age_s)
+        assert (server._validate_init_data(init) is not None) is passes
+
+    @pytest.mark.parametrize('auth_date', [None, '', 'soon', '1.7e9'],
+                             ids=['absent', 'empty', 'word', 'float'])
+    def test_signed_without_a_whole_auth_date_is_refused_quietly(
+            self, server, signed_init_data, caplog, auth_date):
+        init = signed_init_data('test_token', 42, auth_date=auth_date)
+        with caplog.at_level('ERROR', logger='bot.core.web_server'):
+            assert server._validate_init_data(init) is None
+        assert not caplog.records
+
+    def test_a_non_ascii_hash_is_refused_quietly(self, server, caplog):
+        with caplog.at_level('ERROR', logger='bot.core.web_server'):
+            assert server._validate_init_data('user=%7B%7D&auth_date=1&hash=%D1%82') is None
+        assert not caplog.records
+
 
 class TestHy2AuthQuotaGate:
     """Quota gate in /api/hy2/auth.

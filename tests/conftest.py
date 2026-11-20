@@ -244,13 +244,20 @@ def signed_init_data():
     import time
     from urllib.parse import urlencode
 
-    def sign(bot_token: str, user_id) -> str:
+    def sign(bot_token: str, user_id, **override) -> str:
+        """``override``: a field's value instead of the default (e.g.
+        ``auth_date=<epoch>``); None leaves the field out."""
         fields = {
             'query_id': 'AAHtestquery',
             'user': json.dumps({'id': int(user_id), 'first_name': 'Admin'},
                                separators=(',', ':')),
             'auth_date': str(int(time.time())),
         }
+        for name, value in override.items():
+            if value is None:
+                fields.pop(name, None)
+            else:
+                fields[name] = str(value)
         check = '\n'.join(f'{k}={v}' for k, v in sorted(fields.items()))
         secret = hmac.new(b'WebAppData', bot_token.encode(), hashlib.sha256).digest()
         fields['hash'] = hmac.new(secret, check.encode(), hashlib.sha256).hexdigest()
