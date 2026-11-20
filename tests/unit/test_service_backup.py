@@ -218,6 +218,24 @@ def make_bot_db(path: Path, users=5):
     return conn
 
 
+NETSTAT_MARK = 'NETSTAT-ROW-must-never-be-archived'
+NETSTAT_ROWS = 300
+
+
+def add_netstat_events(conn):
+    """The table bot/services/netstat.py writes, with rows a test can find
+    in the bytes of a file."""
+    conn.execute('CREATE TABLE netstat_events (id INTEGER PRIMARY KEY, ts INTEGER NOT NULL, '
+                 'area TEXT, app TEXT NOT NULL)')
+    conn.executemany('INSERT INTO netstat_events (ts, area, app) VALUES (?, ?, ?)',
+                     [(1800000000 + i, 'ucfv0', NETSTAT_MARK) for i in range(NETSTAT_ROWS)])
+    conn.commit()
+
+
+def tables_of(conn):
+    return {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+
+
 def make_xui_db(path: Path, clients=3):
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
@@ -473,6 +491,30 @@ class TestTheRun:
             assert conn.execute(f'SELECT count(*) FROM {table}').fetchone()[0] == n
             conn.close()
 
+    def test_netstat_events_stay_out_of_the_archive(self, stand, tmp_path):
+        # the NekoVPN app's network diagnostics live 14 days in the live
+        # bot.db and nowhere else (bot/services/netstat.py, AGENTS.md §67)
+        add_netstat_events(stand.bot_conn)
+        assert stand.run().returncode == 0
+        outer = open_fake_archive(stand.sent())
+        stem = stem_of(outer)
+        data = inner(outer, f'{stem}/entry/entry.tar').extractfile(f'{VOLUME}/bot.db').read()
+        assert NETSTAT_MARK.encode() not in data            # not even in a freed page
+        db = tmp_path / 'bot.db'
+        db.write_bytes(data)
+        conn = sqlite3.connect(db)
+        assert conn.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
+        assert 'netstat_events' not in tables_of(conn)
+        assert conn.execute('SELECT count(*) FROM users').fetchone()[0] == 5
+        conn.close()
+        manifest = json.loads(outer.extractfile(f'{stem}/MANIFEST.json').read())
+        [bot_db] = [d for d in manifest['parts']['entry']['manifest']['databases']
+                    if d['path'].endswith('/bot.db')]
+        assert 'netstat_events' not in bot_db['tables'] and bot_db['tables']['users'] == 5
+        # the live database still has every row
+        live = stand.bot_conn.execute('SELECT count(*) FROM netstat_events').fetchone()[0]
+        assert live == NETSTAT_ROWS
+
     def test_readme_and_manifest(self, stand):
         assert stand.run().returncode == 0
         outer = open_fake_archive(stand.sent())
@@ -705,6 +747,79 @@ class TestTheRun:
         users = meta['parts']['bot']['dbs'][0]['users']
         assert 5 <= users <= total
         assert meta['parts']['bot']['dbs'][0]['integrity'] == 'ok'
+
+
+# ===================================================== the bot.db copy ====
+
+class TestBotDbCopy:
+    """SNAPSHOT_CODE itself, the way ``docker exec`` runs it in the container:
+    ``python3 -I -c SNAPSHOT_CODE <bot.db>``, the copy on stdout after
+    DB_MAGIC, a temporary file in TMPDIR meanwhile."""
+
+    def _copy(self, live: Path, tmp: Path) -> bytes:
+        tmp.mkdir(exist_ok=True)
+        env = {k: v for k, v in os.environ.items() if k != 'PYTHONPATH'}
+        r = subprocess.run([sys.executable, '-I', '-c', sb.SNAPSHOT_CODE, str(live)],
+                           capture_output=True, env={**env, 'TMPDIR': str(tmp)}, timeout=60)
+        assert r.returncode == 0, r.stderr.decode()
+        assert r.stdout.startswith(sb.DB_MAGIC)
+        assert list(tmp.iterdir()) == []                 # nothing left behind
+        return r.stdout[len(sb.DB_MAGIC):]
+
+    def test_netstat_events_are_dropped_from_the_copy_only(self, tmp_path):
+        live = tmp_path / 'bot.db'
+        conn = make_bot_db(live)
+        add_netstat_events(conn)
+        data = self._copy(live, tmp_path / 'tmp')
+        assert NETSTAT_MARK.encode() not in data
+        # the copy is a whole database on its own: no -wal file goes with it
+        assert data[18:20] == b'\x01\x01'
+        copy = tmp_path / 'copy' / 'bot.db'
+        copy.parent.mkdir()
+        copy.write_bytes(data)
+        out = sqlite3.connect(copy)
+        assert out.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
+        assert tables_of(out) == {'users', 'app_settings'}
+        assert out.execute('SELECT count(*) FROM users').fetchone()[0] == 5
+        out.close()
+        # the live database: every row, and still in WAL
+        assert conn.execute('SELECT count(*) FROM netstat_events').fetchone()[0] == NETSTAT_ROWS
+        assert conn.execute('PRAGMA journal_mode').fetchone()[0] == 'wal'
+        conn.close()
+
+    def test_a_database_without_the_table(self, tmp_path):
+        live = tmp_path / 'bot.db'
+        make_bot_db(live).close()
+        copy = tmp_path / 'copy.db'
+        copy.write_bytes(self._copy(live, tmp_path / 'tmp'))
+        out = sqlite3.connect(copy)
+        assert tables_of(out) == {'users', 'app_settings'}
+        out.close()
+
+    def test_old_temporary_copies_are_removed(self, tmp_path):
+        live = tmp_path / 'bot.db'
+        make_bot_db(live).close()
+        tmp = tmp_path / 'tmp'
+        tmp.mkdir()
+        old = [tmp / 'nekovpn-backup-x.db', tmp / 'nekovpn-backup-x.db-journal']
+        for p in old:
+            p.write_bytes(b'left by a killed run')
+            os.utime(p, (time.time() - 7200, time.time() - 7200))
+        self._copy(live, tmp)
+
+    def test_the_tables_left_out_are_the_ones_netstat_creates(self, tmp_path):
+        # a new diagnostics table must be left out of backups too, or be
+        # meant to go in: this test makes that a decision
+        from bot.services import netstat
+
+        class Db:
+            def _connect(self):
+                return sqlite3.connect(tmp_path / 'netstat.db')
+
+        netstat.ensure_table(Db())
+        conn = sqlite3.connect(tmp_path / 'netstat.db')
+        assert tables_of(conn) == set(sb.BOT_DB_LEFT_OUT)
+        conn.close()
 
 
 # ======================================================== the collector ====

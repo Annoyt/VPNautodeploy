@@ -592,3 +592,70 @@ class TestPendingDigest:
         svc._pending_digest_sync()
         svc.bot.send_message.assert_not_called()
         assert stored['pending_digest_sig'] == ''
+
+
+class TestDemoResetDbFallback:
+    """``_reset_demo_quota_db_fallback``: the monthly demo reset's direct
+    x-ui.db path, for a deployment whose panel database is local and
+    writable (entry is API-only). Until 2026-11-20 it used ``json`` without
+    importing it: the NameError was caught per inbound, so no inbound's
+    client list was ever renewed. A real sqlite file; the xray reload is
+    faked."""
+
+    def _xui_db(self, path):
+        import json
+        import sqlite3
+        conn = sqlite3.connect(path)
+        conn.execute('CREATE TABLE client_traffics (id INTEGER PRIMARY KEY, email TEXT, '
+                     'up INTEGER, down INTEGER, all_time INTEGER, expiry_time INTEGER, '
+                     'enable INTEGER)')
+        conn.execute('CREATE TABLE clients (id INTEGER PRIMARY KEY, email TEXT, '
+                     'enable INTEGER, expiry_time INTEGER)')
+        conn.execute('CREATE TABLE inbounds (id INTEGER PRIMARY KEY, settings TEXT)')
+        for email in ('demo@x', 'paid@x'):
+            conn.execute('INSERT INTO client_traffics (email, up, down, all_time, expiry_time, '
+                         'enable) VALUES (?, 5, 6, 11, 1000, 0)', (email,))
+            conn.execute('INSERT INTO clients (email, enable, expiry_time) VALUES (?, 0, 1000)',
+                         (email,))
+        conn.execute('INSERT INTO inbounds (id, settings) VALUES (1, ?)', (json.dumps({
+            'clients': [{'email': 'demo@x', 'enable': False, 'expiryTime': 1000},
+                        {'email': 'paid@x', 'enable': False, 'expiryTime': 1000}]}),))
+        conn.execute("INSERT INTO inbounds (id, settings) VALUES (2, 'not json')")
+        conn.commit()
+        conn.close()
+
+    def _svc(self, xui_db_path):
+        from bot.services.notifications import NotificationService
+        config = Mock()
+        config.XUI_DB_PATH = xui_db_path
+        return NotificationService(Mock(), Mock(), config)
+
+    def test_renews_the_emails_in_every_table(self, tmp_path):
+        import json
+        import sqlite3
+        path = tmp_path / 'x-ui.db'
+        self._xui_db(path)
+        xui = Mock()
+        xui.reload_xray_sync.return_value = True
+        with patch('bot.services.xui_service.XUIService', return_value=xui):
+            assert self._svc(str(path))._reset_demo_quota_db_fallback(['demo@x'], 2000) is True
+        conn = sqlite3.connect(path)
+        assert conn.execute('SELECT email, up, down, all_time, expiry_time, enable '
+                            'FROM client_traffics ORDER BY id').fetchall() == [
+            ('demo@x', 0, 0, 0, 2000, 1), ('paid@x', 5, 6, 11, 1000, 0)]
+        assert conn.execute('SELECT email, enable, expiry_time FROM clients '
+                            'ORDER BY id').fetchall() == [('demo@x', 1, 2000), ('paid@x', 0, 1000)]
+        settings = json.loads(conn.execute('SELECT settings FROM inbounds WHERE id = 1').fetchone()[0])
+        assert settings['clients'] == [
+            {'email': 'demo@x', 'enable': True, 'expiryTime': 2000},
+            {'email': 'paid@x', 'enable': False, 'expiryTime': 1000}]
+        # an inbound whose settings are not JSON is left as it is
+        assert conn.execute('SELECT settings FROM inbounds WHERE id = 2').fetchone()[0] == 'not json'
+        conn.close()
+        xui.reload_xray_sync.assert_called_once_with()
+
+    def test_without_a_local_database(self, tmp_path):
+        assert self._svc('')._reset_demo_quota_db_fallback(['demo@x'], 2000) is False
+        missing = tmp_path / 'x-ui.db'
+        assert self._svc(str(missing))._reset_demo_quota_db_fallback(['demo@x'], 2000) is False
+        assert not missing.exists()                 # mode=rw never creates it

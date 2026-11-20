@@ -138,6 +138,90 @@ class TestValidate:
         ))
 
 
+class TestNeko6Fields:
+    """docs/NEKO6_PLAN.md D1: ``bypass_apps`` (the Android packages the app
+    sends past the VPN), ``mail`` (the mailbox its mailto: links open) and
+    ``flags.netstat`` (false: the app sends no network diagnostics)."""
+
+    @pytest.mark.parametrize('over', [
+        {'bypass_apps': 'ru.sberbankmobile'},
+        {'bypass_apps': None},
+        {'bypass_apps': {'ru.sberbankmobile': True}},
+        {'bypass_apps': ['sberbankmobile']},                  # one segment
+        {'bypass_apps': ['ru.1sber']},                        # a segment from a digit
+        {'bypass_apps': ['ru._sber']},
+        {'bypass_apps': ['1ru.sber']},
+        {'bypass_apps': ['ru..sber']},
+        {'bypass_apps': ['ru.sber.']},
+        {'bypass_apps': ['.ru.sber']},
+        {'bypass_apps': ['ru.sber-bank']},
+        {'bypass_apps': ['ru.sber bank']},
+        {'bypass_apps': ['ru.sber\n']},
+        {'bypass_apps': ['ru.сбер']},                         # not ASCII
+        {'bypass_apps': ['']},
+        {'bypass_apps': [42]},
+        {'bypass_apps': [['ru.sber']]},
+        {'bypass_apps': ['ru.sber', 'ru.vtb', 'ru.sber']},    # twice
+        {'bypass_apps': [f'ru.app{i}' for i in range(301)]},
+        {'mail': ''},
+        {'mail': 'support'},
+        {'mail': 'support@'},
+        {'mail': '@example.com'},
+        {'mail': 'support@example'},
+        {'mail': 'support@-example.com'},
+        {'mail': 'support@example.c'},
+        {'mail': '.support@example.com'},
+        {'mail': 'sup..port@example.com'},
+        {'mail': 'support@example.com?subject=x'},              # mailto: headers
+        {'mail': 'support@example.com&cc=x@example.org'},
+        {'mail': 'support@example.com#x'},
+        {'mail': 'sup%40port@example.com'},
+        {'mail': 'sup port@example.com'},
+        {'mail': 'support@example.com\n'},
+        {'mail': 'mailto:support@example.com'},
+        {'mail': ['support@example.com']},
+        {'mail': 'a' * 243 + '@example.com'},                  # 255 characters
+        {'flags': {'netstat': 'false'}},
+        {'flags': {'netstat': 0}},
+        {'flags': {'netstat': None}},
+    ])
+    def test_rejects(self, over):
+        with pytest.raises(ValueError):
+            ns.validate(_settings(**over))
+
+    def test_accepts(self):
+        ns.validate(_settings(
+            bypass_apps=['ru.sberbankmobile', 'ru.vtb24.mobilebanking.android',
+                         'com.vkontakte.android', 'ru.gosuslugi.pos', 'Com.Example_App.X1'],
+            mail='support.neko+vpn@mail.nekoweather.xyz',
+            flags={'netstat': False},
+        ))
+        ns.validate(_settings(bypass_apps=[], mail=None, flags={'netstat': True}))
+        ns.validate(_settings(bypass_apps=[f'ru.app{i}' for i in range(300)],
+                              mail='a' * 242 + '@example.com'))         # 254 characters
+        # the fields are optional: older settings stay valid
+        ns.validate(_settings())
+
+    def test_the_error_says_what_is_wrong(self):
+        with pytest.raises(ValueError, match=r"bypass_apps: 'ru\.1sber' is not an Android "):
+            ns.validate(_settings(bypass_apps=['ru.sber', 'ru.1sber']))
+        with pytest.raises(ValueError, match='bypass_apps: listed more than once: ru.a, ru.b$'):
+            ns.validate(_settings(bypass_apps=['ru.b', 'ru.a', 'ru.b', 'ru.a', 'ru.c']))
+        with pytest.raises(ValueError, match='bypass_apps: a list of at most 300 '):
+            ns.validate(_settings(bypass_apps=[f'ru.app{i}' for i in range(301)]))
+        with pytest.raises(ValueError, match=r"^mail: .*not 'support@example\.com\?subject=x'$"):
+            ns.validate(_settings(mail='support@example.com?subject=x'))
+        with pytest.raises(ValueError, match='^flags.netstat: true or false'):
+            ns.validate(_settings(flags={'netstat': 'false'}))
+
+    def test_build_doc_refuses_them_too(self):
+        # what `sign` runs before it signs: a bad list never gets a signature
+        with pytest.raises(ValueError, match='bypass_apps'):
+            ns.build_doc(_settings(bypass_apps=['ru.sber', 'ru.sber']), 2)
+        doc = ns.build_doc(_settings(bypass_apps=['ru.sber'], mail=None), 2)
+        assert doc['bypass_apps'] == ['ru.sber'] and doc['mail'] is None
+
+
 class TestEndpoint:
 
     @pytest.fixture
