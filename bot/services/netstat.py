@@ -138,21 +138,7 @@ def token_of(headers) -> str:
 
 # ---------- the body ----------
 
-async def read_body(request, limit: int = MAX_BODY) -> Optional[bytes]:
-    """The whole body, or None when it is over ``limit`` (by its
-    Content-Length or by what arrives). Reads to the end: one read()
-    returns only what has arrived so far."""
-    if (request.content_length or 0) > limit:
-        return None
-    chunks, size = [], 0
-    while True:
-        chunk = await request.content.read(limit + 1 - size)
-        if not chunk:
-            return b''.join(chunks)
-        size += len(chunk)
-        if size > limit:
-            return None
-        chunks.append(chunk)
+# The body itself is read by bot/utils/request_body.py, to MAX_BODY.
 
 
 def _no_duplicates(pairs):

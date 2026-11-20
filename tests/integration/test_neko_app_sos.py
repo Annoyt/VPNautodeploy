@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from aiohttp.test_utils import TestClient, TestServer
 
 import bot.services.sos as sos
 from bot.core.database import Database
@@ -214,7 +215,8 @@ class TestEndpoint:
         req.content_length = len(raw) if length else None
         raw = raw[:NEKO_SOS_MAX_BODY + 1]
         req.content = Mock()
-        req.content.read = AsyncMock(return_value=raw)
+        # what arrived, then the end of the body
+        req.content.read = AsyncMock(side_effect=[raw, b''])
         return asyncio.run(server.handle_neko_sos(req))
 
     def test_answers_with_the_status(self, server, db):
@@ -239,6 +241,27 @@ class TestEndpoint:
     def test_route(self, server):
         routes = {(r.method, r.resource.canonical) for r in server.app.router.routes()}
         assert ('POST', '/api/neko/sos/{token}') in routes
+
+    @pytest.mark.asyncio
+    async def test_a_body_that_arrives_in_pieces(self, server, db):
+        # chunked, 1 KB at a time: one read() used to stop at the first
+        # piece and answer 400 (fixed 2026-11-20, bot/utils/request_body.py)
+        raw = json.dumps(dict(REPORT, pad='x' * 8000)).encode()
+        too_big = json.dumps(dict(REPORT, pad='x' * NEKO_SOS_MAX_BODY)).encode()
+
+        async def pieces(data):
+            for i in range(0, len(data), 1024):
+                yield data[i:i + 1024]
+                await asyncio.sleep(0.002)
+
+        token = server.subscription.derive_token(UUID)
+        async with TestClient(TestServer(server.app)) as client:
+            resp = await client.post(f'/api/neko/sos/{token}', data=pieces(raw))
+            assert resp.status == 200, await resp.text()
+            assert (await resp.json())['status'] == 'reported'
+            resp = await client.post(f'/api/neko/sos/{token}', data=pieces(too_big))
+            assert resp.status == 413
+        assert report_rows(db) == [(CID, 'sos_app')]
 
 
 class TestStartSos:

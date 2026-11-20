@@ -31,6 +31,7 @@ from bot.utils.rate_limit import check_admin_rate_limit, get_admin_rate_limit_re
 from bot.utils.prometheus import metrics, set_gauge_users, set_system_gauge
 from bot.utils.user_label import user_label
 from bot.services import netstat
+from bot.utils.request_body import read_body
 from bot.utils.unlogged import install as install_unlogged, unlogged
 
 logger = logging.getLogger(__name__)
@@ -1941,10 +1942,10 @@ class WebAppServer:
             return web.Response(status=404, text='Not found')
         if user.status not in ('demo', 'paid', 'support_topic'):
             return web.Response(status=410, text='Subscription inactive')
-        if (request.content_length or 0) > NEKO_SOS_MAX_BODY:
-            return web.Response(status=413, text='Too large')
-        raw = await request.content.read(NEKO_SOS_MAX_BODY + 1)
-        if len(raw) > NEKO_SOS_MAX_BODY:        # a body without a length
+        # read to its end (bot/utils/request_body.py): one read() stopped
+        # at the first piece of a body that came in pieces
+        raw = await read_body(request, NEKO_SOS_MAX_BODY)
+        if raw is None:                         # by its length or by what came
             return web.Response(status=413, text='Too large')
         try:
             report = json.loads(raw.decode('utf-8')) if raw else {}
@@ -1989,7 +1990,7 @@ class WebAppServer:
             if wait:
                 return web.Response(status=429, text='Too many requests',
                                     headers={'Retry-After': str(max(1, math.ceil(wait)))})
-            raw = await netstat.read_body(request)
+            raw = await read_body(request, netstat.MAX_BODY)
             if raw is None:
                 return web.Response(status=413, text='Too large')
             try:
