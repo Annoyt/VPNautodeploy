@@ -41,7 +41,18 @@ KID = 'neko-settings-1'
 PUBLIC_KEY = 'ID6b87cc4SRPMv/CW3y0cvHh3TRvyK7ytx6/6Db6R7I='
 
 _VERSION = re.compile(r'^\d+\.\d+\.\d+-neko\.\d+$')
-FIELDS = {'schema', 'endpoints', 'min_version', 'message', 'flags'}
+FIELDS = {'schema', 'endpoints', 'min_version', 'message', 'flags',
+          'bypass_apps', 'mail'}
+# bypass_apps (docs/NEKO6_PLAN.md D1): Android packages the app sends past
+# the VPN, the services on Russia's white lists. Older apps skip the field.
+_PACKAGE = re.compile(r'[a-zA-Z][a-zA-Z0-9_]*(\.[a-zA-Z][a-zA-Z0-9_]*)+')
+MAX_BYPASS_APPS = 300
+# mail (D1): the service mailbox the app's «Запросить письмом» and «Нет
+# связи? Напишите письмом» open as mailto:<mail>?subject=…, so nothing in
+# it may end the address early or add a header: no ?, &, #, %, spaces.
+_MAIL = re.compile(r'[A-Za-z0-9_+-]+(\.[A-Za-z0-9_+-]+)*'
+                   r'@([A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?\.)+[A-Za-z]{2,63}')
+MAX_MAIL = 254
 
 
 def validate(settings):
@@ -80,6 +91,26 @@ def validate(settings):
             isinstance(k, str) and isinstance(v, (bool, int, float, str))
             for k, v in flags.items()):
         raise ValueError('flags: an object of bool / number / string values')
+    if 'netstat' in flags and not isinstance(flags['netstat'], bool):
+        raise ValueError('flags.netstat: true or false (false: the app sends '
+                         'no network diagnostics; no key: it does)')
+    if 'bypass_apps' in settings:
+        apps = settings['bypass_apps']
+        if not isinstance(apps, list) or len(apps) > MAX_BYPASS_APPS:
+            raise ValueError(f'bypass_apps: a list of at most {MAX_BYPASS_APPS} '
+                             'Android package names')
+        for name in apps:
+            if not (isinstance(name, str) and _PACKAGE.fullmatch(name)):
+                raise ValueError(f'bypass_apps: {name!r:.80} is not an Android '
+                                 'package name like ru.example.app')
+        repeated = sorted({name for name in apps if apps.count(name) > 1})
+        if repeated:
+            raise ValueError(f'bypass_apps: listed more than once: {", ".join(repeated)}')
+    mail = settings.get('mail')
+    if mail is not None and not (
+            isinstance(mail, str) and len(mail) <= MAX_MAIL and _MAIL.fullmatch(mail)):
+        raise ValueError(f'mail: null or the service mailbox, name@example.com '
+                         f'(it goes into a mailto: link), not {mail!r:.80}')
 
 
 def decode(signed):
