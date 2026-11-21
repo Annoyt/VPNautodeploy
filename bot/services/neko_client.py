@@ -347,7 +347,7 @@ _CHOOSER_TEXTS = {
         'steps': 'Откройте скачанный файл. Android спросит, можно ли браузеру '
                  'устанавливать приложения, — разрешите. Установите и '
                  'вернитесь сюда.',
-        'other_abis': 'Не устанавливается? Другие сборки:',
+        'other_abis': 'Не устанавливается? У телефона 32-битная система (так у Redmi A1–A3) — берите armeabi-v7a. Сборки:',
         'unavailable': 'Сборка сейчас недоступна, скачайте со страницы '
                        'релизов:',
         'no_token': 'Подписку добавьте из бота {bot}: /sub. Там же кнопка, '
@@ -380,7 +380,7 @@ _CHOOSER_TEXTS = {
         'version': 'Version {version} · {size} MB',
         'steps': 'Open the downloaded file. Android asks whether the browser '
                  'may install apps: allow it. Install, then come back here.',
-        'other_abis': 'Does not install? Other builds:',
+        'other_abis': 'Does not install? The phone runs a 32-bit system (as Redmi A1–A3 do): take armeabi-v7a. Builds:',
         'unavailable': 'The build is unavailable right now; get it from the '
                        'release page:',
         'no_token': 'Add your subscription from the bot {bot}: /sub. It has a '
