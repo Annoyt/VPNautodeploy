@@ -92,6 +92,7 @@ def build_message(release, everyone=False):
     apk = apk_url(release)
     if not apk:
         raise ValueError(f'{tag}: no arm64-v8a APK among the release assets')
+    apk32 = apk_url(release, 'armeabi-v7a')
     version = tag[1:] if tag.startswith('v') else tag
     lines = [
         f'🐱 <b>NekoVPN {html.escape(version)} для Android</b>',
@@ -102,6 +103,12 @@ def build_message(release, everyone=False):
         'Как обновить: скачайте APK кнопкой ниже и установите поверх прежней '
         'версии, профили и настройки сохранятся.',
     ]
+    if apk32:
+        lines += [
+            'Не устанавливается? Значит, у телефона 32-битная система (так у '
+            'многих недорогих, например Redmi A1, A2, A3): нажмите '
+            '«⬇️ Для 32-битных телефонов».',
+        ]
     if everyone:
         lines += [
             '',
@@ -109,8 +116,11 @@ def build_message(release, everyone=False):
             'приложение добавит вашу подписку. Для компьютера и других '
             'приложений — кнопка «Другие устройства».',
         ]
+    downloads = [[{'text': '⬇️ Скачать NekoVPN (Android)', 'url': apk}]]
+    if apk32:
+        downloads.append([{'text': '⬇️ Для 32-битных телефонов', 'url': apk32}])
     keyboard = {'inline_keyboard': [
-        [{'text': '⬇️ Скачать NekoVPN (Android)', 'url': apk}],
+        *downloads,
         [{'text': 'Другие версии и контрольные суммы',
           'url': release.get('html_url') or f'https://github.com/{REPO}/releases'}],
     ]}
@@ -215,8 +225,10 @@ def personal_rows(config, user):
 
 
 def personal_keyboard(keyboard, rows):
-    """The download button, then the user's own rows."""
-    return {'inline_keyboard': [keyboard['inline_keyboard'][0], *rows]}
+    """The download buttons, then the user's own rows."""
+    downloads = [row for row in keyboard['inline_keyboard']
+                 if row[0]['text'].startswith('⬇️')]
+    return {'inline_keyboard': [*downloads, *rows]}
 
 
 def plan(db, ids, tag, force=False, everyone=False, config=None, now=None):

@@ -146,7 +146,18 @@ class TestMessage:
         assert '• Окно &lt;b&gt;обновления&lt;/b&gt; &amp; ссылки.' in text
         assert 'arm64-v8a почти всем' not in text      # install hint, not news
         assert kb['inline_keyboard'][0] == [{'text': '⬇️ Скачать NekoVPN (Android)', 'url': APK}]
-        assert kb['inline_keyboard'][1][0]['url'].endswith(f'/releases/tag/{TAG}')
+        assert kb['inline_keyboard'][1] == [{'text': '⬇️ Для 32-битных телефонов',
+                                             'url': APK.replace('arm64-v8a', 'armeabi-v7a')}]
+        assert kb['inline_keyboard'][2][0]['url'].endswith(f'/releases/tag/{TAG}')
+        assert 'Redmi A1, A2, A3' in text and '«⬇️ Для 32-битных телефонов»' in text
+
+    def test_no_32_bit_build_no_32_bit_button(self):
+        assets = [{'name': 'NekoVPN-0.8.99-neko.2-android-arm64-v8a.apk',
+                   'browser_download_url': APK}]
+        text, kb = crn.build_message(release(assets=assets))
+        assert [row[0]['text'] for row in kb['inline_keyboard']] == [
+            '⬇️ Скачать NekoVPN (Android)', 'Другие версии и контрольные суммы']
+        assert '32-битн' not in text
 
     def test_no_whats_new_no_message(self):
         with pytest.raises(ValueError, match='Что нового'):
@@ -359,8 +370,8 @@ class TestKeyHoldersRun:
         code, out = run(db, TAG, '--key-holders', tg=tg, config=CONFIG, check=check)
         assert code == 0 and tg.sent == [] and audits(db) == []
         assert '--- send: 1, iPhone: 1' in out
-        assert ("--- buttons: ⬇️ Скачать NekoVPN (Android) | 📲 Открыть в NekoVPN"
-                " | 💻 Другие устройства") in out
+        assert ("--- buttons: ⬇️ Скачать NekoVPN (Android) | ⬇️ Для 32-битных телефонов"
+                " | 📲 Открыть в NekoVPN | 💻 Другие устройства") in out
         assert "link check, the first one's /open: 200" in out
         assert 'dry run: 1 would get it' in out
         assert asked == [f'{crn.LOCAL_BASE}/open/{token_of(a)}']
@@ -393,8 +404,9 @@ class TestKeyHoldersRun:
         for msg, user in zip(tg.sent, (a, b)):
             kb = msg['reply_markup']['inline_keyboard']
             assert kb[0] == [{'text': '⬇️ Скачать NekoVPN (Android)', 'url': APK}]
-            assert kb[1][0]['url'] == f'{BASE}/open/{token_of(user)}'
-            assert kb[2][0]['url'] == f'{BASE}/app/{token_of(user)}'
+            assert kb[1][0]['url'] == APK.replace('arm64-v8a', 'armeabi-v7a')
+            assert kb[2][0]['url'] == f'{BASE}/open/{token_of(user)}'
+            assert kb[3][0]['url'] == f'{BASE}/app/{token_of(user)}'
             assert 'Ещё нет NekoVPN?' in msg['text']
         assert [tuple(r) for r in audits(db)] == [('1', TAG), ('2', TAG)]
         tg2 = FakeTG()
