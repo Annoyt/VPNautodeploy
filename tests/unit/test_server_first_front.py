@@ -7,9 +7,14 @@ byte for byte, a clean end passed on as a half-close; a ``proxy-v2`` route
 first sends its target a PROXY v2 header with the client's address; a dead
 target or a full front gives the client no banner at all; the config is
 data, and anything it does not know is refused.
+
+And since 2026-11-23: a half-closed connection outlives a garbage collection
+(the collector used to destroy it with the target's answer on its way), and
+it ends once the direction still open has been idle for HALF_CLOSE_IDLE_S.
 """
 
 import asyncio
+import gc
 import importlib.util
 import ipaddress
 import socket
@@ -159,7 +164,9 @@ async def _start(route_kwargs=None, upstream=None, max_conns=100, banner=BANNER,
 async def _stop(servers):
     for server in servers:
         server.close()
-        await server.wait_closed()
+        # wait_closed() waits for every connection: one the front never
+        # closes would hang the test instead of failing it.
+        await asyncio.wait_for(server.wait_closed(), 5)
 
 
 async def _read_line(reader):
@@ -310,6 +317,161 @@ def test_a_client_that_resets_frees_its_slot():
                     break
                 await asyncio.sleep(0.02)
             assert front.active == 0 and route.active == 0
+        finally:
+            await _stop(servers)
+    asyncio.run(go())
+
+
+# ---------------------------------------------------- half-closed ends --
+
+class HeldUpstream:
+    """A target that reads until the client's end has reached it, says so in
+    ``got_eof`` and answers only once ``release`` is set. With ``probe`` it
+    goes on writing instead, to learn whether the front has closed its side
+    (``closed``: a write failed)."""
+
+    def __init__(self, probe=False):
+        self.probe = probe
+        self.got_eof = asyncio.Event()
+        self.release = asyncio.Event()
+        self.received = b''
+        self.closed = False
+
+    async def handle(self, reader, writer):
+        try:
+            self.received = await reader.read()
+            self.got_eof.set()
+            await self.release.wait()
+            for _ in range(50 if self.probe else 1):
+                writer.write(b'answer:' + self.received)
+                await writer.drain()
+                if self.probe:
+                    await asyncio.sleep(0.01)
+        except (ConnectionError, OSError):
+            self.closed = True
+        finally:
+            writer.close()
+
+
+class Answers:
+    """A target that sends its chunks ``every`` seconds apart, then closes;
+    what the client sends is never read."""
+
+    def __init__(self, chunks, every=0.0):
+        self.chunks = chunks
+        self.every = every
+
+    async def handle(self, reader, writer):
+        try:
+            for chunk in self.chunks:
+                writer.write(chunk)
+                await writer.drain()
+                await asyncio.sleep(self.every)
+        finally:
+            writer.close()
+
+
+async def _until(condition, timeout=3.0):
+    for _ in range(int(timeout / 0.02)):
+        if condition():
+            return
+        await asyncio.sleep(0.02)
+
+
+def test_a_garbage_collection_does_not_cut_the_answer_to_a_half_close():
+    """Entry, 2026-11-23: "Task was destroyed but it is pending!", about 5000
+    a day. Once the client had half-closed, the loop no longer polled its
+    socket, and nothing held the connection's task: the collector destroyed
+    it, and the target's answer never reached the client."""
+    async def go():
+        errors = []
+        asyncio.get_running_loop().set_exception_handler(
+            lambda loop, context: errors.append(context['message']))
+        upstream = HeldUpstream()
+        front, route, port, _, servers = await _start(upstream=upstream)
+        try:
+            reader, writer = await asyncio.open_connection('127.0.0.1', port)
+            assert await _read_line(reader) == BANNER
+            writer.write(b'request')
+            writer.write_eof()
+            await asyncio.wait_for(upstream.got_eof.wait(), 3)
+            await asyncio.sleep(0.05)
+            gc.collect()
+            upstream.release.set()
+            assert await asyncio.wait_for(reader.read(), 3) == b'answer:request'
+            writer.close()
+            await _until(lambda: front.active == 0)
+            assert errors == []
+            assert (front.active, route.active, route.stale) == (0, 0, 0)
+            assert not front._tasks
+        finally:
+            await _stop(servers)
+    asyncio.run(go())
+
+
+def test_a_half_closed_connection_that_goes_idle_is_closed_both_ways(monkeypatch):
+    """A client's FIN usually means it has gone, and on entry shadow-tls
+    keeps its own side open after one: once nothing has moved for
+    HALF_CLOSE_IDLE_S, the front closes the client and the target."""
+    monkeypatch.setattr(sff, 'HALF_CLOSE_IDLE_S', 0.2)
+
+    async def go():
+        upstream = HeldUpstream(probe=True)
+        front, route, port, _, servers = await _start(upstream=upstream)
+        try:
+            reader, writer = await asyncio.open_connection('127.0.0.1', port)
+            assert await _read_line(reader) == BANNER
+            writer.write(b'request')
+            writer.write_eof()
+            await asyncio.wait_for(upstream.got_eof.wait(), 3)
+            # The target never answers: the client sees the end.
+            assert await asyncio.wait_for(reader.read(), 3) == b''
+            await _until(lambda: front.active == 0)
+            assert (route.stale, route.active, front.active) == (1, 0, 0)
+            # The target's side is closed as well: a late answer finds no one.
+            upstream.release.set()
+            await _until(lambda: upstream.closed)
+            assert upstream.closed
+            writer.close()
+        finally:
+            await _stop(servers)
+    asyncio.run(go())
+
+
+def test_a_target_that_ends_does_not_keep_a_silent_client_forever(monkeypatch):
+    monkeypatch.setattr(sff, 'HALF_CLOSE_IDLE_S', 0.2)
+
+    async def go():
+        front, route, port, _, servers = await _start(upstream=Answers([b'bye']))
+        try:
+            reader, writer = await asyncio.open_connection('127.0.0.1', port)
+            assert await _read_line(reader) == BANNER
+            # The target's end is passed on; the client stays and says nothing.
+            assert await asyncio.wait_for(reader.read(), 3) == b'bye'
+            await _until(lambda: front.active == 0)
+            assert (route.stale, route.active, front.active) == (1, 0, 0)
+            writer.close()
+        finally:
+            await _stop(servers)
+    asyncio.run(go())
+
+
+def test_data_still_moving_after_a_half_close_is_not_cut(monkeypatch):
+    """The limit is on idling, not on the time after a FIN: an answer that
+    takes longer than HALF_CLOSE_IDLE_S arrives whole."""
+    monkeypatch.setattr(sff, 'HALF_CLOSE_IDLE_S', 0.4)
+    chunks = [b'%02d' % i for i in range(20)]
+
+    async def go():
+        front, route, port, _, servers = await _start(upstream=Answers(chunks, every=0.05))
+        try:
+            reader, writer = await asyncio.open_connection('127.0.0.1', port)
+            assert await _read_line(reader) == BANNER
+            writer.write_eof()
+            assert await asyncio.wait_for(reader.read(), 5) == b''.join(chunks)
+            writer.close()
+            await _until(lambda: front.active == 0)
+            assert (route.stale, route.active, front.active) == (0, 0, 0)
         finally:
             await _stop(servers)
     asyncio.run(go())

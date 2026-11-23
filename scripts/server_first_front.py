@@ -26,8 +26,14 @@ Stdlib only. The config is a file of ``key = value`` lines, read as data:
     server_first_front.py --config FILE           run
     server_first_front.py --config FILE --check   validate, print the routes
 
+A clean end of one direction is passed on as a half-close, and the other
+direction goes on while it moves data. Once it has been idle for
+HALF_CLOSE_IDLE_S, both sides are closed: a client's FIN usually means it
+has gone, and neither shadow-tls nor haproxy (no ``timeout client-fin``)
+closes its own side soon after one.
+
 Nothing is logged per user: a summary line every five minutes (accepted,
-active, refused, failed, bytes per route) goes to the journal.
+active, refused, failed, stale, bytes per route) goes to the journal.
 """
 import argparse
 import asyncio
@@ -49,6 +55,10 @@ CHUNK = 65536
 STATS_EVERY_S = 300
 # A dead peer of a long-lived tunnel is found in about seven minutes.
 KEEPALIVE = (300, 30, 4)
+# After one side's FIN, the other direction may stay idle this long (up to
+# twice this) before both sides are closed and the route's ``stale`` grows.
+# Keepalive cannot tell: both peers are alive and answer its probes.
+HALF_CLOSE_IDLE_S = 60
 
 PROXY_V2_SIG = b'\r\n\r\n\x00\r\nQUIT\n'
 
@@ -66,6 +76,7 @@ class Route:
         self.active = 0
         self.refused = 0
         self.failed = 0
+        self.stale = 0   # closed by the front: half-closed, then idle
         self.up = 0
         self.down = 0
 
@@ -198,12 +209,22 @@ class Front:
     def __init__(self, config: Config):
         self.config = config
         self.active = 0
+        # Every open connection's task, held until it ends. asyncio's server
+        # holds that task only through the client socket's protocol, and the
+        # loop holds the protocol only while it polls the socket. Once the
+        # client had half-closed, nothing else held the task, its pipes or
+        # the target's reader. The garbage collector then destroyed them
+        # while the target's answer was still on its way: "Task was destroyed
+        # but it is pending!", about 5000 a day on entry (2026-11-23, §62).
+        self._tasks = set()
 
     async def handle(self, route: Route, reader, writer) -> None:
         if self.active >= self.config.max_conns:
             route.refused += 1
             _abort(writer)
             return
+        task = asyncio.current_task()
+        self._tasks.add(task)
         self.active += 1
         route.accepted += 1
         route.active += 1
@@ -224,13 +245,11 @@ class Front:
             if route.proxy_v2:
                 upstream.write(proxy_v2_header(peer[:2], local[:2]))
             writer.write(self.config.banner)
-            await asyncio.gather(
-                self._pipe(reader, upstream, route, 'up', writer),
-                self._pipe(up_reader, writer, route, 'down', upstream),
-            )
+            await self._relay(route, reader, writer, up_reader, upstream)
         finally:
             self.active -= 1
             route.active -= 1
+            self._tasks.discard(task)
             for w in (writer, upstream):
                 if w is not None:
                     try:
@@ -238,8 +257,37 @@ class Front:
                     except Exception:
                         pass
 
+    async def _relay(self, route: Route, reader, writer, up_reader, upstream) -> None:
+        """Both directions. While both are open there is no limit (keepalive
+        finds a dead peer). Once one has ended, the other goes on while it
+        moves data; when it has been idle for HALF_CLOSE_IDLE_S, both sides
+        are aborted, so a buffer stuck on a peer that does not read is
+        dropped too."""
+        moved = [0]   # bytes either way, for the idle check
+        pipes = (
+            asyncio.create_task(self._pipe(reader, upstream, route, 'up', writer, moved)),
+            asyncio.create_task(self._pipe(up_reader, writer, route, 'down', upstream, moved)),
+        )
+        try:
+            rest, timeout = set(pipes), None
+            while rest:
+                seen = moved[0]
+                done, rest = await asyncio.wait(rest, timeout=timeout,
+                                                return_when=asyncio.FIRST_COMPLETED)
+                for pipe in done:
+                    pipe.result()   # an error no pipe expects is not lost
+                if not done and moved[0] == seen:
+                    route.stale += 1
+                    _abort(writer)
+                    _abort(upstream)
+                    return
+                timeout = HALF_CLOSE_IDLE_S
+        finally:
+            for pipe in pipes:
+                pipe.cancel()
+
     @staticmethod
-    async def _pipe(src, dst, route: Route, counter: str, other) -> None:
+    async def _pipe(src, dst, route: Route, counter: str, other, moved) -> None:
         """One direction. A clean end is passed on as a half-close, so the
         other direction finishes its answer; a broken one aborts both."""
         try:
@@ -248,6 +296,7 @@ class Front:
                 if not data:
                     break
                 setattr(route, counter, getattr(route, counter) + len(data))
+                moved[0] += len(data)
                 dst.write(data)
                 await dst.drain()
             if dst.can_write_eof():
@@ -284,7 +333,7 @@ async def run(config: Config) -> None:
         await asyncio.sleep(STATS_EVERY_S)
         log('active', front.active, '|', ' | '.join(
             f'{r.label()}: accepted={r.accepted} active={r.active} refused={r.refused}'
-            f' failed={r.failed} up={r.up}B down={r.down}B' for r in config.routes))
+            f' failed={r.failed} stale={r.stale} up={r.up}B down={r.down}B' for r in config.routes))
 
 
 def main(argv=None) -> int:
