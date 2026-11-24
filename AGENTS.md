@@ -1,7 +1,7 @@
 # AGENTS.md — VPN Bot
 
 > Agent-focused guidance. For project overview, see `docs/PROJECT.md`.
-> Operational insights §1–§66: index at the end of this file, text in `docs/insights/`.
+> Operational insights §1–§68: index at the end of this file, text in `docs/insights/`.
 
 ---
 
@@ -176,6 +176,7 @@ Files with this mark: `test_database.py`, `test_security.py`, `test_state_machin
 | `skills/` (a new Hermes skill) | `HERMES_SKILLS` in `scripts/service_backup.py` (a test keeps them equal) |
 | `scripts/server_first_front.py`, `systemd/server-first-front.service`, `scripts/install_server_first_front.sh` | `tests/unit/test_server_first_front.py`, `tests/unit/test_install_server_first_front_sh.py`; re-run the installer on entry after the script changes |
 | `SubscriptionService.SERVER_FIRST_MARKER` / the `-sf` twins | the client repo's `nekoServerFirstMarker` (core/neko_server_first.go, the same string), `tests/integration/test_server_first_profile.py` |
+| `bot/services/email_link.py` (codes, the link rules), the email prompts in `bot/handlers/messages.py`, `EmailLoginHandler` / `EmailCodeFlowHandler` / `arm_email_prompt` | `tests/integration/test_email_link.py`, `tests/unit/test_pending_email.py`; its table stays in `BOT_DB_LEFT_OUT` in `scripts/service_backup.py` (a test keeps them equal); §68 |
 | A route with a token in its path or a credential in its query | `_TOKEN_AFTER` / `SECRET_PARAMS` in `bot/utils/access_log.py` (the access log redacts them, §65), `tests/unit/test_access_log.py`, `tests/integration/test_access_log_redaction.py` |
 | `authHeader` in `bot/webapp/app.js` (the dashboard's `Authorization: NekoAdmin` header) | `_dashboard_credentials` in `bot/core/web_server.py`, `TestCredentialsStayOutOfUrls` in `tests/e2e/test_dashboard_playwright.py`, the curl lines in `skills/billing-ops`, `skills/incident-response` and `hermes/AGENTS.md` |
 
@@ -299,3 +300,4 @@ A new insight goes into `docs/insights/NN-<slug>.md` under the next free number,
 - §65. Credentials out of the access log: the dashboard's Authorization header, initData for a day (2026-11-20) — [docs/insights/65-credentials-out-of-the-access-log.md](docs/insights/65-credentials-out-of-the-access-log.md)
 - §66. Handshake failures from users' own addresses are not probing: `dpi_hsfail` and `dpi_hsfail_users` (2026-11-20) — [docs/insights/66-handshake-failures-from-users-addresses-are-not-probing.md](docs/insights/66-handshake-failures-from-users-addresses-are-not-probing.md)
 - §67. The NekoVPN app's network diagnostics, `/start app` and the new settings fields (2026-11-20, NEKO6) — [docs/insights/67-the-nekovpn-app-s-network-diagnostics.md](docs/insights/67-the-nekovpn-app-s-network-diagnostics.md)
+- §68. Email and Telegram as one account: a code mailed to the address (2026-11-24) — [docs/insights/68-email-and-telegram-as-one-account.md](docs/insights/68-email-and-telegram-as-one-account.md)

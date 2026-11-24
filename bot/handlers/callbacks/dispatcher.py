@@ -21,6 +21,8 @@ from bot.handlers.callbacks.user import (
     SupportRequestHandler,
     EmailPromptHandler,
     EmailKeyHandler,
+    EmailLoginHandler,
+    EmailCodeFlowHandler,
     StatsRequestHandler,
     FullVersionHandler,
     LanguageSetHandler,
@@ -94,6 +96,9 @@ class CallbackDispatcher:
         self.handlers.append(SupportRequestHandler(self.bot, self.db, self.config))
         self.handlers.append(EmailPromptHandler(self.bot, self.db, self.config))
         self.handlers.append(EmailKeyHandler(self.bot, self.db, self.config))
+        # A code mailed to the address links mail and Telegram (email_link).
+        self.handlers.append(EmailLoginHandler(self.bot, self.db, self.config))
+        self.handlers.append(EmailCodeFlowHandler(self.bot, self.db, self.config))
         self.handlers.append(StatsRequestHandler(self.bot, self.db, self.config))
         self.handlers.append(FullVersionHandler(self.bot, self.db, self.config))
         self.handlers.append(LanguageSetHandler(self.bot, self.db, self.config))

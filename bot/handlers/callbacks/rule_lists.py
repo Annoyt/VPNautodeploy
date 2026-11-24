@@ -194,7 +194,8 @@ class ReportSiteHandler(BaseCallbackHandler):
         return callback_data == REPORT_SITE_CALLBACK
 
     def handle(self, update: dict, chat_id: str, user_id: str, **kwargs) -> None:
-        from bot.handlers.messages import PENDING_EMAIL, PENDING_SITE
+        from bot.handlers.messages import (
+            EMAIL_PURPOSE, PENDING_EMAIL, PENDING_EMAIL_CODE, PENDING_SITE)
         presser = str(user_id or chat_id)
         user = self.db.get_user(presser) or self.db.get_user(chat_id)
         lang = _lang(user)
@@ -207,7 +208,8 @@ class ReportSiteHandler(BaseCallbackHandler):
             return
         PENDING_SITE[presser] = time.time()
         # one prompt at a time: the next message answers the latest tap
-        PENDING_EMAIL.pop(presser, None)
+        for pending in (PENDING_EMAIL, PENDING_EMAIL_CODE, EMAIL_PURPOSE):
+            pending.pop(presser, None)
         text = ("📝 <b>Какой сайт не открывается?</b>\n\n"
                 "Пришли адрес ответным сообщением — например <code>rutracker.org</code> "
                 "или ссылку. Проверим и, если сайт заблокирован, пустим его через VPN."

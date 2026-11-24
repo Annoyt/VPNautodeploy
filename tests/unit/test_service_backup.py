@@ -808,15 +808,16 @@ class TestBotDbCopy:
         self._copy(live, tmp)
 
     def test_the_tables_left_out_are_the_ones_netstat_creates(self, tmp_path):
-        # a new diagnostics table must be left out of backups too, or be
-        # meant to go in: this test makes that a decision
-        from bot.services import netstat
+        # a new diagnostics or secrets table must be left out of backups
+        # too, or be meant to go in: this test makes that a decision
+        from bot.services import email_link, netstat
 
         class Db:
             def _connect(self):
                 return sqlite3.connect(tmp_path / 'netstat.db')
 
         netstat.ensure_table(Db())
+        email_link.ensure_table(Db())
         conn = sqlite3.connect(tmp_path / 'netstat.db')
         assert tables_of(conn) == set(sb.BOT_DB_LEFT_OUT)
         conn.close()
