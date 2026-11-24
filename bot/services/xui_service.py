@@ -1340,13 +1340,31 @@ class XUIService:
             logger.error(f"Failed to add client {redact_email(email)}")
             return False
 
-        if self._reload_required():
-            reload_ok = await asyncio.to_thread(self.reload_xray_sync)
-            if not reload_ok:
-                logger.warning(f"Client {redact_email(email)} added but XRay reload failed")
-                return False
+        if not await asyncio.to_thread(self._reload_after_change, email, 'added'):
+            return False
 
         logger.info(f"Successfully synced user {chat_id} ({redact_email(email)})")
+        return True
+
+    def _reload_after_change(self, email: str, change: str) -> bool:
+        """Run the configured reload after a client change; False only when
+        the change cannot take effect without it.
+
+        In DB mode xray sees a written client only after a reload. In API
+        mode the panel applies the change itself, and the sidecar signals a
+        local 3x-ui container, which need not be the panel the bot talks
+        to: on entry it was a dead one, and its 502 failed every key issue
+        from 2026-11-17 to 11-24 although each key was in exit's panel.
+        """
+        if not self._reload_required() or self.reload_xray_sync():
+            return True
+        if self.db is not None:
+            logger.warning(f"Client {redact_email(email)} {change} but XRay reload failed")
+            return False
+        logger.warning(
+            f"Client {redact_email(email)} {change} through the panel API; "
+            f"the XRay reload sidecar failed, which the panel does not need"
+        )
         return True
 
     def _reload_required(self) -> bool:
@@ -1359,7 +1377,7 @@ class XUIService:
         issue on the entry node ("added but XRay reload failed").
         """
         if (os.environ.get('XRAY_RELOAD_URL') or '').strip():
-            return True  # explicitly configured — honor it in any mode
+            return True  # configured: tried in any mode, binding in DB mode
         return self.db is not None  # DB mode can't work without it
     
     def remove_client(self, email: str, inbound_id: int = None) -> bool:
@@ -1375,11 +1393,7 @@ class XUIService:
         if not self.remove_client_sync(email, inbound_id):
             return False
 
-        if self._reload_required() and not self.reload_xray_sync():
-            logger.warning(f"Removed client {redact_email(email)} but XRay reload failed")
-            return False
-
-        return True
+        return self._reload_after_change(email, 'removed')
     
     async def __aenter__(self):
         """Async context manager entry."""

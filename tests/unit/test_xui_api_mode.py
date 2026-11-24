@@ -117,16 +117,48 @@ def test_sync_user_api_mode_skips_reload(svc, monkeypatch):
     svc.reload_xray_sync.assert_not_called()
 
 
-def test_sync_user_honors_configured_sidecar(svc, monkeypatch):
-    # An explicitly configured sidecar is still authoritative in any mode.
+def test_sync_user_survives_a_failed_sidecar_in_api_mode(svc, monkeypatch):
+    # 2026-11-17..24 on entry: the sidecar signalled a dead local 3x-ui,
+    # its 502 failed every key issue, and each key was already in exit's
+    # panel. A configured sidecar is still tried, but cannot fail the sync.
     import asyncio
     monkeypatch.setenv('XRAY_RELOAD_URL', 'http://127.0.0.1:8081')
     svc.api.add_client = AsyncMock(return_value=True)
     svc.reload_xray_sync = Mock(return_value=False)
 
     ok = asyncio.run(svc.sync_user('42', {"email": "u@x", "id": "uuid1"}))
-    assert ok is False
+    assert ok is True
     svc.reload_xray_sync.assert_called_once()
+
+
+def test_sync_user_needs_the_reload_in_db_mode(svc, monkeypatch):
+    # A client written to x-ui.db works only after xray reloads.
+    import asyncio
+    monkeypatch.setenv('XRAY_RELOAD_URL', 'http://127.0.0.1:8081')
+    svc.db = Mock()
+    svc.add_client_sync = Mock(return_value=True)
+    svc.reload_xray_sync = Mock(return_value=False)
+
+    ok = asyncio.run(svc.sync_user('42', {"email": "u@x", "id": "uuid1"}))
+    assert ok is False
+
+
+def test_remove_client_survives_a_failed_sidecar_in_api_mode(svc, monkeypatch):
+    monkeypatch.setenv('XRAY_RELOAD_URL', 'http://127.0.0.1:8081')
+    svc.remove_client_sync = Mock(return_value=True)
+    svc.reload_xray_sync = Mock(return_value=False)
+
+    assert svc.remove_client("u@x") is True
+    svc.reload_xray_sync.assert_called_once()
+
+
+def test_remove_client_needs_the_reload_in_db_mode(svc, monkeypatch):
+    monkeypatch.setenv('XRAY_RELOAD_URL', 'http://127.0.0.1:8081')
+    svc.db = Mock()
+    svc.remove_client_sync = Mock(return_value=True)
+    svc.reload_xray_sync = Mock(return_value=False)
+
+    assert svc.remove_client("u@x") is False
 
 
 def test_remove_client_deletes_by_email(svc):
