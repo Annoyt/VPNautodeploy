@@ -260,6 +260,8 @@ class TestSyncUserUsesToThread:
                     result = await service.sync_user('123', client_config)
 
                     assert result is True
-                    # Should call to_thread for reload_xray_sync too
+                    # The reload runs off the event loop too, inside the
+                    # step that judges it.
                     call_targets = [call[0][0] for call in mock_to_thread.call_args_list]
-                    assert service.reload_xray_sync in call_targets
+                    assert service._reload_after_change in call_targets
+                    service.reload_xray_sync.assert_called_once()
