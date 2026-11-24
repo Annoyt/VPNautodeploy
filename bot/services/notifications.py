@@ -1,5 +1,6 @@
 """Notification Service - User and admin notifications"""
 
+import html
 import asyncio
 import logging
 from datetime import datetime
@@ -92,6 +93,11 @@ class NotificationService:
                 [{
                     'text': '🎁 Запросить демо' if lang == 'ru' else '🎁 Request Demo',
                     'callback_data': 'request_demo',
+                }],
+                [{
+                    'text': ('📧 Я регистрировался через почту' if lang == 'ru'
+                             else '📧 I registered by email'),
+                    'callback_data': 'email_login',
                 }],
                 [{'text': btn_support, 'callback_data': 'support'}],
             ]
@@ -517,6 +523,36 @@ class NotificationService:
             logger.error(f"Failed to notify admin: {e}")
             return None
     
+    def notify_email_link(self, user, email: str, result) -> Optional[int]:
+        """Tell the admin that a confirmed address merged a mail account
+        into Telegram, or needs a hand (bot/services/email_link.py)."""
+        who = f"{user_label(user)}\nID: <code>{user.chat_id}</code>"
+        source = f"<code>{html.escape(str(result.source or ''))}</code>"
+        if result.outcome == 'merged':
+            day = str(result.paid_until or '')
+            until = f"\nОплачено до: {day[8:10]}.{day[5:7]}.{day[0:4]}" if len(day) >= 10 else ''
+            text = (f"🔗 <b>Почта и Telegram объединены</b>\n\n{who}\n"
+                    f"Почта: {html.escape(email)}\nБыло: {source}{until}")
+        else:
+            text = (f"⚠️ <b>Свяжите вручную</b>\n\n{who}\nподтвердил почту "
+                    f"{html.escape(email)}, на которой уже есть подписка: {source}. "
+                    "Сам бот не объединяет, когда ключи есть у обоих.")
+        try:
+            if self.config.FORUM_ENABLED:
+                result_msg = self.bot.send_message_to_topic(
+                    chat_id=self.config.FORUM_GROUP_ID,
+                    text=text,
+                    message_thread_id=self.config.TOPIC_REQUESTS,
+                    parse_mode='HTML',
+                )
+            else:
+                result_msg = self.bot.send_message(
+                    chat_id=self.config.SUPER_ADMIN_ID, text=text, parse_mode='HTML')
+            return result_msg.get('message_id') if result_msg else None
+        except Exception as e:
+            logger.error(f"notify_email_link failed: {e}")
+            return None
+
     def notify_auto_approved(self, user) -> Optional[int]:
         """Lightweight admin notification for an auto-approved user.
 

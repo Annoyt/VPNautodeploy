@@ -393,8 +393,9 @@ def check_sqlite(path: str) -> dict:
 
 # Tables of bot.db that no backup carries. netstat_events: the NekoVPN app's
 # network diagnostics (bot/services/netstat.py, AGENTS.md §67) live 14 days in
-# the live database and nowhere else; a restored bot creates the table anew.
-BOT_DB_LEFT_OUT = ('netstat_events',)
+# the live database and nowhere else, and so do the codes mailed to link an
+# email (bot/services/email_link.py); a restored bot creates the tables anew.
+BOT_DB_LEFT_OUT = ('netstat_events', 'email_codes')
 
 # The consistent copy of bot.db, made INSIDE the vpn-bot container as the bot's
 # user (see the module docstring). Prints DB_MAGIC, then the copy's bytes.

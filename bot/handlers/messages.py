@@ -1,6 +1,7 @@
 """Message handler for text messages"""
 
 import logging
+import re
 import time
 
 from bot.config import UserState
@@ -17,6 +18,12 @@ logger = logging.getLogger(__name__)
 # message" and was silently lost (ziriki, 2026-07-25).
 PENDING_EMAIL: dict = {}
 PENDING_EMAIL_TTL = 600  # seconds
+# chat_id → ts of the code letter: the next message is the six-digit code
+# (bot/services/email_link.py). EMAIL_PURPOSE: 'login' for «📧 Я
+# регистрировался через почту», 'add' (the default) for «📧 Добавить почту».
+PENDING_EMAIL_CODE: dict = {}
+PENDING_CODE_TTL = 16 * 60  # seconds: the code's 15 minutes and a margin
+EMAIL_PURPOSE: dict = {}
 
 # chat_id → ts of the "📝 Другой сайт" tap in the 🆘 picker: the next
 # plain-text message names the site that does not open (IMPROVEMENT_PLAN
@@ -77,6 +84,10 @@ class MessageHandler(BaseHandler):
         if self._maybe_handle_pending_email(chat_id, text, user):
             return
 
+        # A code was mailed → this message is the code.
+        if self._maybe_handle_pending_code(chat_id, text, user):
+            return
+
         # Pending "📝 другой сайт" prompt → this message names the site.
         if self._maybe_handle_pending_site(chat_id, text, user):
             return
@@ -94,7 +105,7 @@ class MessageHandler(BaseHandler):
 
     def _maybe_handle_pending_email(self, chat_id: str, text: str, user) -> bool:
         """Consume a pending email prompt. Returns True if the message
-        was handled (saved or rejected as malformed)."""
+        was handled (a code mailed to it, or rejected as malformed)."""
         ts = PENDING_EMAIL.get(chat_id)
         if ts is None:
             return False
@@ -107,27 +118,163 @@ class MessageHandler(BaseHandler):
         if not validate_email(email):
             # Keep the pending flag so they can retry within the TTL.
             msg = ("❌ Это не похоже на email. Попробуй ещё раз "
-                   "(например ivan@gmail.com) или /cancel для отмены."
+                   "(например ivan@gmail.com) или нажми «Отмена»."
                    if lang == 'ru' else
                    "❌ That doesn't look like an email. Try again "
-                   "(e.g. john@gmail.com) or /cancel to abort.")
-            self.bot.send_message(chat_id=chat_id, text=msg)
+                   "(e.g. john@gmail.com) or press «Cancel».")
+            cancel = {'inline_keyboard': [[{
+                'text': '✖️ Отмена' if lang == 'ru' else '✖️ Cancel',
+                'callback_data': 'email_cancel'}]]}
+            self.bot.send_message(chat_id=chat_id, text=msg, reply_markup=cancel)
             return True
 
         PENDING_EMAIL.pop(chat_id, None)
-        # contact_email, NOT user.email — the latter is the synthetic
-        # x-ui identifier and must never be overwritten by user input.
-        user.contact_email = email
-        self.db.save_user(user)
-        self._push_panel_comment(user)
-        msg = (f"✅ Email сохранён: {email}\n\nИспользуем его для отправки "
-               "резервного ключа если VPN заблокируют."
-               if lang == 'ru' else
-               f"✅ Email saved: {email}\n\nWe'll use it to send a backup "
-               "key if your VPN gets blocked.")
-        self.bot.send_message(chat_id=chat_id, text=msg)
-        logger.info(f"User {chat_id} set contact email via pending prompt")
+        self.send_email_code(chat_id, email, lang)
         return True
+
+    def _mailer(self):
+        services = getattr(self.bot, 'services', None)
+        mailer = services.get('email') if isinstance(services, dict) else None
+        if mailer is None:
+            from bot.services.email_service import EmailService
+            mailer = EmailService(self.config)
+        return mailer
+
+    def send_email_code(self, chat_id: str, email: str, lang: str) -> None:
+        """Mail a code to ``email`` and arm the code prompt."""
+        from bot.services import email_link
+        result = email_link.send_code(self.db, self.config, self._mailer(),
+                                      chat_id, email, lang=lang)
+        en = lang == 'en'
+        if result == 'sent':
+            PENDING_EMAIL_CODE[chat_id] = time.time()
+            text = (f"📨 Sent a code to {email_link.masked(email)}. Send the six "
+                    "digits here: the code works for 15 minutes."
+                    if en else
+                    f"📨 Отправили код на {email_link.masked(email)}. Пришлите сюда "
+                    "шесть цифр из письма: код действует 15 минут.")
+            keyboard = {'inline_keyboard': [[
+                {'text': '🔁 Send again' if en else '🔁 Отправить ещё раз',
+                 'callback_data': 'email_resend'},
+                {'text': '✖️ Cancel' if en else '✖️ Отмена',
+                 'callback_data': 'email_cancel'},
+            ]]}
+            self.bot.send_message(chat_id=chat_id, text=text, reply_markup=keyboard)
+            return
+        if result == 'rate_limited':
+            EMAIL_PURPOSE.pop(chat_id, None)
+            text = ("⏳ Too many letters this hour. Try again later."
+                    if en else
+                    "⏳ За час отправили уже три письма. Попробуйте позже.")
+        else:
+            PENDING_EMAIL[chat_id] = time.time()
+            text = ("❌ Could not send a letter to that address. Check it and "
+                    "send it again." if en else
+                    "❌ Не получилось отправить письмо на этот адрес. Проверьте "
+                    "его и пришлите ещё раз.")
+        self.bot.send_message(chat_id=chat_id, text=text)
+
+    def _maybe_handle_pending_code(self, chat_id: str, text: str, user) -> bool:
+        """Consume a pending code. True when the message was the answer."""
+        ts = PENDING_EMAIL_CODE.get(chat_id)
+        if ts is None:
+            return False
+        if time.time() - ts > PENDING_CODE_TTL:
+            PENDING_EMAIL_CODE.pop(chat_id, None)
+            EMAIL_PURPOSE.pop(chat_id, None)
+            return False
+        from bot.services import email_link
+        lang = getattr(user, 'lang', None) or 'ru'
+        en = lang == 'en'
+        code = re.sub(r'\s+', '', text or '')
+        if not re.fullmatch(r'\d{6}', code):
+            self.bot.send_message(chat_id=chat_id, text=(
+                "Send the six digits from the letter, or press «Cancel»."
+                if en else "Пришлите шесть цифр из письма или нажмите «Отмена»."))
+            return True
+        outcome, email = email_link.check_code(self.db, self.config, chat_id, code)
+        if outcome == 'wrong':
+            left = email_link.tries_left(self.db, chat_id)
+            self.bot.send_message(chat_id=chat_id, text=(
+                f"❌ Wrong code. Tries left: {left}." if en
+                else f"❌ Неверный код. Осталось попыток: {left}."))
+            return True
+        if outcome != 'ok':
+            if outcome == 'too_many':
+                PENDING_EMAIL_CODE.pop(chat_id, None)
+                EMAIL_PURPOSE.pop(chat_id, None)
+            self.bot.send_message(chat_id=chat_id, text=(
+                "⌛ The code no longer works. Press «Send again» for a new one."
+                if en else
+                "⌛ Этот код больше не действует. Нажмите «Отправить ещё раз» "
+                "за новым."))
+            return True
+        PENDING_EMAIL_CODE.pop(chat_id, None)
+        purpose = EMAIL_PURPOSE.pop(chat_id, 'add')
+        self._finish_email_link(chat_id, email, purpose, lang)
+        return True
+
+    def _finish_email_link(self, chat_id: str, email: str, purpose: str,
+                           lang: str) -> None:
+        """A verified address: link it (bot/services/email_link.py) and
+        tell the user and, for a merge or a conflict, the admin."""
+        from bot.services import email_link
+        result = email_link.link(self.db, chat_id, email)
+        en = lang == 'en'
+        user = self.db.get_user(chat_id)
+        keyboard = None
+        if result.outcome == 'merged':
+            self._drop_replaced_client(result.dropped_client)
+            self._push_panel_comment(user)
+            until = _day(result.paid_until)
+            text = ((f"✅ Email confirmed: your subscription{' (paid until ' + until + ')' if until else ''} "
+                     "now lives in this Telegram. Press «🔑 My key»: it is the same "
+                     "subscription, so your apps keep working.")
+                    if en else
+                    (f"✅ Почта подтверждена: ваша подписка{' (оплачена до ' + until + ')' if until else ''} "
+                     "теперь в этом Telegram. Нажмите «🔑 Мой ключ»: подписка та же, "
+                     "приложения работают как раньше."))
+            keyboard = {'inline_keyboard': [[{
+                'text': '🔑 My key' if en else '🔑 Мой ключ', 'callback_data': 'my_key'}]]}
+        elif result.outcome == 'admin':
+            text = ("✅ Email confirmed. Another subscription is on it: we passed "
+                    "it to the admin, who will join them." if en else
+                    "✅ Почта подтверждена. На неё оформлена ещё одна подписка — "
+                    "передали администратору, он свяжет их вручную.")
+        else:
+            self._push_panel_comment(user)
+            if purpose == 'login' and not getattr(user, 'uuid', None):
+                text = ("✅ Email confirmed, but no subscription is on it. You can "
+                        "ask for a demo." if en else
+                        "✅ Почта подтверждена, но подписки на неё у нас нет. Можно "
+                        "запросить демо.")
+                if getattr(user, 'status', None) == UserState.NEW.value:
+                    keyboard = {'inline_keyboard': [[{
+                        'text': '🎁 Request Demo' if en else '🎁 Запросить демо',
+                        'callback_data': 'request_demo'}]]}
+            else:
+                text = (f"✅ Email confirmed and saved: {email_link.masked(email)}."
+                        if en else
+                        f"✅ Почта подтверждена и сохранена: {email_link.masked(email)}.")
+        self.bot.send_message(chat_id=chat_id, text=text, reply_markup=keyboard)
+        if result.outcome in ('merged', 'admin'):
+            NotificationService(self.bot, self.db, self.config).notify_email_link(
+                user, email, result)
+        logger.info(f"User {chat_id} confirmed an email: {result.outcome}")
+
+    def _drop_replaced_client(self, panel_email) -> None:
+        """Take the demo client a merge replaced off the panel."""
+        if not panel_email:
+            return
+        try:
+            xui = self.bot.services.get('xui') if isinstance(
+                getattr(self.bot, 'services', None), dict) else None
+            if xui is None:
+                from bot.services.xui_service import XUIService
+                xui = XUIService(self.config)
+            xui.remove_client_sync(panel_email)
+        except Exception as e:
+            logger.warning(f"email link: replaced client not removed: {e}")
 
     def _maybe_handle_pending_site(self, chat_id: str, text: str, user) -> bool:
         """Consume a pending "📝 другой сайт" prompt (see PENDING_SITE)."""
@@ -251,3 +398,9 @@ class MessageHandler(BaseHandler):
             )
         
         self.bot.send_message(chat_id=chat_id, text=response)
+
+
+def _day(value) -> str:
+    """'2028-03-30T23:59:00' → '30.03.2028'; '' when there is none."""
+    text = str(value or '')
+    return f'{text[8:10]}.{text[5:7]}.{text[0:4]}' if len(text) >= 10 else ''

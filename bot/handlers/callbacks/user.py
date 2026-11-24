@@ -2012,14 +2012,9 @@ class EmailPromptHandler(BaseCallbackHandler):
         with the address and it was lost in the "I don't understand"
         fallback (ziriki, 2026-07-25).
         """
-        import time as _time
-        from bot.handlers.messages import PENDING_EMAIL, PENDING_SITE
-
         user = self.db.get_user(chat_id)
         lang = user.lang if user else 'ru'
-        PENDING_EMAIL[chat_id] = _time.time()
-        # one prompt at a time: the next message answers the latest tap
-        PENDING_SITE.pop(chat_id, None)
+        arm_email_prompt(chat_id, 'add')
 
         if lang == 'en':
             text = (
@@ -2028,7 +2023,7 @@ class EmailPromptHandler(BaseCallbackHandler):
                 "• If your VPN gets blocked, we'll email you a backup key\n"
                 "• You can contact support via email if Telegram is blocked\n\n"
                 "👉 Just <b>reply to this message</b> with your email "
-                "(e.g. john@gmail.com) — or send /setemail your@email.com"
+                "(e.g. john@gmail.com) — we'll send a code to it"
             )
         else:
             text = (
@@ -2037,7 +2032,7 @@ class EmailPromptHandler(BaseCallbackHandler):
                 "• Если VPN заблокируют, мы пришлём резервный ключ на почту\n"
                 "• Сможешь связаться с поддержкой через email если Telegram недоступен\n\n"
                 "👉 Просто <b>отправь email ответным сообщением</b> "
-                "(например ivan@gmail.com) — или командой /setemail твой@email.com"
+                "(например ivan@gmail.com) — пришлём на него код подтверждения"
             )
 
         self.bot.send_message(
@@ -2046,3 +2041,69 @@ class EmailPromptHandler(BaseCallbackHandler):
             parse_mode='HTML'
         )
         logger.info(f"User {chat_id} requested email prompt (pending armed)")
+
+
+def arm_email_prompt(chat_id: str, purpose: str) -> None:
+    """The user's next message is their email (bot/handlers/messages.py);
+    one prompt at a time, so the latest tap wins."""
+    import time as _time
+    from bot.handlers.messages import (
+        EMAIL_PURPOSE, PENDING_EMAIL, PENDING_EMAIL_CODE, PENDING_SITE)
+    PENDING_EMAIL[chat_id] = _time.time()
+    EMAIL_PURPOSE[chat_id] = purpose
+    PENDING_EMAIL_CODE.pop(chat_id, None)
+    PENDING_SITE.pop(chat_id, None)
+
+
+class EmailLoginHandler(BaseCallbackHandler):
+    """«📧 Я регистрировался через почту» on the welcome screen: the address
+    is required, and a code mailed to it links the mail account here
+    (bot/services/email_link.py)."""
+
+    CALLBACK_DATA_EXACT = ['email_login']
+
+    def can_handle(self, callback_data: str) -> bool:
+        return callback_data in self.CALLBACK_DATA_EXACT
+
+    def handle(self, update: dict, chat_id: str, user_id: str, **kwargs) -> None:
+        user = self.db.get_user(chat_id)
+        en = (user.lang if user else 'ru') == 'en'
+        arm_email_prompt(chat_id, 'login')
+        text = ("📧 Send the email you registered with: we'll mail a code to it, "
+                "and your subscription comes here." if en else
+                "📧 Напишите почту, на которую вы регистрировались: пришлём на неё "
+                "код, и подписка перейдёт сюда.")
+        self.bot.send_message(chat_id=chat_id, text=text, reply_markup={
+            'inline_keyboard': [[{'text': '✖️ Cancel' if en else '✖️ Отмена',
+                                  'callback_data': 'email_cancel'}]]})
+
+
+class EmailCodeFlowHandler(BaseCallbackHandler):
+    """«🔁 Отправить ещё раз» and «✖️ Отмена» under the code letter."""
+
+    CALLBACK_DATA_EXACT = ['email_resend', 'email_cancel']
+
+    def can_handle(self, callback_data: str) -> bool:
+        return callback_data in self.CALLBACK_DATA_EXACT
+
+    def handle(self, update: dict, chat_id: str, user_id: str, **kwargs) -> None:
+        from bot.handlers.messages import (
+            EMAIL_PURPOSE, PENDING_EMAIL, PENDING_EMAIL_CODE, MessageHandler)
+        from bot.services import email_link
+        user = self.db.get_user(chat_id)
+        lang = user.lang if user else 'ru'
+        if kwargs.get('data') == 'email_cancel':
+            for pending in (PENDING_EMAIL, PENDING_EMAIL_CODE, EMAIL_PURPOSE):
+                pending.pop(chat_id, None)
+            self.bot.send_message(chat_id=chat_id, text=(
+                'Cancelled.' if lang == 'en' else 'Отменено.'))
+            return
+        email = email_link.pending_email(self.db, chat_id)
+        if not email:
+            arm_email_prompt(chat_id, EMAIL_PURPOSE.get(chat_id, 'add'))
+            self.bot.send_message(chat_id=chat_id, text=(
+                'Send your email once more.' if lang == 'en'
+                else 'Пришлите почту ещё раз.'))
+            return
+        MessageHandler(self.bot, self.db, self.config).send_email_code(
+            chat_id, email, lang)
