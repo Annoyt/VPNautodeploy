@@ -1,7 +1,7 @@
 # AGENTS.md — VPN Bot
 
 > Agent-focused guidance. For project overview, see `docs/PROJECT.md`.
-> Operational insights §1–§68: index at the end of this file, text in `docs/insights/`.
+> Operational insights §1–§69: index at the end of this file, text in `docs/insights/`.
 
 ---
 
@@ -300,3 +300,4 @@ A new insight goes into `docs/insights/NN-<slug>.md` under the next free number,
 - §66. Handshake failures from users' own addresses are not probing: `dpi_hsfail` and `dpi_hsfail_users` (2026-11-20) — [docs/insights/66-handshake-failures-from-users-addresses-are-not-probing.md](docs/insights/66-handshake-failures-from-users-addresses-are-not-probing.md)
 - §67. The NekoVPN app's network diagnostics, `/start app` and the new settings fields (2026-11-20, NEKO6) — [docs/insights/67-the-nekovpn-app-s-network-diagnostics.md](docs/insights/67-the-nekovpn-app-s-network-diagnostics.md)
 - §68. DE through its own reverse tunnel: entry reaches the reserve again (2026-11-25) — [docs/insights/68-de-through-its-own-reverse-tunnel.md](docs/insights/68-de-through-its-own-reverse-tunnel.md)
+- §69. DE as the stls backup: when exit's tunnel is down, stls goes to DE (2026-11-25) — [docs/insights/69-de-as-the-stls-backup.md](docs/insights/69-de-as-the-stls-backup.md)
