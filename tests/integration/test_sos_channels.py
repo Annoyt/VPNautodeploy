@@ -395,12 +395,18 @@ class TestSos:
         assert 'Refresh your main subscription' in text
         assert 'Profiles → + → URL' in text
 
-    def test_iphone_gets_karing_and_no_flclash(self, bot, db, config, panel):
+    def test_iphone_gets_clash_mi_only(self, bot, db, config, panel):
+        # §69: iPhone is Clash Mi, which reads only the Clash profile.
         user = add_user(db, platform='ios')
         self._sos(bot, db, config)
         text = sent(bot, CID)[0]['text']
-        assert 'Karing' in text and 'FlClash' not in text and 'format=clash' not in text
-        assert f'<code>{sub_url(config, user)}?emergency=1</code>' in text
+        assert 'Clash Mi' in text
+        for other in ('Karing', 'Hiddify', 'FlClash'):
+            assert other not in text
+        base = sub_url(config, user)
+        assert f'<code>{base}?format=clash&amp;emergency=1</code>' in text
+        assert f'<code>{base}?emergency=1</code>' not in text
+        assert 'в Clash Mi: «Профили» → «Обновить»' in text
 
     def test_no_public_url_still_answers_and_reports(self, bot, db, panel):
         add_user(db)

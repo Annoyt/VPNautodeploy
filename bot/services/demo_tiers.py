@@ -118,8 +118,9 @@ def vpn_only_note(lang: str, ios: bool = False) -> str:
     """The counting rule, in the words of the 2026-10-30 broadcast. Bound
     to NekoVPN and FlClash: only there does our profile's routing apply
     (Hiddify drops it and sends Russian sites through the VPN, where
-    they count). On iOS the plain rule: the iPhone card names Karing
-    only, and Karing's routing is unverified."""
+    they count). On iOS the plain rule: the iPhone card names Clash Mi
+    only (§69), which runs our profile's rules too, but nobody has checked
+    the counting on an iPhone yet."""
     if lang == 'en':
         if ios:
             return "Only traffic through the VPN counts."

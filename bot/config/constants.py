@@ -213,14 +213,12 @@ PLATFORM_INSTRUCTIONS = {
             "❓ Если что-то не удалось — напиши /support"
         ),
         Platform.IOS: (
-            "1. Установите Karing из App Store\n"
-            "   📱 https://karing.app/\n\n"
-            "   Hiddify и Happ удалили из RU App Store —\n"
-            "   Karing остался и полностью работает.\n\n"
+            "1. Установите Clash Mi из App Store (бесплатно)\n"
+            "   📱 https://apps.apple.com/ru/app/clash-mi/id6744321968\n\n"
             "2. Откройте приложение\n"
-            "3. Нажмите «+» → «Добавить из ссылки» и вставьте ссылку из\n"
-            "   сообщения с ключом (придёт следующим сообщением)\n"
-            "4. Нажмите кнопку подключения\n\n"
+            "3. «Профили» → «+» → «Импорт из буфера обмена» со ссылкой из\n"
+            "   сообщения с ключом (придёт следующим сообщением) → «Сохранить»\n"
+            "4. Включите VPN\n\n"
             "❓ Если что-то не удалось — напишите /support"
         ),
         Platform.WINDOWS: (
@@ -263,14 +261,12 @@ PLATFORM_INSTRUCTIONS = {
             "❓ If something doesn't work — write /support"
         ),
         Platform.IOS: (
-            "1. Install Karing from the App Store\n"
-            "   📱 https://karing.app/\n\n"
-            "   (Hiddify and Happ were pulled from the RU App Store —\n"
-            "   Karing remains and works fine.)\n\n"
+            "1. Install Clash Mi from the App Store (free)\n"
+            "   📱 https://apps.apple.com/ru/app/clash-mi/id6744321968\n\n"
             "2. Open the app\n"
-            "3. Tap «+» → «Add from URL» and paste the link from the key\n"
-            "   message (arrives next)\n"
-            "4. Tap the connect button\n\n"
+            "3. My Profiles → + → Import From Clipboard with the link from the\n"
+            "   key message (arrives next) → Save\n"
+            "4. Turn the VPN on\n\n"
             "❓ If something doesn't work — write /support"
         ),
         Platform.WINDOWS: (

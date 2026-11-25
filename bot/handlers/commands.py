@@ -420,7 +420,7 @@ class CommandHandler(BaseHandler):
         flip the global Hiddify toggle.
         """
         from bot.handlers.callbacks.user import (
-            client_choice_text, client_download_row,
+            clash_mi_text, client_choice_text, client_download_row,
         )
         from bot.services.subscription import SubscriptionService
 
@@ -443,14 +443,15 @@ class CommandHandler(BaseHandler):
             logger.warning(f"/sub: no public URL (SUB_PUBLIC_URL / WEBAPP_URL), cannot build URL for {chat_id}")
             return
 
-        # iOS RU App Store lost Hiddify AND Happ; Karing (sing-box)
-        # survives and reads the plain sing-box subscription.
+        # iPhone: Clash Mi only, with the Clash profile (AGENTS.md §69).
         is_ios = (getattr(user, 'platform', None) or '') == 'ios'
+        from bot.services.neko_client import clash_mi_button_row
+        clash_mi_row = clash_mi_button_row(self.config, user) if is_ios else None
 
         # Platform quick-switch: user may have changed devices since
         # onboarding. One tap re-renders the key in the right format.
         plat_keyboard = {'inline_keyboard': [[
-            {'text': '🍎 iOS (Karing)', 'callback_data': 'setplat:ios'},
+            {'text': '🍎 iPhone', 'callback_data': 'setplat:ios'},
             {'text': '📱 Android', 'callback_data': 'setplat:android'},
             {'text': '💻 ПК', 'callback_data': 'setplat:windows'},
         ]]}
@@ -462,19 +463,17 @@ class CommandHandler(BaseHandler):
 
         if is_ios and user.lang != 'en':
             text = (
-                "🔗 <b>Subscription URL для Karing</b>\n\n"
-                f"<code>{url}</code>\n\n"
-                "В Karing: «+» → «Добавить из ссылки» → вставь URL.\n"
-                "Один URL = весь каскад протоколов. Когда мы меняем "
-                "сервера, клиент сам подтягивает свежее каждые 6 часов."
+                "🔗 <b>Твоя подписка для iPhone</b>\n\n"
+                + clash_mi_text(url, 'ru', with_button=bool(clash_mi_row))
+                + "\n\nОдна подписка = весь каскад протоколов. Когда мы "
+                "меняем сервера, приложение само подтягивает свежее."
             )
         elif is_ios:
             text = (
-                "🔗 <b>Subscription URL for Karing</b>\n\n"
-                f"<code>{url}</code>\n\n"
-                "In Karing: «+» → «Add from URL» → paste it.\n"
-                "One URL = the whole cascade. When we rotate servers the "
-                "client picks it up automatically every 6 hours."
+                "🔗 <b>Your iPhone subscription</b>\n\n"
+                + clash_mi_text(url, 'en', with_button=bool(clash_mi_row))
+                + "\n\nOne subscription = the whole cascade. When we rotate "
+                "servers the app picks it up automatically."
             )
         elif user.lang == 'ru':
             text = (
@@ -494,7 +493,9 @@ class CommandHandler(BaseHandler):
             from bot.services.demo_tiers import demo_terms
             text += "\n\n" + demo_terms(
                 self.config, 'en' if user.lang == 'en' else 'ru', ios=is_ios)
-        if not is_ios:
+        if clash_mi_row:
+            plat_keyboard['inline_keyboard'].insert(0, clash_mi_row)
+        elif not is_ios:
             plat_keyboard['inline_keyboard'].insert(0, client_download_row())
         # NekoVPN testers: add the subscription to the app in one tap.
         from bot.services.neko_client import open_button_row

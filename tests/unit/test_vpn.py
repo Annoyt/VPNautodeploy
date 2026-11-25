@@ -104,7 +104,8 @@ class TestVPNService:
         instructions = vpn.get_instructions(Platform.IOS, 'en')
 
         assert len(instructions) > 0
-        assert 'Hiddify' in instructions
+        # iPhone: Clash Mi only (AGENTS.md §69)
+        assert 'Clash Mi' in instructions and 'Karing' not in instructions
     
     def test_get_instructions_invalid_lang_fallback(self, vpn):
         """Test fallback to Russian for invalid language"""

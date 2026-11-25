@@ -1,7 +1,7 @@
 # AGENTS.md — VPN Bot
 
 > Agent-focused guidance. For project overview, see `docs/PROJECT.md`.
-> Operational insights §1–§66: index at the end of this file, text in `docs/insights/`.
+> Operational insights §1–§69: index at the end of this file, text in `docs/insights/`.
 
 ---
 
@@ -164,6 +164,7 @@ Files with this mark: `test_database.py`, `test_security.py`, `test_state_machin
 | `bot/core/repositories/user.py` `save()` / `SAVE_COLUMNS` | `tests/integration/test_user_save.py`, `tests/unit/test_repositories_user.py` |
 | `bot/services/netstat.py` (the D2 body, the `NekoToken` header, `netstat_events`), `handle_neko_netstat` in `bot/core/web_server.py`, `bot/utils/unlogged.py`, `bot/utils/request_body.py` | `tests/integration/test_neko_netstat.py`, `tests/integration/test_neko_app_sos.py` (the SOS report reads its body the same way); a change to D2 needs the app's sender (client plan C3) and `docs/NEKO6_PLAN.md`; a new table there needs `BOT_DB_LEFT_OUT` in `scripts/service_backup.py` (a test keeps them equal); §67 |
 | `/start app` (`CommandHandler._send_app_open`), `neko_client.open_page_url` / `open_button_label` | `tests/integration/test_start_app.py`, `tests/integration/test_neko_client.py`; the app's «Нужна подписка» link is `t.me/<bot>?start=app` (§67) |
+| What an iPhone user reads: `clash_mi_text` in `bot/handlers/callbacks/user.py`, `neko_client.CLASH_MI_URL` / `clash_mi_link` / `clash_mi_button_row`, the iPhone branches of `bot/services/sos.py` and `bot/services/email_service.py` | `tests/integration/test_ios_clash_mi.py` (no other app for iPhone), `scripts/ios_clash_mi_notify.py` and `tests/integration/test_ios_clash_mi_notify.py`; §69 |
 | `bot/models/vpn_node.py` | All cluster tests using `VPNNode` |
 | `scripts/hermes_model_guard.py` (`GuardIO`, `parse_env_file`, `effective_bot_token`, `save_state`) | `scripts/hermes_release_notice.py` loads them from its own directory, `tests/unit/test_hermes_release_notice.py` |
 | `bot/services/exit_reach.py` (the PROXY header's marker, `MARK_SRC`) | `WebAppServer._dpi_exit_rows` drops that source, `tests/integration/test_exit_reach.py` |
@@ -299,3 +300,4 @@ A new insight goes into `docs/insights/NN-<slug>.md` under the next free number,
 - §65. Credentials out of the access log: the dashboard's Authorization header, initData for a day (2026-11-20) — [docs/insights/65-credentials-out-of-the-access-log.md](docs/insights/65-credentials-out-of-the-access-log.md)
 - §66. Handshake failures from users' own addresses are not probing: `dpi_hsfail` and `dpi_hsfail_users` (2026-11-20) — [docs/insights/66-handshake-failures-from-users-addresses-are-not-probing.md](docs/insights/66-handshake-failures-from-users-addresses-are-not-probing.md)
 - §67. The NekoVPN app's network diagnostics, `/start app` and the new settings fields (2026-11-20, NEKO6) — [docs/insights/67-the-nekovpn-app-s-network-diagnostics.md](docs/insights/67-the-nekovpn-app-s-network-diagnostics.md)
+- §69. iPhone: Clash Mi only (2026-11-25) — [docs/insights/69-iphone-clash-mi-only.md](docs/insights/69-iphone-clash-mi-only.md)

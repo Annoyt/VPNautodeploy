@@ -17,6 +17,10 @@ to all on 2026-10-31, with the demo allowance that NekoVPN raises to
 10 GB), and on any other platform but iOS the testers,
 ``app_settings.client_testers``, the list ``scripts/client_release_notify.py``
 writes.
+
+iPhone has no NekoVPN build. Its one app is Clash Mi (AGENTS.md §69): the
+same mihomo core, free on the RU App Store. Its button opens ``/app/<token>``,
+whose iPhone section carries Clash Mi's own import link.
 """
 
 import html
@@ -40,7 +44,8 @@ KEY_STATUSES = ('demo', 'paid', 'support_topic')
 # The APK builds a release carries; the first is what nearly every phone
 # takes.
 ABIS = ('arm64-v8a', 'armeabi-v7a', 'x86_64')
-KARING_URL = 'https://karing.app/'
+# Clash Mi (SUPERNOVA NEBULA LLC, App Store id 6744321968): the iPhone app.
+CLASH_MI_URL = 'https://apps.apple.com/ru/app/clash-mi/id6744321968'
 FLCLASH_URL = 'https://chen08209.github.io/FlClash/#download'
 
 
@@ -225,6 +230,33 @@ def open_button_label(lang: Optional[str]) -> str:
     return '📲 Open in NekoVPN' if lang == 'en' else '📲 Открыть в NekoVPN'
 
 
+def clash_mi_button_label(lang: Optional[str]) -> str:
+    """The iPhone card's button; the card's steps name it the same way."""
+    return '📲 Add to Clash Mi' if lang == 'en' else '📲 Добавить в Clash Mi'
+
+
+def clash_mi_button_row(config, user) -> Optional[list]:
+    """The «📲 Добавить в Clash Mi» row for an iPhone key holder:
+    ``/app/<token>``, whose iPhone section (opened by the phone's
+    User-Agent) has Clash Mi's import link. Telegram buttons take only
+    http(s) links. None without a key or while the bot knows no public
+    address. Never raises."""
+    try:
+        if not user or not getattr(user, 'uuid', None):
+            return None
+        if (getattr(user, 'status', '') or '') not in KEY_STATUSES:
+            return None
+        if (getattr(user, 'platform', '') or '') != 'ios':
+            return None
+        url = download_page_url(config, user)
+    except Exception as e:
+        logger.warning(f"neko_client: Clash Mi button skipped: {e}")
+        return None
+    if not url or url == RELEASES_URL:
+        return None
+    return [{'text': clash_mi_button_label(getattr(user, 'lang', None)), 'url': url}]
+
+
 _TEXTS = {
     'ru': {
         'lead': 'Нажмите кнопку: NekoVPN откроется и предложит добавить вашу подписку.',
@@ -317,10 +349,17 @@ def flclash_link(url: str) -> str:
     return f'clash://install-config?url={quote(url, safe="")}'
 
 
-def karing_link(url: str) -> str:
-    """Karing's import link (its scheme handler); the plain subscription."""
-    return (f'karing://install-config?url={quote(url, safe="")}'
-            f'&name={PROFILE_NAME}')
+def clash_mi_link(url: str) -> str:
+    """Clash Mi's import link: the Clash profile, named, with
+    ``overwrite=false``. Clash Mi's scheme handler (KaringX/clashmi,
+    lib/screens/scheme_handler.dart) opens its «Добавление подписки» screen
+    with the patch «Встроенный - не перезаписывается» chosen, so the app
+    keeps our DNS and settings instead of laying its own over them. A link
+    pasted by hand gets the app's default patch: only this link carries
+    the choice. ``clashmi://``, not ``clash://``: Clash Mi registers both
+    on iOS, and another app may claim ``clash://``."""
+    return (f'clashmi://install-config?url={quote(url, safe="")}'
+            f'&name={PROFILE_NAME}&overwrite=false')
 
 
 _CHOOSER_TEXTS = {
@@ -339,7 +378,9 @@ _CHOOSER_TEXTS = {
                    'Google Play его нет.',
         'flclash_pc': 'Рекомендуем для компьютера: применяет наши правила '
                       'полностью.',
-        'karing': 'Для iPhone и iPad, из App Store. NekoVPN для iPhone пока нет.',
+        'clash_mi': 'Для iPhone и iPad, бесплатно в App Store. Движок тот же, '
+                    'что у NekoVPN: наши правила работают. NekoVPN для iPhone '
+                    'пока нет.',
         'download': 'Скачать',
         'download_neko': 'Скачать NekoVPN',
         'add': 'Добавить подписку',
@@ -353,8 +394,8 @@ _CHOOSER_TEXTS = {
         'no_token': 'Подписку добавьте из бота {bot}: /sub. Там же кнопка, '
                     'которая открывает эту страницу с вашей подпиской.',
         'manual': 'Ссылки подписки вручную',
-        'manual_plain': 'Hiddify, Karing и другие:',
-        'manual_clash': 'NekoVPN и FlClash:',
+        'manual_plain': 'Hiddify:',
+        'manual_clash': 'NekoVPN, FlClash и Clash Mi:',
         'demo': 'Демо в NekoVPN — {app} ГБ в месяц, в других приложениях — '
                 '{other} ГБ.',
     },
@@ -372,8 +413,9 @@ _CHOOSER_TEXTS = {
                    'Russian sites directly. From the official site; it is not '
                    'on Google Play.',
         'flclash_pc': 'Recommended for a computer: applies our rules in full.',
-        'karing': 'For iPhone and iPad, from the App Store. NekoVPN has no '
-                  'iPhone build yet.',
+        'clash_mi': 'For iPhone and iPad, free on the App Store. The same core '
+                    'as NekoVPN, so our rules apply. NekoVPN has no iPhone build '
+                    'yet.',
         'download': 'Download',
         'download_neko': 'Download NekoVPN',
         'add': 'Add subscription',
@@ -386,8 +428,8 @@ _CHOOSER_TEXTS = {
         'no_token': 'Add your subscription from the bot {bot}: /sub. It has a '
                     'button that opens this page with your subscription.',
         'manual': 'Subscription links by hand',
-        'manual_plain': 'Hiddify, Karing and others:',
-        'manual_clash': 'NekoVPN and FlClash:',
+        'manual_plain': 'Hiddify:',
+        'manual_clash': 'NekoVPN, FlClash and Clash Mi:',
         'demo': 'Demo in NekoVPN: {app} GB a month; {other} GB in other apps.',
     },
 }
@@ -403,8 +445,8 @@ def render_download_page(*, platform: str, lang: Optional[str],
                          self_url: Optional[str] = None) -> str:
     """The app chooser: Android, iPhone and computer, the visitor's own
     platform opened. Every app has its download and, with the user's
-    subscription (``plain_url`` for Hiddify and Karing, ``profile_url``,
-    the Clash form, for NekoVPN and FlClash), an «Add subscription» link
+    subscription (``plain_url`` for Hiddify, ``profile_url``, the Clash
+    form, for NekoVPN, FlClash and Clash Mi), an «Add subscription» link
     in the form that app reads. NekoVPN's intent falls back to
     ``self_url`` (this page). ``apk_url`` is our ``/apk``, a stable link
     that follows new releases. ``demo_gb`` (app, other) prints the demo
@@ -447,8 +489,9 @@ def render_download_page(*, platform: str, lang: Optional[str],
         app('FlClash', t['flclash'], FLCLASH_URL,
             flclash_link(profile_url) if profile_url else None),
     ]
-    ios = [app('Karing', t['karing'], KARING_URL,
-               karing_link(plain_url) if plain_url else None)]
+    # iPhone: Clash Mi only (AGENTS.md §69).
+    ios = [app('Clash Mi', t['clash_mi'], CLASH_MI_URL,
+               clash_mi_link(profile_url) if profile_url else None, rec=True)]
     desktop = [
         app('FlClash', t['flclash_pc'], FLCLASH_URL,
             flclash_link(profile_url) if profile_url else None, rec=True),
