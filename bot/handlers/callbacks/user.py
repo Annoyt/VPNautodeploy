@@ -281,6 +281,47 @@ def client_choice_text(url: str, lang: str) -> str:
     )
 
 
+def clash_mi_text(url: str, lang: str, with_button: bool = True) -> str:
+    """The iPhone steps: Clash Mi, the one iPhone app we name (AGENTS.md
+    §69). It reads only the Clash profile. ``with_button``: the card
+    carries «📲 Добавить в Clash Mi» (``neko_client.clash_mi_button_row``),
+    whose page adds the profile with the app's own patch switched off; the
+    hand-pasted link keeps the app's default. Labels are Clash Mi's own
+    (its ru / en translations). Shared by the key card and /sub."""
+    from bot.services.neko_client import CLASH_MI_URL, clash_mi_button_label
+    clash = html.escape(f'{url}?format=clash')
+    button = clash_mi_button_label(lang)
+    if lang == 'en':
+        add = (f"2. Tap «{button}» below, then «Add subscription» on the page: "
+               "Clash Mi opens with our profile — tap «Save».\n"
+               if with_button else
+               "2. Copy the link below. In Clash Mi: <b>My Profiles → + → "
+               "Import From Clipboard → Save</b>.\n")
+        return (
+            f"1. Install <b>Clash Mi</b> from the App Store, it is free: {CLASH_MI_URL}\n"
+            + add +
+            "3. Turn the VPN on in Clash Mi.\n\n"
+            + ("By hand: copy the link\n" if with_button else "The link:\n")
+            + f"<code>{clash}</code>"
+            + ("\nIn Clash Mi: <b>My Profiles → + → Import From Clipboard → "
+               "Save</b>." if with_button else "")
+        )
+    add = (f"2. Нажми «{button}» ниже, на странице — «Добавить подписку»: "
+           "Clash Mi откроется с нашим профилем, нажми «Сохранить».\n"
+           if with_button else
+           "2. Скопируй ссылку ниже. В Clash Mi: <b>Профили → + → Импорт из "
+           "буфера обмена → Сохранить</b>.\n")
+    return (
+        f"1. Установи <b>Clash Mi</b> из App Store, он бесплатный: {CLASH_MI_URL}\n"
+        + add +
+        "3. Включи VPN в Clash Mi.\n\n"
+        + ("Вручную: скопируй ссылку\n" if with_button else "Ссылка:\n")
+        + f"<code>{clash}</code>"
+        + ("\nВ Clash Mi: <b>Профили → + → Импорт из буфера обмена → "
+           "Сохранить</b>." if with_button else "")
+    )
+
+
 def client_download_row() -> list:
     """Official download pages of both clients (never a Play link for
     FlClash — there is no official one)."""
@@ -296,9 +337,9 @@ def build_key_delivery_message(user, config, db=None) -> tuple:
     (no public URL) so the caller can degrade to a raw key. Shared by
     GetKeyHandler (first-time issuance) and SetPlatformHandler
     (re-selection from the /sub message — users switch devices). iOS gets
-    Karing instructions (sing-box client — the RU App Store pulled both
-    Hiddify and Happ); the URL itself is the plain sing-box subscription
-    for every platform. With ``db`` a paid user also gets the
+    Clash Mi only (``clash_mi_text``, AGENTS.md §69: the RU App Store
+    pulled Hiddify and Happ) with the Clash profile and its «📲 Добавить в
+    Clash Mi» button; no raw keys. With ``db`` a paid user also gets the
     "🇷🇺 RU-зона" button (bot/services/ru_exit.py).
     """
     from bot.services.subscription import SubscriptionService
@@ -308,32 +349,21 @@ def build_key_delivery_message(user, config, db=None) -> tuple:
         return None, None
     lang = (getattr(user, 'lang', None) or 'ru')
     is_ios = (getattr(user, 'platform', None) or '') == 'ios'
+    from bot.services.neko_client import clash_mi_button_row
+    clash_mi_row = clash_mi_button_row(config, user) if is_ios else None
     if is_ios and lang != 'en':
         text = (
             "✅ <b>Твой VPN готов</b>\n\n"
-            "1. Установи Karing из App Store (Hiddify и Happ удалили "
-            "из RU-маркета): https://karing.app/\n"
-            "2. Добавь подписку — тапни по ссылке чтобы скопировать:\n\n"
-            f"<code>{url}</code>\n\n"
-            "3. В Karing: <b>+ → Добавить из ссылки → вставить → Сохранить</b>\n"
-            "4. Нажми «Подключить». Клиент сам выбирает рабочий "
-            "сервер и переключается если что-то падает.\n\n"
-            "💡 Подписка сама обновляется каждые 6 часов — если мы "
-            "меняем сервера, ничего переимпортировать не надо.\n\n"
-            "Нужен сырой ключ одного протокола? /raw"
+            + clash_mi_text(url, 'ru', with_button=bool(clash_mi_row)) +
+            "\n\n💡 Подписка сама обновляется — если мы меняем сервера, "
+            "ничего переимпортировать не надо."
         )
     elif is_ios:
         text = (
             "✅ <b>Your VPN is ready</b>\n\n"
-            "1. Install Karing from the App Store: https://karing.app/\n"
-            "2. Add this subscription URL — tap the link below to copy:\n\n"
-            f"<code>{url}</code>\n\n"
-            "3. In Karing: <b>+ → Add from URL → paste → Save</b>\n"
-            "4. Tap «Connect». The client picks the working outbound "
-            "automatically and switches if something dies.\n\n"
-            "💡 The subscription refreshes itself every 6 hours — "
-            "server changes arrive automatically.\n\n"
-            "Need a raw single-protocol key? Send /raw."
+            + clash_mi_text(url, 'en', with_button=bool(clash_mi_row)) +
+            "\n\n💡 The subscription refreshes itself — server changes "
+            "arrive automatically."
         )
     elif lang == 'en':
         text = (
@@ -364,12 +394,14 @@ def build_key_delivery_message(user, config, db=None) -> tuple:
     keyboard = {'inline_keyboard': [
         [{'text': email_btn_label, 'callback_data': 'add_email_prompt'},
          {'text': email_key_label, 'callback_data': 'email_key'}],
-        [{'text': '🍎 iOS (Karing)', 'callback_data': 'setplat:ios'},
+        [{'text': '🍎 iPhone', 'callback_data': 'setplat:ios'},
          {'text': '📱 Android', 'callback_data': 'setplat:android'},
          {'text': '💻 ПК', 'callback_data': 'setplat:windows'}],
         [{'text': btn_label, 'callback_data': 'report_failure'}]
     ]}
-    if not is_ios:
+    if clash_mi_row:
+        keyboard['inline_keyboard'].insert(0, clash_mi_row)
+    elif not is_ios:
         keyboard['inline_keyboard'].insert(0, client_download_row())
     if db is not None:
         # NekoVPN testers: add the subscription to the app in one tap.
@@ -701,8 +733,8 @@ class SetPlatformHandler(BaseCallbackHandler):
     PlatformSelectHandler this must NOT touch the state machine — a paid
     user re-picking a platform is not a demo transition. It just stores
     the new platform and re-renders the key card in the right format
-    (iOS → Karing instructions, everything else → Hiddify).
-    The subscription URL itself is the plain sing-box one for all.
+    (iOS → Clash Mi and the Clash profile, everything else → the
+    Hiddify / FlClash choice).
     """
 
     CALLBACK_PATTERN = 'setplat:'

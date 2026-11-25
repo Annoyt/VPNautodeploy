@@ -37,10 +37,14 @@ def _key_email(sub_url: str, lang: str, platform: str = None) -> tuple[str, str]
     who has never seen a VPN client — every step names the exact
     button to tap.
 
-    iOS gets a dedicated Karing-first variant: both Hiddify and Happ were
-    pulled from the RU App Store. Karing is sing-box based and reads the
-    plain subscription URL — no special format needed.
+    iOS gets its own variant with Clash Mi, the one iPhone app we name
+    (AGENTS.md §69): the RU App Store pulled Hiddify and Happ. Clash Mi
+    reads only the Clash profile, so its key is ``sub_url?format=clash``;
+    the general letter carries that link on its own line for iPhones.
+    ``sub_url`` is the plain subscription URL, no query.
     """
+    clash_url = f'{sub_url}?format=clash'
+    from bot.services.neko_client import CLASH_MI_URL
     if platform == 'ios':
         if lang == 'en':
             subject = "Your NekoVPN access key + iPhone setup guide"
@@ -49,19 +53,20 @@ def _key_email(sub_url: str, lang: str, platform: str = None) -> tuple[str, str]
                 "step-by-step iPhone setup guide. It takes about 2 minutes.\n"
                 "\n"
                 "=== YOUR KEY (subscription link) ===\n"
-                f"{sub_url}\n"
+                f"{clash_url}\n"
                 "\n"
                 "=== SETUP (step by step) ===\n"
-                "1. Install the free Karing app from the App Store:\n"
-                "   https://karing.app/ (or search \"Karing\" in the App Store)\n"
+                "1. Install the free Clash Mi app from the App Store:\n"
+                f"   {CLASH_MI_URL}\n"
+                "   (or search \"Clash Mi\" in the App Store)\n"
                 "\n"
                 "2. Copy the whole key link above (the long line starting\n"
                 "   with https://). Tap and hold it, then choose \"Copy\".\n"
                 "\n"
-                "3. Open Karing. Tap \"+\" → \"Add from URL\" and paste\n"
-                "   the link. Tap Save.\n"
+                "3. Open Clash Mi: \"My Profiles\" → \"+\" →\n"
+                "   \"Import From Clipboard\" → \"Save\".\n"
                 "\n"
-                "4. A profile appears. Tap the big round Connect button.\n"
+                "4. A profile appears. Turn the VPN on in Clash Mi.\n"
                 "   When it shows connected you are done.\n"
                 "\n"
                 "=== GOOD TO KNOW ===\n"
@@ -80,23 +85,22 @@ def _key_email(sub_url: str, lang: str, platform: str = None) -> tuple[str, str]
                 "пошаговая инструкция для iPhone. Займёт около 2 минут.\n"
                 "\n"
                 "=== ВАШ КЛЮЧ (ссылка-подписка) ===\n"
-                f"{sub_url}\n"
+                f"{clash_url}\n"
                 "\n"
                 "=== НАСТРОЙКА (по шагам) ===\n"
-                "1. Установите бесплатное приложение Karing из App Store:\n"
-                "   https://karing.app/ (или поиск \"Karing\" в App Store)\n"
-                "   Hiddify и Happ удалили из RU App Store — Karing\n"
-                "   остался и полностью работает.\n"
+                "1. Установите бесплатное приложение Clash Mi из App Store:\n"
+                f"   {CLASH_MI_URL}\n"
+                "   (или поиск \"Clash Mi\" в App Store)\n"
                 "\n"
                 "2. Скопируйте ссылку-ключ целиком (длинная строка выше,\n"
                 "   начинается с https://). Нажмите и удерживайте её,\n"
                 "   затем выберите \"Копировать\".\n"
                 "\n"
-                "3. Откройте Karing. Нажмите \"+\" → \"Добавить из ссылки\",\n"
-                "   вставьте ссылку и сохраните.\n"
+                "3. Откройте Clash Mi: \"Профили\" → \"+\" →\n"
+                "   \"Импорт из буфера обмена\" → \"Сохранить\".\n"
                 "\n"
-                "4. Появится профиль. Нажмите большую круглую кнопку\n"
-                "   подключения. Подключились — готово.\n"
+                "4. Появится профиль. Включите VPN в Clash Mi.\n"
+                "   Подключились — готово.\n"
                 "\n"
                 "=== ПОЛЕЗНО ЗНАТЬ ===\n"
                 "- Ничего в настройках менять не нужно, всё уже настроено.\n"
@@ -121,16 +125,19 @@ def _key_email(sub_url: str, lang: str, platform: str = None) -> tuple[str, str]
             "\n"
             "=== SETUP (step by step) ===\n"
             "1. Install the free app:\n"
-            "   - iPhone/iPad: Karing from the App Store (Hiddify was\n"
-            "     pulled from the RU App Store): https://karing.app/\n"
             "   - Android: Google Play, search \"Hiddify\"\n"
             "   - Windows/Mac: https://hiddify.com/\n"
+            f"   - iPhone/iPad: Clash Mi from the App Store: {CLASH_MI_URL}\n"
+            "     Clash Mi takes its own form of the key:\n"
+            f"     {clash_url}\n"
             "\n"
             "2. Copy your key link above (the long line starting with\n"
-            "   https://). Tap and hold it, then choose \"Copy\".\n"
+            "   https://; for Clash Mi, its own link from step 1). Tap\n"
+            "   and hold it, then choose \"Copy\".\n"
             "\n"
-            "3. Open the app. In Karing: \"+\" → \"Add from URL\".\n"
-            "   In Hiddify: \"+\" → \"Add from clipboard\". Paste and Save.\n"
+            "3. Open the app. In Hiddify: \"+\" → \"Add from clipboard\".\n"
+            "   In Clash Mi: \"My Profiles\" → \"+\" → \"Import From\n"
+            "   Clipboard\". Then Save.\n"
             "\n"
             "4. A profile appears. Tap the big round Power/Connect button\n"
             "   in the center. When it turns green you are connected.\n"
@@ -154,18 +161,20 @@ def _key_email(sub_url: str, lang: str, platform: str = None) -> tuple[str, str]
             "\n"
             "=== НАСТРОЙКА (по шагам) ===\n"
             "1. Установите бесплатное приложение:\n"
-            "   - iPhone/iPad: Karing из App Store (Hiddify и Happ удалили\n"
-            "     из RU App Store): https://karing.app/\n"
             "   - Android: Google Play, поиск \"Hiddify\"\n"
             "   - Windows/Mac: https://hiddify.com/\n"
+            f"   - iPhone/iPad: Clash Mi из App Store: {CLASH_MI_URL}\n"
+            "     Для Clash Mi ключ в своём виде:\n"
+            f"     {clash_url}\n"
             "\n"
             "2. Скопируйте ссылку-ключ целиком (длинная строка выше,\n"
-            "   начинается с https://). Нажмите и удерживайте её,\n"
-            "   затем выберите \"Копировать\".\n"
+            "   начинается с https://; для Clash Mi — его ссылку из\n"
+            "   шага 1). Нажмите и удерживайте её, затем выберите\n"
+            "   \"Копировать\".\n"
             "\n"
-            "3. Откройте приложение. В Karing: \"+\" → \"Добавить из ссылки\".\n"
-            "   В Hiddify: \"+\" → \"Добавить из буфера обмена\".\n"
-            "   Вставьте ссылку и сохраните.\n"
+            "3. Откройте приложение. В Hiddify: \"+\" → \"Добавить из\n"
+            "   буфера обмена\". В Clash Mi: \"Профили\" → \"+\" →\n"
+            "   \"Импорт из буфера обмена\". Затем сохраните.\n"
             "\n"
             "4. Появится профиль. Нажмите большую круглую кнопку\n"
             "   включения в центре. Стала зелёной — вы подключены.\n"
@@ -203,7 +212,7 @@ class EmailService:
                  platform: str = None) -> bool:
         """Send the backup-key letter. Returns True on relay acceptance.
 
-        ``platform`` selects the Karing-first iPhone variant when 'ios'..
+        ``platform`` selects the iPhone variant (Clash Mi) when 'ios'.
         """
         subject, body = _key_email(sub_url, lang, platform)
         return self._send(to_addr, subject, body)

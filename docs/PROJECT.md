@@ -119,8 +119,9 @@ xray-протоколы в одну строку на email; UNIQUE(email) ⇒ �
   `grant_paid_access` (Stars-оплата, `/approve_payment`, кнопка ⭐ в дашборде).
 - **`/sub/<token>`** — три формата: default sing-box JSON (Hiddify/Karing),
   `?format=links` (plain-text ссылки, v2rayNG), `?format=xray` (полный конфиг).
-- **Клиенты:** Android/PC → Hiddify, iOS → Karing (Happ и Hiddify выпилены из RU
-  App Store волнами 2026-07).
+- **Клиенты:** Android → NekoVPN (свой форк FlClash) или Hiddify/FlClash, ПК → FlClash
+  или Hiddify, iPhone → только Clash Mi с Clash-профилем (`?format=clash`, §69, с
+  2026-11-25; Hiddify, Happ и другие убраны из RU App Store).
 - **Email-only юзеры**: письмо на ящик → карточка с кнопками в топике заявок →
   демо-ключ письмом; либо админ вручную `/addmail user@x [ГБ] [дней]`.
   Провижн идемпотентен по `contact_email` (UUID сохраняется).

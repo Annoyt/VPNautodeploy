@@ -3,7 +3,7 @@ stable APK link ``GET /apk`` (bot/services/neko_client.py, plan E35).
 
 Real sqlite for the users; GitHub's release list is faked. The page gives
 Android the newest APK and, with the /sub token, the button that adds the
-subscription after the install; iPhones and computers get Karing and
+subscription after the install; iPhones get Clash Mi, computers
 FlClash instead.
 """
 
@@ -182,8 +182,9 @@ class TestPages:
         assert f'href="{BASE}/apk"' in body and 'Скачать NekoVPN' in body
         assert 'Версия 0.9.2-neko.3 · 57 МБ' in body
         assert f'href="{BASE}/apk?abi=armeabi-v7a"' in body
-        assert nc.HIDDIFY_URL in body and nc.FLCLASH_URL in body and nc.KARING_URL in body
-        for scheme in ('intent://', 'hiddify://', 'clash://', 'karing://'):
+        assert nc.HIDDIFY_URL in body and nc.FLCLASH_URL in body and nc.CLASH_MI_URL in body
+        assert 'karing' not in body.lower()
+        for scheme in ('intent://', 'hiddify://', 'clash://', 'clashmi://'):
             assert scheme not in body      # no token: nothing to add
         assert '@neko_vpnbot' in body
         assert 'Демо в NekoVPN — 10 ГБ в месяц' in body
@@ -203,7 +204,9 @@ class TestPages:
         assert body.count(nc.flclash_link(clash)) == 2
         assert f'hiddify://import/{clash}' not in body
         assert f'href="{nc.flclash_link(plain)}"' not in body
-        assert nc.karing_link(plain) in body
+        # iPhone: Clash Mi with the Clash profile, the app's patch off (§69).
+        assert nc.clash_mi_link(clash) in body
+        assert 'karing' not in body.lower()
         assert f'value="{plain}"' in body and f'value="{clash}"' in body
         assert '@neko_vpnbot: /sub' not in body
 
@@ -216,7 +219,7 @@ class TestPages:
     @pytest.mark.asyncio
     async def test_iphone_and_computer_open_their_sections(self, server):
         iphone = (await self._get(server, ua=IPHONE)).text
-        assert '<details id="ios" open>' in iphone and nc.KARING_URL in iphone
+        assert '<details id="ios" open>' in iphone and nc.CLASH_MI_URL in iphone
         assert '<details id="android">' in iphone
         desktop = (await self._get(server, ua=WINDOWS, lang='en-US,en')).text
         assert '<details id="desktop" open>' in desktop and 'Pick an app' in desktop
@@ -251,8 +254,9 @@ class TestPages:
         assert nc.hiddify_link(url) == 'hiddify://import/https://x/sub/t#NekoVPN'
         assert nc.flclash_link(url + '?format=clash') == (
             'clash://install-config?url=https%3A%2F%2Fx%2Fsub%2Ft%3Fformat%3Dclash')
-        assert nc.karing_link(url) == (
-            'karing://install-config?url=https%3A%2F%2Fx%2Fsub%2Ft&name=NekoVPN')
+        assert nc.clash_mi_link(url + '?format=clash') == (
+            'clashmi://install-config?url=https%3A%2F%2Fx%2Fsub%2Ft%3Fformat%3Dclash'
+            '&name=NekoVPN&overwrite=false')
 
     def test_open_page_falls_back_to_the_download_page(self):
         body = nc.render_open_page('https://x/sub/t?format=clash', 'ru',

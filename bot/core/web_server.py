@@ -2120,7 +2120,7 @@ class WebAppServer:
     async def handle_app(self, request: web.Request) -> web.Response:
         """``GET /app`` and ``GET /app/<token>`` — the app chooser
         (bot/services/neko_client.py): Android (NekoVPN, Hiddify, FlClash),
-        iPhone (Karing) and computer (FlClash, Hiddify), the visitor's own
+        iPhone (Clash Mi, §69) and computer (FlClash, Hiddify), the visitor's own
         platform opened. With the /sub token every app also gets «Добавить
         подписку» in the form it reads (its 404 and 410 are /sub's).
         Never cached, no referrer, not indexed, no script."""

@@ -514,13 +514,16 @@ def sos_text(urls: Optional[Tuple[str, str]], status: List[str], lang: str,
                  "<b>1. The emergency subscription</b> is unavailable right now — "
                  "refresh the main one (step 2), we're on it.")
     elif is_ios:
-        sb = html.escape(urls[0])
+        # iPhone: Clash Mi, which reads only the Clash profile (§69).
+        clash = html.escape(urls[1])
         block = ((f"<b>1. Добавь аварийную подписку.</b> {why}\n"
-                  f"Karing: <b>+ → Добавить из ссылки</b> → вставить:\n"
-                  f"<code>{sb}</code>\n{keep}") if ru else
+                  f"Clash Mi: скопируй ссылку → <b>Профили → + → Импорт из "
+                  f"буфера обмена → Сохранить</b>:\n"
+                  f"<code>{clash}</code>\n{keep}") if ru else
                  (f"<b>1. Add the emergency subscription.</b> {why}\n"
-                  f"Karing: <b>+ → Add from URL</b> → paste:\n"
-                  f"<code>{sb}</code>\n{keep}"))
+                  f"Clash Mi: copy the link → <b>My Profiles → + → Import From "
+                  f"Clipboard → Save</b>:\n"
+                  f"<code>{clash}</code>\n{keep}"))
     else:
         sb, clash = html.escape(urls[0]), html.escape(urls[1])
         block = ((f"<b>1. Добавь аварийную подписку.</b> {why} Лучше всего она "
@@ -537,11 +540,12 @@ def sos_text(urls: Optional[Tuple[str, str]], status: List[str], lang: str,
                   f"<code>{sb}</code>\n{keep}"))
     parts.append(block)
     if is_ios:
-        refresh = ("<b>2. Обнови основную подписку</b> в Karing (список профилей → "
-                   "обновить).\nНе помогло — переключись между Wi-Fi и мобильным "
+        refresh = ("<b>2. Обнови основную подписку</b> в Clash Mi: «Профили» → "
+                   "«Обновить».\nНе помогло — переключись между Wi-Fi и мобильным "
                    "интернетом." if ru else
-                   "<b>2. Refresh your main subscription</b> in Karing (profile list "
-                   "→ update).\nStill stuck? Switch between Wi-Fi and mobile data.")
+                   "<b>2. Refresh your main subscription</b> in Clash Mi: My "
+                   "Profiles → Update.\nStill stuck? Switch between Wi-Fi and "
+                   "mobile data.")
     else:
         refresh = ("<b>2. Обнови основную подписку.</b>\n"
                    "Hiddify: ⟳ на карточке профиля (или потяни экран вниз).\n"
@@ -596,10 +600,11 @@ def kit_intro_text(lang: str) -> str:
             "the VPN). They import with no internet at all — <b>save them now</b>, "
             "while everything works.\n\n"
             "• <b>FlClash</b> — the .yaml file: <b>Profiles → + → File</b>.\n"
+            "• <b>Clash Mi</b> (iPhone) — the .yaml file: save it to Files, then "
+            "<b>My Profiles → + → Import Profile File</b>.\n"
             "• <b>Hiddify</b> — the .json file: <b>+ → File</b>; no such button "
             "(Hiddify 4.1)? Open the .json, copy all of its text and add it via "
-            "<b>+ → Clipboard</b>.\n"
-            "• Other sing-box apps (Karing) — import the .json as a profile file.\n\n"
+            "<b>+ → Clipboard</b>.\n\n"
             "⚠️ The files hold your personal key — don't forward them. Servers "
             "change: grab a fresh kit (/kit) once a month."
         )
@@ -609,10 +614,11 @@ def kit_intro_text(lang: str) -> str:
         "Импортируются вообще без интернета — <b>сохрани их сейчас</b>, пока всё "
         "работает.\n\n"
         "• <b>FlClash</b> — файл .yaml: <b>Профили → + → Файл</b>.\n"
+        "• <b>Clash Mi</b> (iPhone) — файл .yaml: сохрани его в «Файлы», затем "
+        "<b>Профили → + → Импорт файла конфигурации</b>.\n"
         "• <b>Hiddify</b> — файл .json: <b>+ → Файл</b>; нет такой кнопки "
         "(Hiddify 4.1)? Открой .json, скопируй весь текст и добавь через "
-        "<b>+ → Буфер обмена</b>.\n"
-        "• Другие приложения на sing-box (Karing) — импорт .json как файла профиля.\n\n"
+        "<b>+ → Буфер обмена</b>.\n\n"
         "⚠️ В файлах твой личный ключ — не пересылай их. Серверы меняются: раз в "
         "месяц бери свежий комплект (/kit)."
     )
@@ -620,10 +626,12 @@ def kit_intro_text(lang: str) -> str:
 
 def kit_captions(lang: str) -> Dict[str, str]:
     if lang == 'en':
-        return {KIT_YAML_NAME: "FlClash: Profiles → + → File",
-                KIT_JSON_NAME: "Hiddify / sing-box: + → File"}
-    return {KIT_YAML_NAME: "FlClash: Профили → + → Файл",
-            KIT_JSON_NAME: "Hiddify / sing-box: + → Файл"}
+        return {KIT_YAML_NAME: ("FlClash: Profiles → + → File · Clash Mi: "
+                                "My Profiles → + → Import Profile File"),
+                KIT_JSON_NAME: "Hiddify: + → File"}
+    return {KIT_YAML_NAME: ("FlClash: Профили → + → Файл · Clash Mi: "
+                            "Профили → + → Импорт файла конфигурации"),
+            KIT_JSON_NAME: "Hiddify: + → Файл"}
 
 
 def kit_repeat_text(lang: str, minutes_ago: int) -> str:
@@ -707,7 +715,7 @@ def nudge_text(lang: str) -> str:
             "your app needs to refresh the subscription at least once:\n"
             "• Hiddify: ⟳ on the profile card (or pull down)\n"
             "• FlClash: Profiles → ⟳ at the top\n"
-            "• Karing: refresh the profile in the profile list\n\n"
+            "• Clash Mi (iPhone): My Profiles → Update\n\n"
             "Nothing to reinstall. VPN not connecting? /sos"
         )
     return (
@@ -716,7 +724,7 @@ def nudge_text(lang: str) -> str:
         "дошло до тебя, приложению нужно хотя бы раз обновить подписку:\n"
         "• Hiddify: ⟳ на карточке профиля (или потяни экран вниз)\n"
         "• FlClash: «Профили» → ⟳ вверху\n"
-        "• Karing: обнови профиль в списке профилей\n\n"
+        "• Clash Mi (iPhone): «Профили» → «Обновить»\n\n"
         "Ничего переустанавливать не нужно. VPN не подключается? /sos"
     )
 
@@ -732,10 +740,11 @@ def mail_sos_letter(urls: Optional[Tuple[str, str]], status: List[str],
         subject = "NekoVPN: аварийная подписка"
         if urls:
             links = (
-                "FlClash (Android/ПК): Профили → + → URL → вставьте:\n"
+                "FlClash (Android/ПК): Профили → + → URL → вставьте.\n"
+                "Clash Mi (iPhone): скопируйте ссылку → Профили → + →\n"
+                "Импорт из буфера обмена → Сохранить.\n"
                 f"{urls[1]}\n\n"
                 "Hiddify: скопируйте ссылку → + → Буфер обмена.\n"
-                "Karing (iPhone): + → Добавить из ссылки.\n"
                 f"{urls[0]}\n"
             )
         else:
@@ -754,7 +763,7 @@ def mail_sos_letter(urls: Optional[Tuple[str, str]], status: List[str],
             "=== 2. ОБНОВИТЕ ОСНОВНУЮ ПОДПИСКУ ===\n"
             "Hiddify: кнопка ⟳ на карточке профиля (или потяните экран вниз).\n"
             "FlClash: «Профили» → ⟳ вверху.\n"
-            "Karing: обновите профиль в списке профилей.\n"
+            "Clash Mi: «Профили» → «Обновить».\n"
             "Не помогло — переключитесь между Wi-Fi и мобильным интернетом.\n"
             "\n"
             "=== 3. ЧТО СЕЙЧАС РАБОТАЕТ ===\n"
@@ -767,10 +776,11 @@ def mail_sos_letter(urls: Optional[Tuple[str, str]], status: List[str],
     subject = "NekoVPN: emergency subscription"
     if urls:
         links = (
-            "FlClash (Android/PC): Profiles → + → URL → paste:\n"
+            "FlClash (Android/PC): Profiles → + → URL → paste.\n"
+            "Clash Mi (iPhone): copy the link → My Profiles → + →\n"
+            "Import From Clipboard → Save.\n"
             f"{urls[1]}\n\n"
             "Hiddify: copy the link → + → Clipboard.\n"
-            "Karing (iPhone): + → Add from URL.\n"
             f"{urls[0]}\n"
         )
     else:
@@ -788,7 +798,7 @@ def mail_sos_letter(urls: Optional[Tuple[str, str]], status: List[str],
         "=== 2. REFRESH YOUR MAIN SUBSCRIPTION ===\n"
         "Hiddify: the ⟳ button on the profile card (or pull down).\n"
         "FlClash: Profiles → ⟳ at the top.\n"
-        "Karing: refresh the profile in the profile list.\n"
+        "Clash Mi: My Profiles → Update.\n"
         "Still stuck? Switch between Wi-Fi and mobile data.\n"
         "\n"
         "=== 3. WHAT WORKS RIGHT NOW ===\n"

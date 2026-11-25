@@ -239,9 +239,13 @@ class TestClientChoice:
         assert kb['inline_keyboard'][0] == DOWNLOAD_ROW
         assert kb['inline_keyboard'][-1][0]['callback_data'] == 'report_failure'
 
-    def test_iphone_card_stays_karing_only(self):
+    def test_iphone_card_is_clash_mi_only(self):
+        # §69: iPhone is Clash Mi with the Clash profile, nothing else.
         text, kb = build_key_delivery_message(_card_user(platform='ios'), _config())
-        assert 'Karing' in text and 'FlClash' not in text and 'format=clash' not in text
+        assert 'Clash Mi' in text and f'<code>{_sub_url()}?format=clash</code>' in text
+        for other in ('Karing', 'Hiddify', 'FlClash', '/raw'):
+            assert other not in text
+        assert f'<code>{_sub_url()}</code>' not in text
         assert DOWNLOAD_ROW not in kb['inline_keyboard']
 
     def _sub(self, tmp_path, platform):
@@ -259,9 +263,10 @@ class TestClientChoice:
         assert f'<code>{url}?format=clash</code>' in kw['text']
         assert kw['reply_markup']['inline_keyboard'][0] == DOWNLOAD_ROW
 
-    def test_sub_command_iphone_unchanged(self, tmp_path):
+    def test_sub_command_iphone_gets_clash_mi(self, tmp_path):
         kw = self._sub(tmp_path, 'ios')
-        assert 'format=clash' not in kw['text']
+        assert 'Clash Mi' in kw['text'] and 'Karing' not in kw['text']
+        assert f'<code>{_sub_url()}?format=clash</code>' in kw['text']
         assert DOWNLOAD_ROW not in kw['reply_markup']['inline_keyboard']
 
     def test_no_play_link_for_flclash(self):

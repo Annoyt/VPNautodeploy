@@ -1,0 +1,63 @@
+# §69. iPhone: Clash Mi only (2026-11-25)
+
+- **Why.**
+  - The RU App Store dropped the proxy clients in waves:
+    - Hiddify on 2025-03-15;
+    - Happ in every listing;
+    - Streisand, V2Box and v2RayTun on 2026-03-28;
+    - INCY on 2026-10-27, together with its TestFlight.
+  - Karing is still there.
+  - Paid apps are out of reach: since 2026-04-01 a Russian Apple account pays only from its balance (support.apple.com/en-us/126891).
+  - Checked on 2026-11-25 with the iTunes Lookup API, `https://itunes.apple.com/lookup?id=<id>&country=ru`. `resultCount: 0` means the app is not in the Russian store.
+- **The owner, 2026-11-25:**
+  - «пусть будет clash mi» and «остальные для apple удали»: the iPhone gets one app, Clash Mi (SUPERNOVA NEBULA LLC, the makers of Karing; App Store id 6744321968, free);
+  - send iPhone key holders the store link and the new subscription.
+
+  Clash Mi runs mihomo, the core of NekoVPN and FlClash. So the iPhone gets the same Clash profile, with all our rules.
+- **What an iPhone user (`platform == 'ios'`) reads now:**
+  - **The key card and `/sub`:** `clash_mi_text` in `bot/handlers/callbacks/user.py`.
+    - Steps: install from the App Store, «📲 Добавить в Clash Mi», turn the VPN on.
+    - By hand: the `?format=clash` link → Профили → + → Импорт из буфера обмена → Сохранить.
+    - No raw keys, no other app. The platform button reads «🍎 iPhone».
+  - **The button** (`neko_client.clash_mi_button_row`, iPhone key holders only) opens `/app/<token>`.
+    - Telegram buttons take only http(s).
+    - The page's iPhone section has one app, Clash Mi. Its «Добавить подписку» is `clashmi://install-config?url=<the Clash profile>&name=NekoVPN&overwrite=false` (`neko_client.clash_mi_link`).
+  - **SOS:** the emergency profile's Clash link and «Профили» → «Обновить».
+    - The mail SOS letter and the nudge name Clash Mi for iPhone.
+    - In the offline kit the .yaml serves Clash Mi too (Профили → + → Импорт файла конфигурации).
+  - **The key letter:**
+    - in the iPhone letter the key is the Clash link;
+    - the general letter gives iPhones their own line with it.
+- **Clash Mi, from its source (KaringX/clashmi):**
+  - **Formats.** It accepts only Clash YAML: no sing-box JSON, no share links.
+  - **Link schemes.** On iOS it registers `clash://` and `clashmi://`. The bot uses `clashmi://`: another app may claim `clash://`. FlClash's own link on the page stays `clash://`.
+  - **`overwrite=false`.** On the install link it chooses the built-in patch «Встроенный - не перезаписывается»: the app lays none of its own DNS or tun settings over our profile.
+    - A link added by hand (clipboard, QR) gets the app's default patch, «Встроенная функция переопределения».
+    - The subscription URL's own query is not read for that choice.
+  - **Labels** (its ru / en translations, quoted in the bot's steps):
+    - Профили / My Profiles;
+    - Импорт из буфера обмена / Import From Clipboard;
+    - Сохранить / Save;
+    - Обновить / Update;
+    - Импорт файла конфигурации / Import Profile File.
+  - **Its User-Agent is not known yet.** `/sub?format=clash` serves it as it serves any Clash client but NekoVPN: no `xhr` and no server-first twins.
+- **Unchanged:**
+  - the plain URL still serves sing-box JSON, so installed Karing copies keep working;
+  - Android and computers keep their app choice for now.
+- **Not checked on a phone:**
+  - the import, the button's page, the routing (Russian sites directly), calls, XHTTP;
+  - so the iPhone's quota line stays «Учитывается только трафик через VPN».
+- **The broadcast, `scripts/ios_clash_mi_notify.py`.**
+  - **Running it:**
+    - a dry run by default;
+    - `--send` delivers;
+    - `--to ID,ID` sends to a test chat, without the platform check.
+  - **Recipients:** key holders on iPhone. Telegram chats only, payers past their date left out.
+  - **The message:** each recipient's own Clash link in the card's steps, with «⬇️ Clash Mi в App Store» and «📲 Добавить в Clash Mi».
+  - **Audit:** `admin_actions('owner', 'ios_clash_mi_notify', <chat_id>, 'clash-mi-2026-11')`. A second run skips everyone already in it.
+  - **The dry run's page check.** It asks the bot's own listener for the first recipient's `/app` page. A bot without this change still offers Karing there, so the check shows whether this change is deployed.
+  - **On 2026-11-25** 29 demo keys had the iPhone platform. In ten days the bot saw 7 profile fetches from Karing on an iPhone.
+- **Tests:**
+  - `tests/integration/test_ios_clash_mi.py` and `test_ios_clash_mi_notify.py`;
+  - `test_neko_download.py`, `test_clash_profile.py` and `test_sos_channels.py` pin Clash Mi instead of Karing;
+  - mutants on the import link, the card's link, the SOS link and the recipients' platform were killed.
