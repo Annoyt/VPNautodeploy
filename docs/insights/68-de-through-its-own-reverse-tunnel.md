@@ -70,7 +70,11 @@ From the entry host, through DE's real address:
 - **Not done:**
   - DE as a backup exit for users behind entry, when exit's tunnel is down. That is the owner's call.
   - The reach check through DE (`EXIT_TRANSITS` `de=…:9441`) still reads dark: 9441 is not in the tunnel.
-  - Leftovers on DE: `nekovpn-transit.service` (the DNAT transit of §59) and the tinyproxy and ufw rules for 130.49.146.10.
+- **Removed on DE the same day** (the owner's «да давай оба пункта»):
+  - the DNAT transit of §59: `/root/nekovpn-transit/remove.sh`, `nekovpn-transit.service` disabled;
+  - the ufw rules and the tinyproxy `Allow` for entry's old address 130.49.146.10; a backup is in `/etc/tinyproxy/tinyproxy.conf.bak-oldentry-20261125-133028`.
+  - The tunnel arrives from 127.0.0.1, which tinyproxy allows.
+  - The first request after the tinyproxy restart hung (a read timeout); the next ones answered in 0.4 s.
 - **Rollback:**
   - DE: `systemctl disable --now nekovpn-revssh-de`.
   - entry: `systemctl disable --now nekovpn-de-dnat` (its `ExecStop` removes the rules), then remove `61-nekovpn-de.conf` and run `systemctl reload ssh`, then `userdel -r nekovpn-de`.
